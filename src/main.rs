@@ -1,6 +1,8 @@
 mod create_inputs_for_testing;
 mod lexer_functions;
+mod database;
 use std::io::{Error,ErrorKind};
+use database::connect;
 use lexer_functions::{
     lexer_boolean_match,
     lexer_group_match,
@@ -285,7 +287,7 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
 }
 
 
-fn parse(input : String) -> Result<AST, Error>{
+pub fn parse(input : String) -> Result<AST, Error>{
     let tokens = match lexer(input){
         Ok(a) => {println!("{:#?}",a);a},
         Err(e) => {return Err(e)}
@@ -294,6 +296,11 @@ fn parse(input : String) -> Result<AST, Error>{
 }
 
 fn main(){
-    println!("{:?}",parse("EDIT ROW ['myfavorite']['abc'] ON 'nicenice'".to_string()))
+    if let Ok(c) = connect("/home/theo/Desktop/tytodb"){
+        println!("{:?}",c.execute("EDIT ROW ['myfavorite']['abc'] ON 'nicenice'"))
+    }else {
+        eprintln!("bruh")
+    }
+    
     
 }
