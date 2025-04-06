@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::format, fs::{self, File}, io::{Error, Read, Write}, mem::discriminant, os::unix::fs::FileExt, sync::{Arc, Mutex}};
+use std::{collections::HashMap, fmt::format, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
@@ -153,6 +153,8 @@ impl Container{
         file.flush()?;       
         file.sync_all()?;   
         file.commit()?;     
+        self.file = fs::File::open(&self.path)?;
+
 
 
         Ok(())
@@ -253,7 +255,7 @@ impl Container{
         Ok(value)
     }
 }
-
+const SETTINGS_FILE : &str = "settings.yaml";
 fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
     let column_names_size = max_str_len * max_columns;
     let column_types_size = max_columns;
@@ -261,12 +263,9 @@ fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
 }
 impl Database {
     fn set_default_settings(&self) -> Result<(), Error> {
-        let path = format!("{}/settings.yaml", self.location);
+        let path = format!("{}/{}", self.location,SETTINGS_FILE);
         if !match fs::metadata(&path) { Ok(_) => true, Err(_) => false } {
-            let mut file = match fs::File::create(path) {
-                Ok(f) => f,
-                Err(e) => return Err(e),
-            };
+            let mut file =fs::File::create_new(&path)?;
             let content = format!(r#"
 # WARNING: If you change 'max_columns' or 'max_str_length' after creating a container, it might not work until you revert the changes.
 max_columns: {}
@@ -286,7 +285,9 @@ memory_limit: {}
         Ok(())
     }
     fn load_containers(&mut self) -> Result<(), Error> {
-        let path = std::path::PathBuf::from(&self.location).join("containers.yaml");
+        let path = std::path::PathBuf::from(format!("{}/containers.yaml",&self.location));
+        println!("{:?}",path);
+
 
         // If not exist, write empty Vec<String>
         if !path.exists() {
@@ -300,9 +301,12 @@ memory_limit: {}
         self.containers = serde_yaml::from_str(&raw)
             .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
+
         self.headers.clear();
         for contain in self.containers.iter(){
+
             let he = self.get_container_headers(&contain)?;
+     
             self.headers.push(he.clone());
             let mut element_size : usize = 0;
             for el in he.1.iter(){
@@ -315,7 +319,7 @@ memory_limit: {}
                     AlbaTypes::NONE => 0
                 }
             }
-            self.container.insert(contain.to_string(),Container::new(contain, element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone())?);
+            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone())?);
         }
         println!("headers: {:?}",self.headers);
         Ok(())
@@ -328,78 +332,56 @@ memory_limit: {}
         fs::write(&path, yaml)?;
         Ok(())
     }
-    fn load_settings(&mut self) -> Result<(), Error>{
-        let path = format!("{}/settings.yaml",self.location);
-        if match fs::exists(&path){Ok(a)=>a,Err(e)=>{return Err(e)}}{
-            let mut file = match fs::File::open(path){
-                Ok(a)=>a,
-                Err(e)=>{
-                    return Err(e)
-                }
-            };
-            let mut raw_settings : String = String::new();
-            match file.read_to_string(&mut raw_settings){
-                Ok(_)=>{},
-                Err(e) => {
-                    return Err(e)
-                }
-            }
-            let mut settings = match serde_yaml::from_str::<Settings>(&raw_settings){Ok(a)=>a,Err(e)=>{return Err(gerr(&e.to_string()))}};
-            let mut rewrite = false;
-
-            if settings.max_columns <= settings.min_columns{
-                settings.min_columns = 1;
-                rewrite = true
-            }
-            if settings.max_columns <= 1{
-                settings.max_columns = 10;
-                rewrite = true
-            }
-
-            if settings.min_columns > settings.max_columns{
-                settings.min_columns = 1;
-                rewrite = true
-            }
-
-            if settings.memory_limit < 1_048_576{
-                settings.memory_limit = 1_048_576;
-                rewrite = true
-            }
-
-            if settings.max_str_length < 1{
-                settings.max_str_length = 1;
-                rewrite = true
-            }
-            if rewrite{
-                
-                match file.write_all(format!(r#"
-# WARNING: If you change 'max_columns' or 'max_str_length' after creating a container, it might not work until you revert the changes.
-max_columns: {}
-min_columns: {}
-max_str_length: {}
-
-auto_commit: {}
-                
-# Memory limit: defines how much memory the database can use during operations. Setting a higher value might improve performance, but exceeding hardware limits could have the opposite effect.
-memory_limit: {}
-                "#,settings.max_columns,settings.min_columns,settings.max_str_length,settings.auto_commit,settings.memory_limit).as_bytes()){
-                    Ok(_)=>{},
-                    Err(e)=>{return Err(e)}
-                };
-            }
-            self.settings = settings;
-
-        }else{
-            if let Err(e) = self.set_default_settings(){
-                return Err(e)
-            }
-            if let Err(e) = self.load_settings(){
-                return Err(e)
-            }
+    fn load_settings(&mut self) -> Result<(), Error> {
+        let dir = PathBuf::from(&self.location);
+        let path = dir.join(SETTINGS_FILE);
+        fs::create_dir_all(&dir)?;
+        println!("create dir all");
+        if path.exists() && fs::metadata(&path)?.is_dir() {
+            println!("remove dir all");
+            fs::remove_dir(&path)?;
         }
-        return Ok(())
+        if !path.is_file() {
+            println!("not file");
+            self.set_default_settings()?; 
+        }
+        let mut rewrite = true;
+        let raw = fs::read_to_string(&path)
+            .map_err(|e| Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e)))?;
+        let mut settings: Settings = serde_yaml::from_str(&raw)
+            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Invalid {}: {}", SETTINGS_FILE, e)))?;
+
+        if settings.max_columns <= settings.min_columns {
+            settings.min_columns = 1;
+            rewrite = true;
+        }
+        if settings.max_columns <= 1 {
+            settings.max_columns = 10;
+            rewrite = true;
+        }
+        if settings.min_columns > settings.max_columns {
+            settings.min_columns = 1;
+            rewrite = true;
+        }
+        if settings.memory_limit < 1_048_576 {
+            settings.memory_limit = 1_048_576;
+            rewrite = true;
+        }
+        if settings.max_str_length < 1 {
+            settings.max_str_length = 1;
+            rewrite = true;
+        }
+        if rewrite {
+            let new_yaml = serde_yaml::to_string(&settings)
+                .map_err(|e| Error::new(ErrorKind::Other, format!("Serialize failed: {}", e)))?;
+            fs::write(&path, new_yaml)
+                .map_err(|e| Error::new(e.kind(), format!("Failed to rewrite {}: {}", SETTINGS_FILE, e)))?;
+        }
+
+        self.settings = settings;
+        Ok(())
     }
-    
+
     fn get_container_headers(&self, container_name: &str) -> Result<(Vec<String>, Vec<AlbaTypes>), Error> {
         let path = format!("{}/{}",self.location,container_name);
         let max_columns : usize = self.settings.max_columns as usize;
@@ -594,6 +576,9 @@ memory_limit: {}
                                 .ok_or_else(|| gerr("Internal error: missing value during assignment."))?;
                             let expected_val = container.columns.get(ri)
                                 .ok_or_else(|| gerr("Internal error: missing column type definition."))?;
+                            let _ = discriminant(input_val) == discriminant(expected_val)
+                                || (matches!(expected_val, AlbaTypes::Bigint(_)) && matches!(input_val, AlbaTypes::Int(_)));
+
                 
                             if discriminant(input_val) == discriminant(expected_val) {
                                 if discriminant(expected_val) == discriminant(&AlbaTypes::Text(String::new())){
@@ -613,6 +598,7 @@ memory_limit: {}
                                             file.flush()?;
                                             file.sync_all()?;
                                             file.commit()?;
+                                            
                                         },
                                         _ => {}
                                     }
@@ -646,13 +632,25 @@ memory_limit: {}
 }
 
 pub fn connect(path : &str) -> Result<Database, Error>{
-    if !match fs::exists(path){Ok(b)=>b,Err(e)=>{return Err(e)}}{
-        if let Err(e ) = fs::create_dir(path){return Err(e)}
+    let db_path = PathBuf::from(path);
+    println!("{}",path);
+    if db_path.exists() {
+        if !db_path.is_dir() {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("`{}` exists but is not a directory", path),
+            ));
+        }
+    } else {
+        fs::create_dir_all(&db_path)?;
     }
+
     let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new()};
     if let Err(e) = db.load_settings(){
+        eprintln!("err: load_settings");
         return Err(e)
     };if let Err(e) = db.load_containers(){
+        eprintln!("err: load_containers");
         return Err(e)
     };
     println!("{:?}",db.settings);

@@ -194,7 +194,7 @@ fn debug_create_command(tokens: &Vec<Token>) -> Result<AST,Error>{
                         if let Some(bruh) = parser_debugger_extract_group_albatype(&mut col_values, tokens, 3){
                             return Err(bruh)
                         }
-                        if let Some(cn) = tokens.get(4){
+                        if let Some(cn) = tokens.get(5){
                             match cn{
                                 Token::String(s) => {
                                     container = s.clone()
@@ -247,11 +247,10 @@ fn debug_edit_command(tokens : &Vec<Token>) -> Result<AST,Error> {
                         if tokens.len() > 7{
                             cond = Some(tokens[6..].to_vec())
                         }
-                        return Ok(AST::EditRow(AST_EDIT_ROW{
+                        return Ok(AST::CreateRow(AST_CREATE_ROW{
                             col_nam:ed_col_name,
                             col_val: ed_col_type,
-                            container: ed_container,
-                            conditions: cond.unwrap_or_default()
+                            container: ed_container
                         }))
                     },
                     _ => {
@@ -286,16 +285,24 @@ pub fn parse(input : String) -> Result<AST, Error>{
         Ok(a) => {a},
         Err(e) => {return Err(e)}
     };
+    println!("{:?}",tokens);
     return debug_tokens(&tokens)
 }
 
 fn main() {
     match connect("/home/theo/Desktop/tytodb") {
         Ok(mut c) => {
+            //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
             match c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]") {
                 Ok(result) => println!("{:?}", result),
                 Err(e) => eprintln!("Error executing command: {}", e),
             }
+            for i in [1..100000]{
+            match c.execute("CREATE ROW ['my_text'][false] ON 'my_container' ") {
+                Ok(result) => println!("{:?}", result),
+                Err(e) => eprintln!("Error executing command: {}", e),
+            
+            }}
         }
         Err(e) => eprintln!("Error connecting to database: {}", e),
     }
