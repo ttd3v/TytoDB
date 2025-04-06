@@ -24,7 +24,7 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
     if input.len() == 0{
         return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()))
     }
-    // print!("{}\n",input);
+    print!("{}\n",input);
     let mut characters = input.trim().chars().peekable();
     let mut result:Vec<Token> = Vec::with_capacity(20);
     let mut dough : String = String::new();
@@ -33,11 +33,11 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
         dough.push(c);
         lexer_ignore_comments_match(&mut dough, &mut characters) ;
         lexer_keyword_match(&mut result, &mut dough);
+        lexer_group_match(&mut result, &mut dough, &mut characters);
         lexer_boolean_match(&mut result, &mut dough, &mut characters) ;
         lexer_operator_match(&mut result, &mut dough, &mut characters) ;
         lexer_number_match(&mut result, &mut dough, &mut characters) ;
         lexer_string_match(&mut result, &mut dough, &mut characters) ;
-        lexer_group_match(&mut result, &mut dough, &mut characters);
     }
     
     if result.len() > 0{
@@ -77,6 +77,7 @@ enum AST{
     EditRow(AST_EDIT_ROW),
     DeleteRow(AST_DELETE_ROW),
     DeleteContainer(AST_DELETE_CONTAINER),
+    
 }
 
 
@@ -122,7 +123,7 @@ fn parser_debugger_extract_string(output : &mut String,list : &Vec<Token>,index 
                 output.push_str(s.as_str());
                 return None
             },
-            _ => {return Some(gerr("Invalid type, must be a string"));}
+            _ => {print!("{:?}",output);return Some(gerr("Invalid type, must be a string"));}
         }
     }else{
         return Some(gerr("Missing a string"));
@@ -150,9 +151,9 @@ fn parser_debugger_extract_group_albatype(output: &mut Vec<AlbaTypes>, list: &[T
         match token {
             Token::Group(g) => {
                 for item in g {
-                    match AlbaTypes::try_from(item) {
+                    match AlbaTypes::try_from(item.clone()) {
                         Ok(value) => output.push(value),
-                        Err(_) => return Some(gerr("Invalid type")),
+                        Err(e) => return Some(gerr(&format!("{}",e))),
                     }
                 }
                 None
@@ -297,7 +298,7 @@ pub fn parse(input : String) -> Result<AST, Error>{
 
 fn main(){
     if let Ok(c) = connect("/home/theo/Desktop/tytodb"){
-        println!("{:?}",c.execute("EDIT ROW ['myfavorite']['abc'] ON 'nicenice'"))
+        println!("{:?}",c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"))
     }else {
         eprintln!("bruh")
     }

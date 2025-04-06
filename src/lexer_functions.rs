@@ -1,4 +1,4 @@
-use crate::lexer;
+use crate::{gerr, lexer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token{
@@ -16,29 +16,44 @@ pub enum AlbaTypes{
     Int(i32),
     Bigint(i64),
     Float(f64),
-    Bool(bool)
+    Bool(bool),
+    NONE
 }
+impl TryFrom<Token> for AlbaTypes {
+    type Error = &'static str;
 
-impl TryFrom<&Token> for AlbaTypes {
-    type Error = String;
-    fn try_from(token: &Token) -> Result<Self, Self::Error> {
+    fn try_from(token: Token) -> Result<Self, Self::Error> {
         match token {
-            Token::String(s) => Ok(AlbaTypes::Text(s.clone())),
-            Token::Int(i) => {
-                if *i >= i32::MIN as i64 && *i <= i32::MAX as i64 {
-                    Ok(AlbaTypes::Int(*i as i32))
-                } else {
-                    Ok(AlbaTypes::Bigint(*i))
-                }
+            Token::String(s) =>
+                Ok(AlbaTypes::Text(s)), // moved, no clone
+
+            Token::Int(i) if (i32::MIN as i64) <= i && i <= (i32::MAX as i64) =>
+                Ok(AlbaTypes::Int(i as i32)),
+
+            Token::Int(i) =>
+                Ok(AlbaTypes::Bigint(i)),
+
+            Token::Float(f) =>
+                Ok(AlbaTypes::Float(f)),
+
+            Token::Bool(b) =>
+                Ok(AlbaTypes::Bool(b)),
+            Token::Keyword(s) => match s.to_uppercase().as_str() {
+                "INT" => Ok(AlbaTypes::Int(0)),        // default dummy values
+                "BIGINT" => Ok(AlbaTypes::Bigint(0)),
+                "FLOAT" => Ok(AlbaTypes::Float(0.0)),
+                "BOOL" => Ok(AlbaTypes::Bool(false)),
+                "TEXT" => Ok(AlbaTypes::Text(String::new())),
+                _ => return Err(format!("Unknown type keyword: {}", s).leak()),
             },
-            Token::Float(f) => Ok(AlbaTypes::Float(*f)),
-            Token::Bool(b) => Ok(AlbaTypes::Bool(*b)),
-            _ => Err(format!("Token {:?} cannot be converted to AlbaTypes", token)),
+            _ =>{
+                let va = format!("unsupported token type: {:#?}",token);
+                return Err(va.leak());
+            }
         }
     }
 }
-
-const KEYWORDS: &[&str] = &["CREATE","DELETE","EDIT","SEARCH","WHERE","ROW","CONTAINER","ON","USING","INT","BIGINT","STRING","BOOLEAN","FLOAT"];
+const KEYWORDS: &[&str] = &["CREATE","DELETE","EDIT","SEARCH","WHERE","ROW","CONTAINER","ON","USING","INT","BIGINT","TEXT","BOOL","FLOAT"];
 
 pub fn lexer_keyword_match(result: &mut Vec<Token>, dough: &mut String) -> bool {
     let keyword = dough.to_uppercase(); // Remove spaces and normalize
@@ -72,33 +87,51 @@ pub fn lexer_string_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,doug
     }
     false
 }    
-pub fn lexer_group_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,dough : &mut String, itr : &mut T) -> bool{
-    if dough.starts_with('['){
-        
-            while let Some(s) = itr.next() {
-                dough.push(s);
-                if s == ']' {
-                    break;
-                }
+pub fn lexer_group_match<T: Iterator<Item = char>>(
+    result: &mut Vec<Token>,
+    dough: &mut String,
+    itr: &mut T,
+) -> bool {
+    // we assume `dough` already contains the leading '['
+    if dough.starts_with('[') {
+        // consume until ']' inclusive
+        while let Some(c) = itr.next() {
+            dough.push(c);
+            if c == ']' {
+                break;
             }
-            if dough.starts_with('[') && dough.ends_with(']'){
-                let st = &dough[1..dough.len()-1];
-                let mut abstract_tokens : Vec<Token> = Vec::with_capacity(20);
-                for i in st.split(','){
-                    if let Ok(v) = lexer(i.to_string()){
-                        if let Some(f) = v.first(){
-                            abstract_tokens.push(f.clone())
-                        }
+        }
+
+        if dough.ends_with(']') {
+            // strip the brackets
+            let inner = &dough[1..dough.len() - 1];
+            let mut abstract_tokens = Vec::with_capacity(16);
+
+            for part in inner.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                match lexer(part.to_string()) {
+                    Ok(mut toks) if !toks.is_empty() => {
+                        abstract_tokens.push(toks.remove(0));
+                    }
+                    _ => {
+                        // you could log or return Err here
+                        continue;
                     }
                 }
-                dough.clear();
-                result.push(Token::Group(abstract_tokens));
-                return true
             }
-        
+
+            dough.clear();
+            result.push(Token::Group(abstract_tokens));
+            return true;
+        }
     }
+
     false
-}  
+}
+
 const RADIX : u32= 10;
 pub fn lexer_number_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,dough : &mut String, itr : &mut std::iter::Peekable<T>) -> bool{
     if let Some(d) = dough.chars().nth(0){
