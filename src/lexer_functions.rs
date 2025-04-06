@@ -92,7 +92,6 @@ pub fn lexer_group_match<T: Iterator<Item = char>>(
     dough: &mut String,
     itr: &mut T,
 ) -> bool {
-    // we assume `dough` already contains the leading '['
     if dough.starts_with('[') {
         // consume until ']' inclusive
         while let Some(c) = itr.next() {

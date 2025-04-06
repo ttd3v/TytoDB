@@ -296,12 +296,14 @@ pub fn parse(input : String) -> Result<AST, Error>{
     return debug_tokens(&tokens)
 }
 
-fn main(){
-    if let Ok(c) = connect("/home/theo/Desktop/tytodb"){
-        println!("{:?}",c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"))
-    }else {
-        eprintln!("bruh")
+fn main() {
+    match connect("/home/theo/Desktop/tytodb") {
+        Ok(c) => {
+            match c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]") {
+                Ok(result) => println!("{:?}", result),
+                Err(e) => eprintln!("Error executing command: {}", e),
+            }
+        }
+        Err(e) => eprintln!("Error connecting to database: {}", e),
     }
-    
-    
 }
