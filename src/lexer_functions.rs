@@ -1,4 +1,4 @@
-use crate::{gerr, lexer};
+use crate::lexer;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token{
@@ -19,6 +19,8 @@ pub enum AlbaTypes{
     Bool(bool),
     NONE
 }
+
+
 impl TryFrom<Token> for AlbaTypes {
     type Error = &'static str;
 
@@ -253,7 +255,6 @@ pub fn lexer_boolean_match<T: Iterator<Item = char>>(
     dough: &mut String,
     _itr: &mut std::iter::Peekable<T>
 ) -> bool{
-    // Trim any whitespace from the dough
     let trimmed = dough.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         result.push(Token::Bool(true));

@@ -15,16 +15,10 @@ use lexer_functions::{
     AlbaTypes
 };
 
-
-
-
-
-
 fn lexer(input : String)->Result<Vec<Token>,Error>{
     if input.len() == 0{
         return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()))
     }
-    print!("{}\n",input);
     let mut characters = input.trim().chars().peekable();
     let mut result:Vec<Token> = Vec::with_capacity(20);
     let mut dough : String = String::new();
@@ -41,7 +35,6 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
     }
     
     if result.len() > 0{
-        println!("{:?}",result);
         return Ok(result)
     }
     drop(result);
@@ -290,7 +283,7 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
 
 pub fn parse(input : String) -> Result<AST, Error>{
     let tokens = match lexer(input){
-        Ok(a) => {println!("{:#?}",a);a},
+        Ok(a) => {a},
         Err(e) => {return Err(e)}
     };
     return debug_tokens(&tokens)
@@ -298,7 +291,7 @@ pub fn parse(input : String) -> Result<AST, Error>{
 
 fn main() {
     match connect("/home/theo/Desktop/tytodb") {
-        Ok(c) => {
+        Ok(mut c) => {
             match c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]") {
                 Ok(result) => println!("{:?}", result),
                 Err(e) => eprintln!("Error executing command: {}", e),
