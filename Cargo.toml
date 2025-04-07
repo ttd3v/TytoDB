@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-atomic-write-file = "0.2.3"
 rand = "0.8" # Use the latest compatible version
 rand_chacha = "0.3"
 serde = {version="1.0.219", features=["derive"]}

@@ -1,8 +1,7 @@
-use std::{collections::HashMap, fmt::format, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashMap, fmt::format, fs::{self, File}, io::{Error, ErrorKind, Read, Seek, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use atomic_write_file::AtomicWriteFile;
 use crate::{gerr, lexer_functions::AlbaTypes, parse, AST};
 use rand::{Rng, distributions::Alphanumeric};
 
@@ -43,7 +42,13 @@ struct Settings{
     auto_commit : bool
 }
 
-
+fn text_type_identifier(max_str_length: usize) -> u8 {
+    if max_str_length > 255 {
+        255u8
+    } else {
+        max_str_length as u8
+    }
+}
 fn from_usize_to_u8(i:usize) -> u8{
     return i as u8;
 }
@@ -88,78 +93,78 @@ impl Container{
         Ok((length-self.headers_offset)/self.element_size as u64)
     }
     pub fn get_next_addr(&self) -> Result<u64, Error> {
-        let mut value = self.arrlen()? + 1;
+        // arrlen() calculates the number of rows already written.
+        let current_rows = self.arrlen()?;
+        // Look in the MVCC hashmap to see if a deleted row exists so we can reuse its position.
         let mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
-        let mut max_key = 0;
         for (&key, (deleted, _)) in mvcc_guard.iter() {
             if *deleted {
                 return Ok(key);
             }
-            if key > max_key {
-                max_key = key;
-            }
         }
-        if max_key >= value {
-            value = max_key + 1;
-        }
-        Ok(value)
-    }    
+        // No deleted slot; the next available row is at the end (0-based)
+        Ok(current_rows)
+    } 
     pub fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
         let ind = self.get_next_addr()?;
         let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
         mvcc_guard.insert(ind, (false,data.clone()));
         Ok(())
     }
-    fn commit(&mut self) -> Result<(),Error>{
+    fn commit(&mut self) -> Result<(), Error> {
+        self.file = fs::OpenOptions::new().read(true).write(true).open(&self.path)?;
         let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
-        let mut insertions : Vec<(u64,Vec<AlbaTypes>)> = Vec::new();
-        let mut deletes : Vec<(u64,Vec<AlbaTypes>)> = Vec::new();
-        for (index,value) in mvcc_guard.iter(){
-            let v = (*index,value.1.clone());
-            if value.0{
+        let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
+        let mut deletes: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
+    
+        for (index, value) in mvcc_guard.iter() {
+            let v = (*index, value.1.clone());
+            if value.0 {
                 deletes.push(v);
-            }else{
+            } else {
                 insertions.push(v);
             }
         }
         mvcc_guard.clear();
-
+    
         insertions.sort_by_key(|(index, _)| *index);
         deletes.sort_by_key(|(index, _)| *index);
-
-
-        let mut file = AtomicWriteFile::open(self.path.clone())?;
+        assert!(self.headers_offset > 0, "headers_offset is not set properly!");
+    
         let hdr_off = self.headers_offset;
-        let row_sz  = self.element_size as u64;
+        let row_sz = self.element_size as u64;
         let mut buf = vec![0u8; self.element_size];
-
-        for item in insertions{
-            file.write_all_at(&self.serialize_row(&item.1)?.as_slice(), item.0)?;
+    
+        // Escreve os dados novos (inserções)
+        for (row_index, row_data) in insertions {
+            let serialized = self.serialize_row(&row_data)?;
+            let offset = hdr_off + row_index * row_sz;
+            self.file.write_all_at(serialized.as_slice(), offset)?;
         }
-        
-        let mut total = self.arrlen()?; 
-        for del_idx in &deletes {
-            for i in (del_idx.0 + 1)..total {
+    
+        // Deleções: shift pra cima
+        let mut total = self.arrlen()?;
+        for del in &deletes {
+            for i in (del.0 + 1)..total {
                 let from = hdr_off + i * row_sz;
                 let to   = hdr_off + (i - 1) * row_sz;
                 self.file.read_exact_at(&mut buf, from)?;
-                file.write_all_at(&buf, to)?;
+                self.file.write_all_at(&buf, to)?;
             }
             total -= 1;
         }
     
         let new_len = hdr_off + total * row_sz;
-        file.set_len(new_len)?;
-        file.flush()?;       
-        file.sync_all()?;   
-        file.commit()?;     
-        self.file = fs::File::open(&self.path)?;
-
-
-
+        self.file.set_len(new_len)?;
+        self.file.flush()?;
+        self.file.sync_all()?;
+    
+        // Reabrir só por segurança se quiser garantir consistência pós-truncamento
+    
         Ok(())
-
     }
+    
+    
     pub fn serialize_row(&self, row: &[AlbaTypes]) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(self.element_size);
     
@@ -332,6 +337,12 @@ memory_limit: {}
         fs::write(&path, yaml)?;
         Ok(())
     }
+    pub fn commit(&mut self) -> Result<(),Error>{
+        for (_,c) in self.container.iter_mut(){
+            c.commit()?;
+        }
+        Ok(())
+    }
     fn load_settings(&mut self) -> Result<(), Error> {
         let dir = PathBuf::from(&self.location);
         let path = dir.join(SETTINGS_FILE);
@@ -392,7 +403,8 @@ memory_limit: {}
             let header_size = calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize);
             let file = fs::File::open(&path)?;
             let mut buffer : Vec<u8> = vec![0u8;header_size];
-            file.read_exact_at(&mut buffer, 0)?;
+            file.read_exact_at(&mut buffer,0)?;
+            println!("{}:{}",buffer.len(),header_size);
             let name_headers_bytes = &buffer[..strhs];
             let types_headers_bytes = &buffer[strhs..];
             let mut column_names: Vec<String> = Vec::with_capacity(max_columns);
@@ -425,6 +437,7 @@ memory_limit: {}
                         size if size == from_usize_to_u8(size_of::<i64>()) => {
                             AlbaTypes::Bigint(0)
                         },
+                        size if size == text_type_identifier(max_str_len) => AlbaTypes::Text(String::new()),
                         size if size == from_usize_to_u8(size_of::<f64>()) => AlbaTypes::Float(0.0),
                         size if size == from_usize_to_u8(size_of::<bool>()) => AlbaTypes::Bool(false),
                         _ => return Err(gerr("Unknown type size in column value types"))
@@ -510,7 +523,7 @@ memory_limit: {}
                         AlbaTypes::Bigint(_) => from_usize_to_u8(size_of::<i64>()),
                         AlbaTypes::Float(_) => from_usize_to_u8(size_of::<f64>()),
                         AlbaTypes::Bool(_) => from_usize_to_u8(size_of::<bool>()),
-                        AlbaTypes::Text(_) => from_usize_to_u8(size_of::<i64>()),
+                        AlbaTypes::Text(_) => max_str_len as u8,
                         AlbaTypes::NONE => 0
                     }
                 }
@@ -537,6 +550,18 @@ memory_limit: {}
                     }
                 };
                 self.containers.push(structure.name.clone());
+                let mut element_size : usize = 0;
+                for el in column_val_headers.iter(){
+                    element_size += match el {
+                        AlbaTypes::Bigint(_) => size_of::<i64>(),
+                        AlbaTypes::Int(_) => size_of::<i32>(),
+                        AlbaTypes::Float(_) => size_of::<f64>(),
+                        AlbaTypes::Bool(_) => size_of::<bool>(),
+                        AlbaTypes::Text(_) => self.settings.max_str_length,
+                        AlbaTypes::NONE => 0
+                    }
+                }
+                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone())?);
                 if let Err(e) = self.save_containers(){return Err(gerr(&e.to_string()))};
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
@@ -584,20 +609,20 @@ memory_limit: {}
                                 if discriminant(expected_val) == discriminant(&AlbaTypes::Text(String::new())){
                                     let mut code = generate_secure_code(self.settings.max_str_length);
                                     let txt_path = format!("{}/rf/{}",self.location,code);
-                                    while fs::exists(&txt_path)? {
-                                        code = generate_secure_code(self.settings.max_str_length);
+                                    while fs::exists(&txt_path)?{
+                                        let code_full = generate_secure_code(self.settings.max_str_length);
+                                        code = code_full.chars().take(max_str_len).collect::<String>();
+
                                     }
                                     written_text.push(code.clone());
                                     let to_write = val[ri].clone();
                                     val[ri] = AlbaTypes::Text(code.clone());
-                                    fs::File::create_new(&txt_path)?;
-                                    let mut file = AtomicWriteFile::open(txt_path)?;
+                                    let mut file = fs::File::create_new(&txt_path)?;
                                     match to_write{
                                         AlbaTypes::Text(a) => {
                                             file.write_all(a.as_bytes())?;
                                             file.flush()?;
                                             file.sync_all()?;
-                                            file.commit()?;
                                             
                                         },
                                         _ => {}

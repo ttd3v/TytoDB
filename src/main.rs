@@ -70,7 +70,6 @@ enum AST{
     EditRow(AST_EDIT_ROW),
     DeleteRow(AST_DELETE_ROW),
     DeleteContainer(AST_DELETE_CONTAINER),
-    
 }
 
 
@@ -293,16 +292,11 @@ fn main() {
     match connect("/home/theo/Desktop/tytodb") {
         Ok(mut c) => {
             //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
-            match c.execute("CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]") {
+            
+            match c.execute("CREATE CONTAINER 'mze' ['txt'][TEXT]") {
                 Ok(result) => println!("{:?}", result),
                 Err(e) => eprintln!("Error executing command: {}", e),
             }
-            for i in [1..100000]{
-            match c.execute("CREATE ROW ['my_text'][false] ON 'my_container' ") {
-                Ok(result) => println!("{:?}", result),
-                Err(e) => eprintln!("Error executing command: {}", e),
-            
-            }}
         }
         Err(e) => eprintln!("Error connecting to database: {}", e),
     }

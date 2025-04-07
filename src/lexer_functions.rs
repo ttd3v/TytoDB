@@ -40,7 +40,7 @@ impl TryFrom<Token> for AlbaTypes {
 
             Token::Bool(b) =>
                 Ok(AlbaTypes::Bool(b)),
-            Token::Keyword(s) => match s.to_uppercase().as_str() {
+            Token::Keyword(s) => match s.to_uppercase().as_str().trim() {
                 "INT" => Ok(AlbaTypes::Int(0)),        // default dummy values
                 "BIGINT" => Ok(AlbaTypes::Bigint(0)),
                 "FLOAT" => Ok(AlbaTypes::Float(0.0)),
