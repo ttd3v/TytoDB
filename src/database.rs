@@ -4,7 +4,8 @@ use size_of;
 use serde_yaml;
 use crate::{gerr, lexer_functions::AlbaTypes, parse, AST};
 use rand::{Rng, distributions::Alphanumeric};
-use tokio::{self, task};
+use tokio::{self, io::AsyncWriteExt, task};
+use tokio::fs as async_fs;
 
 fn generate_secure_code(len: usize) -> String {
     let mut rng = rand::rngs::OsRng;
@@ -61,7 +62,7 @@ struct Container{
     columns : Vec<AlbaTypes>,
     str_size : usize,
     mvcc : MvccType,
-    text_mvcc : Arc<Mutex<Vec<(bool,String)>>>,
+    text_mvcc : Arc<Mutex<HashMap<String,(bool,String)>>>,
     headers_offset : u64,
     column_names : Vec<String>,
     path : String,
@@ -69,19 +70,19 @@ struct Container{
 }
 
 trait New {
-    fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
+    async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
 
 }
 
 impl New for Container {
-    fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
+    async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
         Ok(Container{
             file : fs::OpenOptions::new().read(true).write(true).open(&path)?,
             element_size,
             columns,
             str_size,
             mvcc: Arc::new(Mutex::new(HashMap::new())),
-            text_mvcc: Arc::new(Mutex::new(Vec::new())),
+            text_mvcc: Arc::new(Mutex::new(HashMap::new())),
             headers_offset ,
             column_names,
             path:path.to_string(),
@@ -89,6 +90,9 @@ impl New for Container {
         })
     }
     
+}
+fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    file.sync_all()
 }
 
 impl Container{
@@ -133,7 +137,7 @@ impl Container{
         mvcc_guard.insert(ind, (false,data.clone()));
         Ok(())
     }
-    fn rollback(&mut self) -> Result<(),Error> {
+    async fn rollback(&mut self) -> Result<(),Error> {
         let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
         mvcc_guard.clear();
         drop(mvcc_guard);
@@ -144,14 +148,10 @@ impl Container{
                 return Err(gerr(&e.to_string()))
             }
         };
-        for i in txt_mvcc.iter(){
-            if !i.0{
-                fs::remove_file(format!("{}/ref/{}",self.location,i.1))?;
-            }
-        }
+        txt_mvcc.clear();
         Ok(())
     }
-    fn commit(&mut self) -> Result<(), Error> {
+    async fn commit(&mut self) -> Result<(), Error> {
         let mut total = self.arrlen()?;
         println!("commit: Locking MVCC...");
         let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
@@ -185,8 +185,6 @@ impl Container{
             self.file.write_all_at(serialized.as_slice(), offset)?;
         }
     
-        println!("commit: Handling deletions...");
-        println!("arrlen");
         for del in &deletes {
             println!("{:?}",del);
             for i in (del.0 + 1)..total {
@@ -198,11 +196,7 @@ impl Container{
             }
             total -= 1;
         }
-
-        println!("commit: Calculating new file length...");
         let new_len = hdr_off + total * row_sz;
-    
-        println!("commit: Setting file length...");
         self.file.set_len(new_len)?;
         
         let mut txt_mvcc = match self.text_mvcc.lock(){
@@ -211,15 +205,42 @@ impl Container{
                 return Err(gerr(&e.to_string()))
             }
         };
+
+        for (i, txt) in  txt_mvcc.iter(){
+            let path = format!("{}/rf/{}", self.location, i); 
+            if !txt.0 {
+                let mut file = match async_fs::File::create_new(&path).await{
+                    Ok(a) => a,
+                    Err(e) => {
+                        eprintln!();
+                        return Err(gerr(&format!("Failed to create File: {}",e)));
+                    }
+                };
+                if let Err(e) = file.write_all(txt.1.as_bytes()).await{
+                    return Err(gerr(&format!("Failed to write in text file: {}",e)))
+                };
+                if let Err(e) = file.sync_all().await{
+                    return Err(gerr(&format!("Failed to sync the text file: {}",e)))
+                }
+            } else if match async_fs::try_exists(&path).await{
+                Ok(a) => a,
+                Err(e) => {return Err(gerr(&format!("Failed to check if text file exists: {}",e)))}
+            } {
+                if let Err(e) = async_fs::remove_file(&path).await{
+                    return Err(gerr(&format!("Failed to delete txt file: {}",e)))
+                };
+            }
+        
+        }
+
         txt_mvcc.clear();
         txt_mvcc.shrink_to_fit();
-
-        println!("commit: Flushing file...");
-        self.file.flush()?;
     
         println!("commit: COMMIT SUCCESSFUL!");
         println!("commit: Starting to sync...");
-        self.file.sync_all()?;
+                
+        let file = self.file.try_clone()?; 
+        tokio::task::spawn_blocking(move || sync_file(&file));
         println!("commit: Sync!");
     
         Ok(())
@@ -351,7 +372,7 @@ memory_limit: {}
         }
         Ok(())
     }
-    fn load_containers(&mut self) -> Result<(), Error> {
+    async fn load_containers(&mut self) -> Result<(), Error> {
         let path = std::path::PathBuf::from(format!("{}/containers.yaml",&self.location));
 
 
@@ -385,7 +406,7 @@ memory_limit: {}
                     AlbaTypes::NONE => 0
                 }
             }
-            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone())?);
+            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone()).await?);
         }
         println!("headers: {:?}",self.headers);
         Ok(())
@@ -398,15 +419,15 @@ memory_limit: {}
         fs::write(&path, yaml)?;
         Ok(())
     }
-    pub fn commit(&mut self) -> Result<(),Error>{
+    pub async fn commit(&mut self) -> Result<(),Error>{
         for (_,c) in self.container.iter_mut(){
-            c.commit()?;
+            c.commit().await?;
         }
         Ok(())
     }
-    pub fn rollback(&mut self) -> Result<(),Error>{
+    pub async fn rollback(&mut self) -> Result<(),Error>{
         for (_,c) in self.container.iter_mut(){
-            c.rollback()?;
+            c.rollback().await?;
         }
         Ok(())
     }
@@ -531,7 +552,7 @@ memory_limit: {}
         Err(gerr("Container not found"))
     }
 
-    pub fn execute(&mut self,input : &str) -> Result<(), Error>{
+    pub async fn execute(&mut self,input : &str) -> Result<(), Error>{
         let ast = parse(input.to_owned())?;
         let min_column : usize = self.settings.min_columns as usize;
         let max_columns : usize = self.settings.max_columns as usize;
@@ -625,7 +646,7 @@ memory_limit: {}
                         AlbaTypes::NONE => 0
                     }
                 }
-                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name),self.location.clone(), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone())?);
+                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name),self.location.clone(), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone()).await?);
                 if let Err(e) = self.save_containers(){return Err(gerr(&e.to_string()))};
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
@@ -681,22 +702,17 @@ memory_limit: {}
                                     written_text.push(code.clone());
                                     let to_write = structure.col_val[ri].clone();
                                     structure.col_val[ri] = AlbaTypes::Text(code.clone());
-                                    let mut file = fs::File::create_new(&txt_path)?;
-                                    match to_write{
-                                        AlbaTypes::Text(a) => {
-                                            file.write_all(a.as_bytes())?;
-                                            file.flush()?;
-                                            file.sync_all()?;
-                                        },
-                                        _ => {}
-                                    }
                                     let mut txt_mvcc = match container.text_mvcc.lock(){
                                         Ok(a) => a,
                                         Err(e) => {
                                             return Err(gerr(&e.to_string()))
                                         }
                                     };
-                                    txt_mvcc.push((false,code));
+                                    let text_to_write : String = match to_write{
+                                        AlbaTypes::Text(a) => a,
+                                        _ => "".to_string()
+                                    };
+                                    txt_mvcc.insert(code,(false,text_to_write));
                                     drop(txt_mvcc);
                                 }else{
                                     val[ri] = input_val.clone();
@@ -716,7 +732,7 @@ memory_limit: {}
                 }
                 container.push_row(&val)?;
                 if self.settings.auto_commit{
-                    container.commit()?;
+                    container.commit().await?;
                 }
             }
             _ =>{return Err(gerr("Failed to parse"));}
@@ -727,7 +743,7 @@ memory_limit: {}
     
 }
 
-pub fn connect(path : &str) -> Result<Database, Error>{
+pub async fn connect(path : &str) -> Result<Database, Error>{
     let db_path = PathBuf::from(path);
     println!("{}",path);
     if db_path.exists() {
@@ -745,7 +761,7 @@ pub fn connect(path : &str) -> Result<Database, Error>{
     if let Err(e) = db.load_settings(){
         eprintln!("err: load_settings");
         return Err(e)
-    };if let Err(e) = db.load_containers(){
+    };if let Err(e) = db.load_containers().await{
         eprintln!("err: load_containers");
         return Err(e)
     };

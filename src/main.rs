@@ -288,12 +288,13 @@ fn parse(input : String) -> Result<AST, Error>{
 }
 use std::time::Instant;
 
-fn main() {
-    match connect("/home/theo/Desktop/tytodb") {
+#[tokio::main]
+async fn main() {
+    match connect("/home/theo/Desktop/tytodb").await {
         Ok(mut c) => {
             //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
             
-            match c.execute("CREATE CONTAINER 'abcd' ['num','text'][INT,TEXT]") {
+            match c.execute("CREATE CONTAINER 'abcd' ['num','text'][INT,TEXT]").await {
                 Ok(result) => println!("{:?}", result),
                 Err(e) => eprintln!("Error executing command: {}", e),
             }
@@ -301,18 +302,18 @@ fn main() {
         Err(e) => eprintln!("Error connecting to database: {}", e),
     }
    let start = Instant::now();
-    let steps = 1_000;
-    match connect("/home/theo/Desktop/tytodb") {
+    let steps = 1000;
+    match connect("/home/theo/Desktop/tytodb").await {
         Ok(mut c) => {
             //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
             for i in 1..steps{
-                match c.execute(&format!("CREATE ROW ['num','text'][{},'abcd'] ON 'abcd'",i)) {
+                match c.execute(&format!("CREATE ROW ['num','text'][{},'abcd'] ON 'abcd'",i)).await {
                     Ok(_) => {},
                     Err(e) => eprintln!("Error executing command: {}", e),
                 }
             }
             print!("committing...");
-            if let Err(e) = c.rollback(){
+            if let Err(e) = c.commit().await{
                 eprintln!("ERR: {}",e);
             };
         }
