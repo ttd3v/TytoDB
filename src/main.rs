@@ -279,25 +279,48 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
 }
 
 
-pub fn parse(input : String) -> Result<AST, Error>{
+fn parse(input : String) -> Result<AST, Error>{
     let tokens = match lexer(input){
         Ok(a) => {a},
         Err(e) => {return Err(e)}
     };
-    println!("{:?}",tokens);
     return debug_tokens(&tokens)
 }
+use std::time::Instant;
 
 fn main() {
     match connect("/home/theo/Desktop/tytodb") {
         Ok(mut c) => {
             //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
             
-            match c.execute("CREATE CONTAINER 'mze' ['txt'][TEXT]") {
+            match c.execute("CREATE CONTAINER 'abcd' ['num','text'][INT,TEXT]") {
                 Ok(result) => println!("{:?}", result),
                 Err(e) => eprintln!("Error executing command: {}", e),
             }
         }
         Err(e) => eprintln!("Error connecting to database: {}", e),
     }
+   let start = Instant::now();
+    let steps = 1_000;
+    match connect("/home/theo/Desktop/tytodb") {
+        Ok(mut c) => {
+            //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
+            for i in 1..steps{
+                match c.execute(&format!("CREATE ROW ['num','text'][{},'abcd'] ON 'abcd'",i)) {
+                    Ok(_) => {},
+                    Err(e) => eprintln!("Error executing command: {}", e),
+                }
+            }
+            print!("committing...");
+            if let Err(e) = c.rollback(){
+                eprintln!("ERR: {}",e);
+            };
+        }
+        Err(e) => eprintln!("Error connecting to database: {}", e),
+    }
+
+    let duration = start.elapsed();
+    println!("Elapsed time: {:?} ms", duration.as_millis());
+    println!("Average per task: {:?} ms", duration.as_millis() as f64 /steps as f64);
+
 }

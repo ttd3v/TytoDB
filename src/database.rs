@@ -4,6 +4,7 @@ use size_of;
 use serde_yaml;
 use crate::{gerr, lexer_functions::AlbaTypes, parse, AST};
 use rand::{Rng, distributions::Alphanumeric};
+use tokio::{self, task};
 
 fn generate_secure_code(len: usize) -> String {
     let mut rng = rand::rngs::OsRng;
@@ -60,42 +61,63 @@ struct Container{
     columns : Vec<AlbaTypes>,
     str_size : usize,
     mvcc : MvccType,
+    text_mvcc : Arc<Mutex<Vec<(bool,String)>>>,
     headers_offset : u64,
     column_names : Vec<String>,
     path : String,
+    location : String,
 }
 
 trait New {
-    fn new(path : &str,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
+    fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
+
 }
 
 impl New for Container {
-    fn new(path : &str,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
+    fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
         Ok(Container{
-            file : fs::File::open(path)?,
+            file : fs::OpenOptions::new().read(true).write(true).open(&path)?,
             element_size,
             columns,
             str_size,
             mvcc: Arc::new(Mutex::new(HashMap::new())),
+            text_mvcc: Arc::new(Mutex::new(Vec::new())),
             headers_offset ,
             column_names,
-            path:path.to_string()
+            path:path.to_string(),
+            location
         })
     }
+    
 }
 
 impl Container{
     fn len(&self) -> Result<u64,Error>{
         Ok(self.file.metadata()?.len())
     }
-    fn arrlen(&self) -> Result<u64,Error>{
-        let length = self.len()?;
-        Ok((length-self.headers_offset)/self.element_size as u64)
+    fn arrlen(&self) -> Result<u64, Error> {
+        let file_len = self.len()?;
+        let file_rows = if file_len > self.headers_offset {
+            (file_len - self.headers_offset) / self.element_size as u64
+        } else {
+            0
+        };
+        let mvcc_max = {
+            let mvcc = match self.mvcc.try_lock() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!("Failed to acquire mvcc lock immediately: {:?}", e);
+                    return Err(gerr("Could not lock mvcc"));
+                }
+            };
+            mvcc.keys().copied().max().map_or(0, |max_index| max_index + 1)
+        };
+        Ok(file_rows.max(mvcc_max))
     }
+    
+    
     pub fn get_next_addr(&self) -> Result<u64, Error> {
-        // arrlen() calculates the number of rows already written.
         let current_rows = self.arrlen()?;
-        // Look in the MVCC hashmap to see if a deleted row exists so we can reuse its position.
         let mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
         for (&key, (deleted, _)) in mvcc_guard.iter() {
             if *deleted {
@@ -111,12 +133,32 @@ impl Container{
         mvcc_guard.insert(ind, (false,data.clone()));
         Ok(())
     }
-    fn commit(&mut self) -> Result<(), Error> {
-        self.file = fs::OpenOptions::new().read(true).write(true).open(&self.path)?;
+    fn rollback(&mut self) -> Result<(),Error> {
         let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        mvcc_guard.clear();
+        drop(mvcc_guard);
+
+        let mut txt_mvcc = match self.text_mvcc.lock(){
+            Ok(a) => a,
+            Err(e) => {
+                return Err(gerr(&e.to_string()))
+            }
+        };
+        for i in txt_mvcc.iter(){
+            if !i.0{
+                fs::remove_file(format!("{}/ref/{}",self.location,i.1))?;
+            }
+        }
+        Ok(())
+    }
+    fn commit(&mut self) -> Result<(), Error> {
+        let mut total = self.arrlen()?;
+        println!("commit: Locking MVCC...");
+        let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+    
+        println!("commit: Separating insertions and deletions...");
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         let mut deletes: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
-    
         for (index, value) in mvcc_guard.iter() {
             let v = (*index, value.1.clone());
             if value.0 {
@@ -127,25 +169,28 @@ impl Container{
         }
         mvcc_guard.clear();
     
+        println!("commit: Sorting insertions and deletions...");
         insertions.sort_by_key(|(index, _)| *index);
         deletes.sort_by_key(|(index, _)| *index);
-        assert!(self.headers_offset > 0, "headers_offset is not set properly!");
     
+        println!("commit: Preparing for disk write...");
         let hdr_off = self.headers_offset;
         let row_sz = self.element_size as u64;
         let mut buf = vec![0u8; self.element_size];
     
-        // Escreve os dados novos (inserções)
+        println!("commit: Writing insertions...");
         for (row_index, row_data) in insertions {
             let serialized = self.serialize_row(&row_data)?;
             let offset = hdr_off + row_index * row_sz;
             self.file.write_all_at(serialized.as_slice(), offset)?;
         }
     
-        // Deleções: shift pra cima
-        let mut total = self.arrlen()?;
+        println!("commit: Handling deletions...");
+        println!("arrlen");
         for del in &deletes {
+            println!("{:?}",del);
             for i in (del.0 + 1)..total {
+                println!("{}",i);
                 let from = hdr_off + i * row_sz;
                 let to   = hdr_off + (i - 1) * row_sz;
                 self.file.read_exact_at(&mut buf, from)?;
@@ -153,16 +198,33 @@ impl Container{
             }
             total -= 1;
         }
-    
+
+        println!("commit: Calculating new file length...");
         let new_len = hdr_off + total * row_sz;
-        self.file.set_len(new_len)?;
-        self.file.flush()?;
-        self.file.sync_all()?;
     
-        // Reabrir só por segurança se quiser garantir consistência pós-truncamento
+        println!("commit: Setting file length...");
+        self.file.set_len(new_len)?;
+        
+        let mut txt_mvcc = match self.text_mvcc.lock(){
+            Ok(a) => a,
+            Err(e) => {
+                return Err(gerr(&e.to_string()))
+            }
+        };
+        txt_mvcc.clear();
+        txt_mvcc.shrink_to_fit();
+
+        println!("commit: Flushing file...");
+        self.file.flush()?;
+    
+        println!("commit: COMMIT SUCCESSFUL!");
+        println!("commit: Starting to sync...");
+        self.file.sync_all()?;
+        println!("commit: Sync!");
     
         Ok(())
     }
+    
     
     
     pub fn serialize_row(&self, row: &[AlbaTypes]) -> Result<Vec<u8>, Error> {
@@ -291,7 +353,6 @@ memory_limit: {}
     }
     fn load_containers(&mut self) -> Result<(), Error> {
         let path = std::path::PathBuf::from(format!("{}/containers.yaml",&self.location));
-        println!("{:?}",path);
 
 
         // If not exist, write empty Vec<String>
@@ -324,7 +385,7 @@ memory_limit: {}
                     AlbaTypes::NONE => 0
                 }
             }
-            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone())?);
+            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone())?);
         }
         println!("headers: {:?}",self.headers);
         Ok(())
@@ -343,13 +404,17 @@ memory_limit: {}
         }
         Ok(())
     }
+    pub fn rollback(&mut self) -> Result<(),Error>{
+        for (_,c) in self.container.iter_mut(){
+            c.rollback()?;
+        }
+        Ok(())
+    }
     fn load_settings(&mut self) -> Result<(), Error> {
         let dir = PathBuf::from(&self.location);
         let path = dir.join(SETTINGS_FILE);
         fs::create_dir_all(&dir)?;
-        println!("create dir all");
         if path.exists() && fs::metadata(&path)?.is_dir() {
-            println!("remove dir all");
             fs::remove_dir(&path)?;
         }
         if !path.is_file() {
@@ -404,7 +469,6 @@ memory_limit: {}
             let file = fs::File::open(&path)?;
             let mut buffer : Vec<u8> = vec![0u8;header_size];
             file.read_exact_at(&mut buffer,0)?;
-            println!("{}:{}",buffer.len(),header_size);
             let name_headers_bytes = &buffer[..strhs];
             let types_headers_bytes = &buffer[strhs..];
             let mut column_names: Vec<String> = Vec::with_capacity(max_columns);
@@ -561,7 +625,7 @@ memory_limit: {}
                         AlbaTypes::NONE => 0
                     }
                 }
-                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone())?);
+                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name),self.location.clone(), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone())?);
                 if let Err(e) = self.save_containers(){return Err(gerr(&e.to_string()))};
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
@@ -572,7 +636,7 @@ memory_limit: {}
                 return Err(gerr("A container with the specified name already exists"))
             }
             },
-            AST::CreateRow(structure) => {
+            AST::CreateRow(mut structure) => {
                 // CREATE ROW [col_nam][col_val] ON <container:name>
                 let container = match self.container.get_mut(&structure.container) {
                     None => return Err(gerr(&format!("Container '{}' does not exist.", structure.container))),
@@ -615,18 +679,25 @@ memory_limit: {}
 
                                     }
                                     written_text.push(code.clone());
-                                    let to_write = val[ri].clone();
-                                    val[ri] = AlbaTypes::Text(code.clone());
+                                    let to_write = structure.col_val[ri].clone();
+                                    structure.col_val[ri] = AlbaTypes::Text(code.clone());
                                     let mut file = fs::File::create_new(&txt_path)?;
                                     match to_write{
                                         AlbaTypes::Text(a) => {
                                             file.write_all(a.as_bytes())?;
                                             file.flush()?;
                                             file.sync_all()?;
-                                            
                                         },
                                         _ => {}
                                     }
+                                    let mut txt_mvcc = match container.text_mvcc.lock(){
+                                        Ok(a) => a,
+                                        Err(e) => {
+                                            return Err(gerr(&e.to_string()))
+                                        }
+                                    };
+                                    txt_mvcc.push((false,code));
+                                    drop(txt_mvcc);
                                 }else{
                                     val[ri] = input_val.clone();
                                 }
