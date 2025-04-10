@@ -1,7 +1,9 @@
 mod create_inputs_for_testing;
 mod lexer_functions;
 mod database;
-use std::io::{Error,ErrorKind};
+use std::{io::{Error,ErrorKind}, sync::Arc};
+use tokio::sync::Mutex;
+use tokio;
 use database::connect;
 use lexer_functions::{
     lexer_boolean_match,
@@ -14,6 +16,7 @@ use lexer_functions::{
     Token,
     AlbaTypes
 };
+
 
 fn lexer(input : String)->Result<Vec<Token>,Error>{
     if input.len() == 0{
@@ -286,42 +289,26 @@ fn parse(input : String) -> Result<AST, Error>{
     };
     return debug_tokens(&tokens)
 }
-use std::time::Instant;
 
 #[tokio::main]
 async fn main() {
+
+    let steps = 100_000;
+
     match connect("/home/theo/Desktop/tytodb").await {
         Ok(mut c) => {
-            //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
-            
-            match c.execute("CREATE CONTAINER 'abcd' ['num','text'][INT,TEXT]").await {
-                Ok(result) => println!("{:?}", result),
-                Err(e) => eprintln!("Error executing command: {}", e),
-            }
-        }
-        Err(e) => eprintln!("Error connecting to database: {}", e),
-    }
-   let start = Instant::now();
-    let steps = 1000;
-    match connect("/home/theo/Desktop/tytodb").await {
-        Ok(mut c) => {
-            //"CREATE CONTAINER 'my_container' ['my_text','my_bool','my_int','my_bigint','my_float'][BOOL,BIGINT,FLOAT,INT,TEXT]"
-            for i in 1..steps{
-                match c.execute(&format!("CREATE ROW ['num','text'][{},'abcd'] ON 'abcd'",i)).await {
-                    Ok(_) => {},
-                    Err(e) => eprintln!("Error executing command: {}", e),
+            for _ in 1..steps {
+                if let Err(e) = c.execute("
+                CREATE ROW ['text']['Lorem ipsum dolor sit amet'] ON 'abcd'").await{
+                    panic!("{}",e);
                 }
             }
-            print!("committing...");
             if let Err(e) = c.commit().await{
-                eprintln!("ERR: {}",e);
-            };
+                panic!("err: {}",e);
+            }
         }
         Err(e) => eprintln!("Error connecting to database: {}", e),
     }
 
-    let duration = start.elapsed();
-    println!("Elapsed time: {:?} ms", duration.as_millis());
-    println!("Average per task: {:?} ms", duration.as_millis() as f64 /steps as f64);
 
 }

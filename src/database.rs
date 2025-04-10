@@ -1,11 +1,14 @@
-use std::{collections::HashMap, fmt::format, fs::{self, File}, io::{Error, ErrorKind, Read, Seek, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{Error, ErrorKind, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
 use crate::{gerr, lexer_functions::AlbaTypes, parse, AST};
 use rand::{Rng, distributions::Alphanumeric};
-use tokio::{self, io::AsyncWriteExt, task};
-use tokio::fs as async_fs;
+
+#[link(name = "io", kind = "static")]
+unsafe extern "C" {
+    pub fn write_data(buffer: *const u8, len: usize, path: *const std::os::raw::c_char) -> i32;
+}
 
 fn generate_secure_code(len: usize) -> String {
     let mut rng = rand::rngs::OsRng;
@@ -128,7 +131,6 @@ impl Container{
                 return Ok(key);
             }
         }
-        // No deleted slot; the next available row is at the end (0-based)
         Ok(current_rows)
     } 
     pub fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
@@ -209,26 +211,24 @@ impl Container{
         for (i, txt) in  txt_mvcc.iter(){
             let path = format!("{}/rf/{}", self.location, i); 
             if !txt.0 {
-                let mut file = match async_fs::File::create_new(&path).await{
-                    Ok(a) => a,
-                    Err(e) => {
-                        eprintln!();
-                        return Err(gerr(&format!("Failed to create File: {}",e)));
-                    }
-                };
-                if let Err(e) = file.write_all(txt.1.as_bytes()).await{
+                let mut file: File = fs::File::create_new(&path)?;
+                if let Err(e) = file.write_all(txt.1.as_bytes()){
                     return Err(gerr(&format!("Failed to write in text file: {}",e)))
                 };
-                if let Err(e) = file.sync_all().await{
-                    return Err(gerr(&format!("Failed to sync the text file: {}",e)))
+                
+                let buffer = txt.1.as_bytes();
+                unsafe{
+                    let c_path = match CString::new(path).map_err(|e| e.to_string()){Ok(a) => a, Err(e) => return Err(gerr(&e))};;
+                    let result = unsafe {
+                        write_data(buffer.as_ptr(), buffer.len(), c_path.as_ptr())
+                    };
+
+                    if result != 1 {
+                        eprintln!("C write_data failed")
+                    }
                 }
-            } else if match async_fs::try_exists(&path).await{
-                Ok(a) => a,
-                Err(e) => {return Err(gerr(&format!("Failed to check if text file exists: {}",e)))}
-            } {
-                if let Err(e) = async_fs::remove_file(&path).await{
-                    return Err(gerr(&format!("Failed to delete txt file: {}",e)))
-                };
+            } else if fs::exists(&path)?{
+                fs::remove_file(&path)?
             }
         
         }
@@ -376,7 +376,7 @@ memory_limit: {}
         let path = std::path::PathBuf::from(format!("{}/containers.yaml",&self.location));
 
 
-        // If not exist, write empty Vec<String>
+        
         if !path.exists() {
             let yaml = serde_yaml::to_string(&self.containers)
                 .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string()))?;
@@ -700,8 +700,13 @@ memory_limit: {}
 
                                     }
                                     written_text.push(code.clone());
-                                    let to_write = structure.col_val[ri].clone();
-                                    structure.col_val[ri] = AlbaTypes::Text(code.clone());
+                                    let to_write = match structure.col_val.get(index).clone(){
+                                        Some(a) => a.to_owned(),
+                                        None => {return Err(gerr("failed to get the given value"))}
+                                    };
+                                    
+                                    structure.col_val[index] = AlbaTypes::Text(code.clone());
+
                                     let mut txt_mvcc = match container.text_mvcc.lock(){
                                         Ok(a) => a,
                                         Err(e) => {
@@ -709,7 +714,7 @@ memory_limit: {}
                                         }
                                     };
                                     let text_to_write : String = match to_write{
-                                        AlbaTypes::Text(a) => a,
+                                        AlbaTypes::Text(a) => a.to_string(),
                                         _ => "".to_string()
                                     };
                                     txt_mvcc.insert(code,(false,text_to_write));
