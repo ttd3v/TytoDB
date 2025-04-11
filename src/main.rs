@@ -26,6 +26,7 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
     let mut result:Vec<Token> = Vec::with_capacity(20);
     let mut dough : String = String::new();
 
+
     while let Some(c) = characters.next(){
         dough.push(c);
         lexer_ignore_comments_match(&mut dough, &mut characters) ;
@@ -41,8 +42,7 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
         return Ok(result)
     }
     drop(result);
-
-    Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()))
+    Err(Error::new(ErrorKind::InvalidInput, "The given input did not produced tokens".to_string()))
 }
 
 /*
@@ -68,42 +68,49 @@ fn lexer(input : String)->Result<Vec<Token>,Error>{
 */
 #[derive(Debug, Clone, PartialEq)]
 enum AST{
-    CreateContainer(AST_CREATE_CONTAINER),
-    CreateRow(AST_CREATE_ROW),
-    EditRow(AST_EDIT_ROW),
-    DeleteRow(AST_DELETE_ROW),
-    DeleteContainer(AST_DELETE_CONTAINER),
+    CreateContainer(AstCreateContainer),
+    CreateRow(AstCreateRow),
+    EditRow(AstEditRow),
+    DeleteRow(AstDeleteRow),
+    DeleteContainer(AstDeleteContainer),
+    Search(AstSearch)
 }
 
 
 
 #[derive(Debug, Clone, PartialEq)]
-struct AST_CREATE_CONTAINER{
+struct AstCreateContainer{
     name : String,
     col_nam : Vec<String>,
     col_val : Vec<AlbaTypes>,
 }
 #[derive(Debug, Clone, PartialEq)]
-struct AST_CREATE_ROW{
+struct AstCreateRow{
     col_nam : Vec<String>,
     col_val : Vec<AlbaTypes>,
     container : String
 }
 #[derive(Debug, Clone, PartialEq)]
-struct AST_EDIT_ROW{
+struct AstEditRow{
     col_nam : Vec<String>,
     col_val : Vec<AlbaTypes>,
     container : String,
-    conditions : Vec<Token>
+    conditions : (Vec<(Token,Token,Token)>,Vec<(usize,char)>)
 }
 #[derive(Debug, Clone, PartialEq)]
-struct AST_DELETE_ROW{
+struct AstDeleteRow{
     container : String,
     conditions : Option<Vec<Token>>
 }
 #[derive(Debug, Clone, PartialEq)]
-struct AST_DELETE_CONTAINER{
+struct AstDeleteContainer{
     container : String,
+}
+#[derive(Debug, Clone, PartialEq)]
+struct AstSearch{
+    container : String,
+    conditions : (Vec<(Token,Token,Token)>,Vec<(usize,char)>),
+    col_nam : Vec<String>,
 }
 
 fn gerr(msg : &str) -> Error{
@@ -183,7 +190,7 @@ fn debug_create_command(tokens: &Vec<Token>) -> Result<AST,Error>{
                             return Err(gerr("All column names and column types are not matching"))
                         }
                         
-                        return Ok(AST::CreateContainer(AST_CREATE_CONTAINER { name: cname, col_nam: col_name, col_val: col_types }))
+                        return Ok(AST::CreateContainer(AstCreateContainer { name: cname, col_nam: col_name, col_val: col_types }))
                     }
                     "ROW" => {
                         let mut col_names : Vec<String> = Vec::with_capacity(5);
@@ -204,7 +211,7 @@ fn debug_create_command(tokens: &Vec<Token>) -> Result<AST,Error>{
                                 _ => {return Err(gerr("Invalid type, the container name must be a string"));}
                             }
                         }
-                        return Ok(AST::CreateRow(AST_CREATE_ROW { col_nam: col_names, col_val: col_values, container: container }))
+                        return Ok(AST::CreateRow(AstCreateRow { col_nam: col_names, col_val: col_values, container: container }))
                         
                     },
                     _ => {return Err(gerr("Invalid instance type"))}
@@ -228,7 +235,7 @@ fn debug_edit_command(tokens : &Vec<Token>) -> Result<AST,Error> {
                         let mut ed_col_name : Vec<String> = Vec::with_capacity(20);
                         let mut ed_col_type : Vec<AlbaTypes> = Vec::with_capacity(20);
                         let mut ed_container : String = String::new();
-                        let mut cond : Option<Vec<Token>> = None;
+                        let mut conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>) = (Vec::with_capacity(10), Vec::with_capacity(10));   
 
                         if let Some(errrrrr) = parser_debugger_extract_group_elstr(&mut ed_col_name, &tokens, 2){
                             return Err(errrrrr)
@@ -246,13 +253,83 @@ fn debug_edit_command(tokens : &Vec<Token>) -> Result<AST,Error> {
                         if let Some(errrrrr) = parser_debugger_extract_string(&mut ed_container, &tokens, 5){
                             return Err(errrrrr)
                         }
-                        if tokens.len() > 7{
-                            cond = Some(tokens[6..].to_vec())
+                        
+                        if let Some(tok) = tokens.get(6) {
+                            if match tok {
+                                Token::Keyword(a) if a.to_uppercase() == "WHERE" => false,
+                                _ => true,
+                            } {
+                                return Err(gerr(r#"Expected keyword "WHERE" at position 6"#));
+                            }
+
+                            if let Some(iterator_of_tokens) = tokens.get(7..) {
+                                let mut bushes: Vec<Token> = Vec::new();
+
+                                for i in iterator_of_tokens {
+                                    if bushes.len() == 3 {
+                                        conditions.0.push((
+                                            get_from_bushes_with_safety(&bushes, 0)?,
+                                            get_from_bushes_with_safety(&bushes, 1)?,
+                                            get_from_bushes_with_safety(&bushes, 2)?,
+                                        ));
+                                        bushes.clear();
+
+                                        conditions.1.push((
+                                            conditions.0.len() - 1,
+                                            match i {
+                                                Token::Keyword(a) => match a.to_uppercase().as_str() {
+                                                    "OR" => 'o',
+                                                    "AND" => 'a',
+                                                    _ => {
+                                                        return Err(gerr(
+                                                            "Expected logical operator 'AND' or 'OR' after a condition",
+                                                        ))
+                                                    }
+                                                },
+                                                _ => return Err(gerr("Expected logical operator after condition")),
+                                            },
+                                        ));
+                                        continue;
+                                    }
+
+                                    match i {
+                                        Token::String(_) => match bushes.len() {
+                                            0 | 2 => bushes.push(i.clone()),
+                                            _ => return Err(gerr("Unexpected string: operator might be missing")),
+                                        },
+                                        Token::Bool(_) | Token::Int(_) | Token::Float(_) => {
+                                            if bushes.len() == 2 {
+                                                bushes.push(i.clone())
+                                            } else {
+                                                return Err(gerr("Unexpected value: condition must follow 'column OP value' pattern"));
+                                            }
+                                        }
+                                        Token::Operator(_) => {
+                                            if bushes.len() == 1 {
+                                                bushes.push(i.clone());
+                                            } else {
+                                                return Err(gerr("Unexpected operator: check condition structure"));
+                                            }
+                                        }
+                                        _ => return Err(gerr("Unexpected token in WHERE clause")),
+                                    }
+                                }
+
+                                if bushes.len() == 3 {
+                                    conditions.0.push((
+                                        get_from_bushes_with_safety(&bushes, 0)?,
+                                        get_from_bushes_with_safety(&bushes, 1)?,
+                                        get_from_bushes_with_safety(&bushes, 2)?,
+                                    ));
+                                }
+                            }
                         }
-                        return Ok(AST::CreateRow(AST_CREATE_ROW{
+
+                        return Ok(AST::EditRow(AstEditRow{
                             col_nam:ed_col_name,
                             col_val: ed_col_type,
-                            container: ed_container
+                            container: ed_container,
+                            conditions
                         }))
                     },
                     _ => {
@@ -268,12 +345,131 @@ fn debug_edit_command(tokens : &Vec<Token>) -> Result<AST,Error> {
     return Err(gerr("Missing the instance to be editted"));
 }
 
+fn get_from_bushes_with_safety(bushes : &Vec<Token>,index : usize) -> Result<Token,Error>{
+    match bushes.get(index){ Some(a) => Ok(a.clone()), None => return Err(gerr("Missing"))}
+}
+
+fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
+    let container: String = match tokens.get(3) {
+        Some(s) => match s {
+            Token::String(a) => a.to_string(),
+            _ => return Err(gerr("Expected container name as a string at position 3")),
+        },
+        None => return Err(gerr("Missing container name (expected at position 3)")),
+    };
+
+    let mut conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>) =
+        (Vec::with_capacity(10), Vec::with_capacity(10));
+
+    let columns: Vec<String> = match tokens.get(1) {
+        Some(a) => match a {
+            Token::Group(g) => {
+                g.iter()
+                    .map(|a| match a {
+                        Token::String(s) => s.to_string(),
+                        _ => "".to_string(),
+                    })
+                    .collect()
+            }
+            _ => return Err(gerr("Expected a group of column names (strings) at position 1")),
+        },
+        None => return Err(gerr("Missing column group (expected at position 1)")),
+    };
+
+    if let Some(tok) = tokens.get(2) {
+        if match tok {
+            Token::Keyword(a) if a.to_uppercase() == "ON" => false,
+            _ => true,
+        } {
+            return Err(gerr(r#"Expected keyword "ON" at position 2"#));
+        }
+    }
+
+    if let Some(tok) = tokens.get(4) {
+        if match tok {
+            Token::Keyword(a) if a.to_uppercase() == "WHERE" => false,
+            _ => true,
+        } {
+            return Err(gerr(r#"Expected keyword "WHERE" at position 4"#));
+        }
+
+        if let Some(iterator_of_tokens) = tokens.get(5..) {
+            let mut bushes: Vec<Token> = Vec::new();
+
+            for i in iterator_of_tokens {
+                if bushes.len() == 3 {
+                    conditions.0.push((
+                        get_from_bushes_with_safety(&bushes, 0)?,
+                        get_from_bushes_with_safety(&bushes, 1)?,
+                        get_from_bushes_with_safety(&bushes, 2)?,
+                    ));
+                    bushes.clear();
+
+                    conditions.1.push((
+                        conditions.0.len() - 1,
+                        match i {
+                            Token::Keyword(a) => match a.to_uppercase().as_str() {
+                                "OR" => 'o',
+                                "AND" => 'a',
+                                _ => {
+                                    return Err(gerr(
+                                        "Expected logical operator 'AND' or 'OR' after a condition",
+                                    ))
+                                }
+                            },
+                            _ => return Err(gerr("Expected logical operator after condition")),
+                        },
+                    ));
+                    continue;
+                }
+
+                match i {
+                    Token::String(_) => match bushes.len() {
+                        0 | 2 => bushes.push(i.clone()),
+                        _ => return Err(gerr("Unexpected string: operator might be missing")),
+                    },
+                    Token::Bool(_) | Token::Int(_) | Token::Float(_) => {
+                        if bushes.len() == 2 {
+                            bushes.push(i.clone())
+                        } else {
+                            return Err(gerr("Unexpected value: condition must follow 'column OP value' pattern"));
+                        }
+                    }
+                    Token::Operator(_) => {
+                        if bushes.len() == 1 {
+                            bushes.push(i.clone());
+                        } else {
+                            return Err(gerr("Unexpected operator: check condition structure"));
+                        }
+                    }
+                    _ => return Err(gerr("Unexpected token in WHERE clause")),
+                }
+            }
+
+            if bushes.len() == 3 {
+                conditions.0.push((
+                    get_from_bushes_with_safety(&bushes, 0)?,
+                    get_from_bushes_with_safety(&bushes, 1)?,
+                    get_from_bushes_with_safety(&bushes, 2)?,
+                ));
+            }
+        }
+    }
+
+    Ok(AST::Search(AstSearch {
+        container,
+        conditions,
+        col_nam: columns,
+    }))
+}
+
 fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
     let first = tokens.first().ok_or_else(|| gerr("Token list is empty"))?;
     if let Token::Keyword(command) = first {
         match command.as_str() {
             "CREATE" => debug_create_command(tokens),
             "EDIT" => debug_edit_command(tokens),
+            "SEARCH" => debug_search(tokens),
             _ => Err(gerr("Invalid command keyword")),
         }
     } else {
@@ -290,25 +486,7 @@ fn parse(input : String) -> Result<AST, Error>{
     return debug_tokens(&tokens)
 }
 
-#[tokio::main]
-async fn main() {
-
-    let steps = 100_000;
-
-    match connect("/home/theo/Desktop/tytodb").await {
-        Ok(mut c) => {
-            for _ in 1..steps {
-                if let Err(e) = c.execute("
-                CREATE ROW ['text']['Lorem ipsum dolor sit amet'] ON 'abcd'").await{
-                    panic!("{}",e);
-                }
-            }
-            if let Err(e) = c.commit().await{
-                panic!("err: {}",e);
-            }
-        }
-        Err(e) => eprintln!("Error connecting to database: {}", e),
-    }
-
-
+fn main() {
+    let tokens = parse("SEARCH ['abc'] ON 'abcdefg' WHERE 'abjk' = 'txt' AND 'ieaf' != 'og'".to_string());
+    println!("{:?}",tokens);
 }
