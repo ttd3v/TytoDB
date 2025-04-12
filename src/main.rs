@@ -6,43 +6,50 @@ use tokio::sync::Mutex;
 use tokio;
 use database::connect;
 use lexer_functions::{
-    lexer_boolean_match,
-    lexer_group_match,
-    lexer_ignore_comments_match,
-    lexer_string_match,
-    lexer_keyword_match,
-    lexer_operator_match,
-    lexer_number_match,
-    Token,
-    AlbaTypes
+    lexer_boolean_match, lexer_group_match, lexer_ignore_comments_match, lexer_keyword_match, lexer_number_match, lexer_operator_match, lexer_string_match, lexer_subcommand_match, AlbaTypes, Token
 };
 
 
-fn lexer(input : String)->Result<Vec<Token>,Error>{
-    if input.len() == 0{
-        return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()))
+fn lexer(input: String) -> Result<Vec<Token>, Error> {
+    if input.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()));
     }
+
     let mut characters = input.trim().chars().peekable();
-    let mut result:Vec<Token> = Vec::with_capacity(20);
-    let mut dough : String = String::new();
+    let mut result = Vec::with_capacity(20);
+    let mut dough = String::new();
 
-
-    while let Some(c) = characters.next(){
+    while let Some(c) = characters.next() {
         dough.push(c);
-        lexer_ignore_comments_match(&mut dough, &mut characters) ;
+        lexer_ignore_comments_match(&mut dough, &mut characters);
         lexer_keyword_match(&mut result, &mut dough);
+        lexer_subcommand_match(&mut result, &mut dough, &mut characters)?;
         lexer_group_match(&mut result, &mut dough, &mut characters);
-        lexer_boolean_match(&mut result, &mut dough, &mut characters) ;
-        lexer_operator_match(&mut result, &mut dough, &mut characters) ;
-        lexer_number_match(&mut result, &mut dough, &mut characters) ;
-        lexer_string_match(&mut result, &mut dough, &mut characters) ;
+        lexer_boolean_match(&mut result, &mut dough, &mut characters);
+        lexer_operator_match(&mut result, &mut dough, &mut characters);
+        lexer_number_match(&mut result, &mut dough, &mut characters);
+        lexer_string_match(&mut result, &mut dough, &mut characters);
     }
-    
-    if result.len() > 0{
-        return Ok(result)
+
+    if !dough.trim().is_empty() {
+        lexer_keyword_match(&mut result, &mut dough);
+        lexer_subcommand_match(&mut result, &mut dough, &mut characters)?;
+        lexer_group_match(&mut result, &mut dough, &mut characters);
+        lexer_boolean_match(&mut result, &mut dough, &mut characters);
+        lexer_operator_match(&mut result, &mut dough, &mut characters);
+        lexer_number_match(&mut result, &mut dough, &mut characters);
+        lexer_string_match(&mut result, &mut dough, &mut characters);
     }
-    drop(result);
-    Err(Error::new(ErrorKind::InvalidInput, "The given input did not produced tokens".to_string()))
+
+    if !dough.trim().is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, format!("Unexpected token: {}", dough)));
+    }
+
+    if result.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "The given input did not produced tokens".to_string()));
+    }
+
+    Ok(result)
 }
 
 /*
@@ -106,9 +113,16 @@ struct AstDeleteRow{
 struct AstDeleteContainer{
     container : String,
 }
+
+#[derive(Debug, Clone, PartialEq)]
+enum AlbaContainer {
+    Real(String),
+    Virtual(Vec<Token>)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct AstSearch{
-    container : String,
+    container : Vec<AlbaContainer>,
     conditions : (Vec<(Token,Token,Token)>,Vec<(usize,char)>),
     col_nam : Vec<String>,
 }
@@ -350,12 +364,24 @@ fn get_from_bushes_with_safety(bushes : &Vec<Token>,index : usize) -> Result<Tok
 }
 
 fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
-    let container: String = match tokens.get(3) {
+    let container: Vec<AlbaContainer> = match tokens.get(3) {
         Some(s) => match s {
-            Token::String(a) => a.to_string(),
-            _ => return Err(gerr("Expected container name as a string at position 3")),
+            Token::Group(a) => {
+                let mut containers : Vec<AlbaContainer> = Vec::new();
+                for i in a{
+                    match i{
+                        Token::String(str) => {containers.push(AlbaContainer::Real(str.clone()));},
+                        Token::SubCommand(a) => {containers.push(AlbaContainer::Virtual(a.clone()))},
+                        _ => {
+                            return Err(gerr("..."));
+                        }
+                    }
+                }
+                containers
+            },
+            _ => return Err(gerr("Expected container group as a group at position 3")),
         },
-        None => return Err(gerr("Missing container name (expected at position 3)")),
+        None => return Err(gerr("Missing container group (expected at position 3)")),
     };
 
     let mut conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>) =
@@ -466,7 +492,7 @@ fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
 fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
     let first = tokens.first().ok_or_else(|| gerr("Token list is empty"))?;
     if let Token::Keyword(command) = first {
-        match command.as_str() {
+        return match command.to_uppercase().as_str() {
             "CREATE" => debug_create_command(tokens),
             "EDIT" => debug_edit_command(tokens),
             "SEARCH" => debug_search(tokens),
@@ -487,6 +513,6 @@ fn parse(input : String) -> Result<AST, Error>{
 }
 
 fn main() {
-    let tokens = parse("SEARCH ['abc'] ON 'abcdefg' WHERE 'abjk' = 'txt' AND 'ieaf' != 'og'".to_string());
+    let tokens = parse("SEARCH ['age'] ON [ 'people', (SEARCH ['age'] ON ['people'] WHERE 'job' != ''), (SEARCH ['age'] ON ['projects'] WHERE 'completed' = true) ] WHERE 'age' > 0".to_string());
     println!("{:?}",tokens);
 }

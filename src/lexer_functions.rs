@@ -1,3 +1,5 @@
+use std::io::Error;
+
 use crate::lexer;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +11,7 @@ pub enum Token{
     Bool(bool),
     Operator(String),
     Group(Vec<Token>),
+    SubCommand(Vec<Token>)
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AlbaTypes{
@@ -89,26 +92,80 @@ pub fn lexer_string_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,doug
     }
     false
 }    
+
+fn split_group_args(input: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::with_capacity(input.len());
+    let (mut in_string, mut string_sort, mut parens, mut escape) = (false, '\0', 0, false);
+
+    for c in input.chars() {
+        if escape {
+            current.push(c);
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' => { escape = true; current.push(c); }
+            '\'' | '"' => {
+                if !in_string { in_string = true; string_sort = c; }
+                else if c == string_sort { in_string = false; }
+                current.push(c);
+            }
+            '(' if !in_string => { parens += 1; current.push(c); }
+            ')' if !in_string => { if parens > 0 { parens -= 1; } current.push(c); }
+            ',' if !in_string && parens == 0 => {
+                let t = current.trim();
+                if !t.is_empty() { result.push(t.to_string()); }
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+
+    let t = current.trim();
+    if !t.is_empty() { result.push(t.to_string()); }
+
+    result
+}
+
+
 pub fn lexer_group_match<T: Iterator<Item = char>>(
     result: &mut Vec<Token>,
     dough: &mut String,
     itr: &mut T,
 ) -> bool {
     if dough.starts_with('[') {
-        // consume until ']' inclusive
+        let mut in_string : bool = false;
+        let mut string_sort : char = '\\';
+        let mut i = 1;
         while let Some(c) = itr.next() {
             dough.push(c);
-            if c == ']' {
-                break;
+            if (c == '\'' || c == '"') && !in_string{
+                string_sort = c;
+                in_string = true;
+                continue;
+            }
+            if in_string && c == string_sort{
+                in_string = false;
+                continue;
+            }
+            if c == '[' && !in_string{
+                i+=1;
+            }
+            if c == ']' && !in_string {
+                i -= 1;
+                if i == 0{
+                    break;
+                }
             }
         }
+        println!("{}",dough);
 
         if dough.ends_with(']') {
-            // strip the brackets
             let inner = &dough[1..dough.len() - 1];
             let mut abstract_tokens = Vec::with_capacity(16);
 
-            for part in inner.split(',') {
+            for part in split_group_args(&inner) {
                 let part = part.trim();
                 if part.is_empty() {
                     continue;
@@ -118,7 +175,6 @@ pub fn lexer_group_match<T: Iterator<Item = char>>(
                         abstract_tokens.push(toks.remove(0));
                     }
                     _ => {
-                        // you could log or return Err here
                         continue;
                     }
                 }
@@ -131,6 +187,42 @@ pub fn lexer_group_match<T: Iterator<Item = char>>(
     }
 
     false
+}
+pub fn lexer_subcommand_match<T: Iterator<Item = char>>(
+    result: &mut Vec<Token>,
+    dough: &mut String,
+    itr: &mut T,
+) -> Result<bool, Error> {
+    if dough.starts_with('(') {
+        let mut in_string : bool = false;
+        let mut string_sort : char = '\\';
+        while let Some(c) = itr.next() {
+            dough.push(c);
+            if (c == '\'' || c == '"') && !in_string{
+                string_sort = c;
+                in_string = true;
+                continue;
+            }
+            if in_string && c == string_sort{
+                in_string = false;
+                continue;
+            }
+            if c == ')' && !in_string {
+                break;
+            }
+        }
+        println!("{}",dough);
+
+        if dough.ends_with(')') {
+            // strip the brackets
+            let inner = &dough.clone()[1..dough.len() - 1];
+            dough.clear();
+            result.push(Token::SubCommand(lexer(inner.to_string())?));
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 const RADIX : u32= 10;

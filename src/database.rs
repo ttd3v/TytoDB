@@ -1,8 +1,8 @@
-use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{Error, ErrorKind, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc, Mutex}};
+use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc, Mutex}};
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{gerr, lexer_functions::AlbaTypes, parse, AST};
+use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 
 #[link(name = "io", kind = "static")]
@@ -97,7 +97,13 @@ impl New for Container {
 fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
     file.sync_all()
 }
-
+fn try_open_file(path: &str) -> io::Result<Option<File>> {
+    match File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(ref e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
 impl Container{
     fn len(&self) -> Result<u64,Error>{
         Ok(self.file.metadata()?.len())
@@ -245,8 +251,54 @@ impl Container{
     
         Ok(())
     }
+    pub async fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
+        let mut lidx = index.1;
+        let maxl = self.len()? - (self.headers_offset / self.element_size as u64);
+        if lidx > maxl {
+            lidx = maxl;
+        }
     
+        let idxs: (u64, u64) = (
+            index.0 * self.element_size as u64 + self.headers_offset,
+            lidx * self.element_size as u64 + self.headers_offset,
+        );
+        let buff_size: usize = (idxs.1 - idxs.0) as usize;
+        let mut buff = vec![0u8; buff_size];
+        self.file.read_exact_at(&mut buff, idxs.0)?;
     
+        let v_c = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        let t_c = self.text_mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+    
+        let mut result: Vec<Vec<AlbaTypes>> = Vec::new(); 
+        for i in index.0..lidx {
+            if let Some((deleted, row_data)) = v_c.get(&i) {
+                if *deleted {
+                    continue;
+                }
+    
+                let mut row = row_data.clone(); // Clonamos a linha MVCC
+                for value in row.iter_mut() {
+                    if let AlbaTypes::Text(c) = value {
+                        if let Some((deleted, new_text)) = t_c.get(c) {
+                            if !*deleted {
+                                *value = AlbaTypes::Text(new_text.to_string());
+                            }
+                        }
+                    }
+                }
+    
+                result.push(row); 
+            } else {
+                let start = ((i - index.0) * self.element_size as u64) as usize;
+                let end = start + self.element_size;
+                let row_buf = &buff[start..end];
+                let row = self.deserialize_row(row_buf.to_vec()).await?;
+                result.push(row);
+            }
+        }
+    
+        Ok(result)
+    }
     
     pub fn serialize_row(&self, row: &[AlbaTypes]) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(self.element_size);
@@ -281,16 +333,7 @@ impl Container{
         Ok(buffer)
     }
     
-    async fn get_element(&self, buf_index: u64) -> Result<Vec<AlbaTypes>,Error> {
-        let mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
-        if let Some((deleted, value)) = mvcc_guard.get(&buf_index) {
-            if !*deleted {
-                return Ok(value.clone());
-            }
-        }
-
-        let mut buf = vec![0u8;self.element_size];
-        self.file.read_exact_at(&mut buf, (self.headers_offset as usize +self.element_size*(buf_index as usize)) as u64)?;
+    async fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>,Error> {
         let mut index = 0;
         let mut value : Vec<AlbaTypes> = Vec::new();
         for item in self.columns.iter(){
@@ -325,7 +368,7 @@ impl Container{
                     let paydo : Vec<u8> = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
                     index += size;
                     let trimmed = paydo.iter()
-                        .take_while(|&&c| c != 0) // para parar no primeiro byte nulo
+                        .take_while(|&&c| c != 0) 
                         .cloned()
                         .collect::<Vec<u8>>();
 
@@ -333,7 +376,13 @@ impl Container{
                         Ok(s) => s,
                         Err(e) => return Err(gerr(&format!("Erro ao converter bytes para String: {}", e))),
                     };
-                    value.push(AlbaTypes::Text(str_id));
+                    let mut file = match try_open_file(&format!("{}/rf{}",self.location,str_id))? {
+                        Some(a) => a,
+                        None => {value.push(AlbaTypes::Text(str_id)); continue},
+                    };
+                    let mut st : String = String::new();
+                    file.read_to_string(&mut st)?;
+                    value.push(AlbaTypes::Text(st));
                 },
                 AlbaTypes::NONE => {
                     value.push(AlbaTypes::NONE);
@@ -551,13 +600,105 @@ memory_limit: {}
         }
         Err(gerr("Container not found"))
     }
+    
+    pub fn query<'a>(
+        &'a mut self,
+        col_names: Vec<String>,
+        containers: Vec<AlbaContainer>,
+        _conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>)
+    ) -> Pin<Box<dyn Future<Output = Result<Rows, Error>> + 'a>> {
+        Box::pin(async move {
+        let mut result: Rows = (col_names.clone(), Vec::new());
+    
+        for container in containers {
+            match container {
+                AlbaContainer::Real(container_name) => {
+                    let container = match self.container.get(&container_name) {
+                        Some(c) => c,
+                        None => return Err(gerr(&format!("There is no container named {}", container_name))),
+                    };
+    
+                    let length = container.len()?;
+                    let row_count = (length - container.headers_offset) / container.element_size as u64;
+                    let max_rows = self.settings.memory_limit / container.element_size as u64;
+    
+                    let mut processed: u64 = 0;
+                    let mut idxs: Vec<(usize, usize)> = Vec::new();
+    
+                    for (i, c1) in col_names.iter().enumerate() {
+                        for (j, c2) in container.column_names.iter().enumerate() {
+                            if c1 == c2 {
+                                idxs.push((i, j));
+                            }
+                        }
+                    }
+    
+                    while processed < row_count {
+                        let end = (processed + max_rows).min(row_count) - 1;
+                        let rows = container.get_rows((processed, end)).await?;
+                        processed = end + 1;
+    
+                        for r in rows {
+                            let mut projected = Vec::with_capacity(idxs.len());
+                            for &(_, j) in &idxs {
+                                if let Some(val) = r.get(j) {
+                                    projected.push(val.clone());
+                                }
+                            }
+                            if projected.len() == col_names.len() {
+                                result.1.push(projected);
+                            }
+                        }
+                    }
+                }
+    
+                AlbaContainer::Virtual(tokens) => {
+                    let p = debug_tokens(&tokens)?;
+                let rrr = match p {
+                    AST::Search(s) => {
+                        // This is where we need recursion, and you can directly call the function recursively
+                        self.query(s.col_nam, s.container, s.conditions).await
+                    },
+                    _ => return Err(gerr("Failed to parse")),
+                };
 
-    pub async fn execute(&mut self,input : &str) -> Result<(), Error>{
-        let ast = parse(input.to_owned())?;
+                let ast = rrr?;
+                    let headers = ast.0;
+                    let data = ast.1;
+    
+                    let mut idxs: Vec<(usize, usize)> = Vec::new();
+    
+                    for (i, c1) in col_names.iter().enumerate() {
+                        for (j, c2) in headers.iter().enumerate() {
+                            if c1 == c2 {
+                                idxs.push((i, j));
+                            }
+                        }
+                    }
+    
+                    for row in data {
+                        let mut projected = Vec::with_capacity(idxs.len());
+                        for &(_, j) in &idxs {
+                            if let Some(val) = row.get(j) {
+                                projected.push(val.clone());
+                            }
+                        }
+                        if projected.len() == col_names.len() {
+                            result.1.push(projected);
+                        }
+                    }
+                }
+            }
+        }
+    
+        Ok(result)
+    })}
+    
+    pub async fn run(&mut self, ast : AST) -> Result<Rows,Error>{
+
         let min_column : usize = self.settings.min_columns as usize;
         let max_columns : usize = self.settings.max_columns as usize;
         let max_str_len : usize = self.settings.max_str_length;
-
         match ast{
             AST::CreateContainer(structure) => {
               if !match fs::exists(format!("{}/{}",self.location,structure.name)) {Ok(a)=>a,Err(bruh)=>{return Err(bruh)}}{
@@ -739,14 +880,23 @@ memory_limit: {}
                 if self.settings.auto_commit{
                     container.commit().await?;
                 }
+            },
+            AST::Search(structure) => {
+                return Ok(self.query(structure.col_nam, structure.container, structure.conditions).await?)
             }
             _ =>{return Err(gerr("Failed to parse"));}
         }
-        
+    
+        Ok((Vec::new(),Vec::new()))
+    }
+    pub async fn execute(&mut self,input : &str) -> Result<(), Error>{
+        let ast = parse(input.to_owned())?;
+        self.run(ast).await?;
         Ok(())
     }
     
 }
+type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
 pub async fn connect(path : &str) -> Result<Database, Error>{
     let db_path = PathBuf::from(path);
