@@ -1,8 +1,8 @@
-use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc, Mutex}};
+use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc, Mutex}, vec};
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AST};
+use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AstSearch, AST};
 use rand::{Rng, distributions::Alphanumeric};
 
 #[link(name = "io", kind = "static")]
@@ -68,9 +68,10 @@ struct Container{
     text_mvcc : Arc<Mutex<HashMap<String,(bool,String)>>>,
     headers_offset : u64,
     column_names : Vec<String>,
-    path : String,
     location : String,
 }
+
+
 
 trait New {
     async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
@@ -88,7 +89,6 @@ impl New for Container {
             text_mvcc: Arc::new(Mutex::new(HashMap::new())),
             headers_offset ,
             column_names,
-            path:path.to_string(),
             location
         })
     }
@@ -223,8 +223,7 @@ impl Container{
                 };
                 
                 let buffer = txt.1.as_bytes();
-                unsafe{
-                    let c_path = match CString::new(path).map_err(|e| e.to_string()){Ok(a) => a, Err(e) => return Err(gerr(&e))};;
+                let c_path = match CString::new(path).map_err(|e| e.to_string()){Ok(a) => a, Err(e) => return Err(gerr(&e))};
                     let result = unsafe {
                         write_data(buffer.as_ptr(), buffer.len(), c_path.as_ptr())
                     };
@@ -232,7 +231,6 @@ impl Container{
                     if result != 1 {
                         eprintln!("C write_data failed")
                     }
-                }
             } else if fs::exists(&path)?{
                 fs::remove_file(&path)?
             }
@@ -251,7 +249,7 @@ impl Container{
     
         Ok(())
     }
-    pub async fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
+    pub fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
         let mut lidx = index.1;
         let maxl = self.len()? - (self.headers_offset / self.element_size as u64);
         if lidx > maxl {
@@ -276,7 +274,7 @@ impl Container{
                     continue;
                 }
     
-                let mut row = row_data.clone(); // Clonamos a linha MVCC
+                let mut row = row_data.clone();
                 for value in row.iter_mut() {
                     if let AlbaTypes::Text(c) = value {
                         if let Some((deleted, new_text)) = t_c.get(c) {
@@ -292,7 +290,7 @@ impl Container{
                 let start = ((i - index.0) * self.element_size as u64) as usize;
                 let end = start + self.element_size;
                 let row_buf = &buff[start..end];
-                let row = self.deserialize_row(row_buf.to_vec()).await?;
+                let row = self.deserialize_row(row_buf.to_vec())?;
                 result.push(row);
             }
         }
@@ -333,7 +331,7 @@ impl Container{
         Ok(buffer)
     }
     
-    async fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>,Error> {
+    fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>,Error> {
         let mut index = 0;
         let mut value : Vec<AlbaTypes> = Vec::new();
         for item in self.columns.iter(){
@@ -376,13 +374,27 @@ impl Container{
                         Ok(s) => s,
                         Err(e) => return Err(gerr(&format!("Erro ao converter bytes para String: {}", e))),
                     };
-                    let mut file = match try_open_file(&format!("{}/rf{}",self.location,str_id))? {
+                    let mut file = match try_open_file(&format!("{}/rf/{}",self.location,str_id))? {
                         Some(a) => a,
                         None => {value.push(AlbaTypes::Text(str_id)); continue},
                     };
-                    let mut st : String = String::new();
-                    file.read_to_string(&mut st)?;
-                    value.push(AlbaTypes::Text(st));
+                    let mut buffer : Vec<u8> = Vec::with_capacity(100);
+                    match file.read_to_end(&mut buffer){
+                        Ok(_) => {
+                            value.push(AlbaTypes::Text(
+                                match String::from_utf8(buffer){
+                                    Ok(str) => str,
+                                    Err(e) => {
+                                        return Err(gerr(&e.to_string()))
+                                    }
+                                }
+                            ));
+                        },
+                        Err(e) => {
+                            eprintln!(r#"failed to search for a compatible text file on the "rf" dir, using the id instead. Err: {}"#,e);
+                            value.push(AlbaTypes::Text(str_id));
+                        }
+                    };
                 },
                 AlbaTypes::NONE => {
                     value.push(AlbaTypes::NONE);
@@ -398,6 +410,212 @@ fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
     let column_types_size = max_columns;
     column_names_size + column_types_size
 }
+
+
+
+
+type QueryPage = (u64,u64,String);
+type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
+#[derive(Debug)]
+pub struct Query{
+    pub rows: Rows,
+    pub pages : Vec<QueryPage>,
+    pub current_page : QueryPage,
+    pub column_names : Vec<String>,
+    pub column_types : Vec<AlbaTypes>
+}
+impl Query{
+    fn new() -> Self{
+        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: (0,0,String::new()), column_names: Vec::new(), column_types: Vec::new() }
+    }
+    fn join(&mut self,foreign : Query){
+        self.pages.extend_from_slice(&foreign.pages);
+    }
+}
+
+
+fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: &QueryConditions) -> Result<bool, Error> {
+    if col_names.len() != row.len() {
+        return Err(gerr(&format!("Row data does not match column names: expected {} columns, got {} values", col_names.len(), row.len())));
+    }
+    
+    let mut indexes: HashMap<String, AlbaTypes> = HashMap::new();
+    for i in row.iter().enumerate() {
+        let string = match col_names.get(i.0) {
+            Some(a) => a,
+            None => return Ok(false)
+        };
+        indexes.insert(string.clone(), i.1.clone());
+    }
+
+    let and_or_indexes = &conditions.1;
+    let operators = &conditions.0;
+
+    if operators.is_empty() {
+        return Ok(true);
+    }
+
+    let mut booleans: Vec<bool> = Vec::with_capacity(operators.len());
+    for b in operators {
+        let first = if let Token::String(a) = &b.0 {
+            match indexes.get(a) {
+                Some(a) => a.clone(),
+                None => return Err(gerr(&format!("In query condition, column '{}' not found in row data", a)))
+            }
+        } else {
+            return Err(gerr("In query condition, expected a string for column name, but found a different token type"));
+        };
+        
+        let operator = if let Token::Operator(a) = &b.1 {
+            a
+        } else {
+            return Err(gerr("Invalid type for operator"));
+        };
+
+        let result = match (first,&b.2) {
+            (AlbaTypes::Bool(val1),Token::Bool(val2)) => {
+                match operator.as_str() {
+                    "=" | "==" => val1 == *val2,
+                    "!=" | "<>" => val1 != *val2,
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for boolean comparison", operator)))
+                }
+                    
+            },
+            (AlbaTypes::Int(val1),Token::Int(val)) => {
+                let val2 = *val as i32;
+                match operator.as_str() {
+                    "=" | "==" => val1 == val2,
+                    "!=" | "<>" => val1 != val2,
+                    ">" => val1 > val2,
+                    "<" => val1 < val2,
+                    ">=" => val1 >= val2,
+                    "<=" => val1 <= val2,
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for integer comparison", operator)))
+                        
+                }
+            },
+            (AlbaTypes::Bigint(val1),Token::Int(val2)) => {
+                let val2_i64 = *val2 as i64;
+                match operator.as_str() {
+                    "=" | "==" => val1 == val2_i64,
+                    "!=" | "<>" => val1 != val2_i64,
+                    ">" => val1 > val2_i64,
+                    "<" => val1 < val2_i64,
+                    ">=" => val1 >= val2_i64,
+                    "<=" => val1 <= val2_i64,
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for bigint comparison", operator)))
+                }
+                    
+            },
+            (AlbaTypes::Float(val1),Token::Float(val2)) => {
+                match operator.as_str() {
+                    "=" | "==" => (val1 - val2).abs() < f64::EPSILON,
+                    "!=" | "<>" => (val1 - val2).abs() >= f64::EPSILON,
+                    ">" => val1 > *val2,
+                    "<" => val1 < *val2,
+                    ">=" => val1 >= *val2,
+                    "<=" => val1 <= *val2,
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for float comparison", operator)))
+                }
+            },
+            (AlbaTypes::Text(val1),Token::String(val2)) => {
+                match operator.as_str() {
+                    "=" | "==" => val1 == *val2,
+                    "!=" | "<>" => val1 != *val2,
+                    "&>" => val1.contains(val2),
+                    "&&>" => val1.to_lowercase().contains(&val2.to_lowercase()),
+                    "&&&>" => val1.to_lowercase().trim().contains(val2.to_lowercase().trim()),
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for string comparison", operator)))
+                }
+                    
+            },
+            (AlbaTypes::NONE,_) => return Err(gerr("Cannot compare NULL values")),
+            _ => {
+                return Err(gerr("Failed"))
+            }
+        };
+
+        booleans.push(result);
+    }
+    if booleans.is_empty() {
+        return Ok(true); 
+    }
+
+    let mut final_result = booleans[0];
+    for (idx, op) in and_or_indexes.iter() {
+        let next_bool = booleans.get(*idx + 1).ok_or(gerr("Invalid condition index"))?;
+        final_result = match op {
+            'A' | 'a' => final_result && *next_bool,
+            'O' | 'o' => final_result || *next_bool,
+            _ => return Err(gerr(&format!("Unknown logical operator: {}", op)))
+        };
+    }
+
+    Ok(final_result)
+}
+
+impl Database{
+    fn ancient_query(&mut self, col_names : &Vec<String>,containers : &[AlbaContainer],conditions : &QueryConditions) -> Result<Query,Error>{
+        let mut final_query = Query::new();
+        if let AlbaContainer::Real(container_name) = &containers[0]{
+            let container = match self.container.get(container_name){
+                Some(a) => a,
+                None => return Err(gerr(&format!("No container named {}",container_name)))
+            };
+            let length = container.arrlen()?;
+            let page_size = (length*container.element_size as u64)/self.settings.memory_limit;
+            let mut cursor : u64 = 0;
+
+            final_query.column_names = col_names.clone();
+            while cursor < length{
+                let rows = container.get_rows((cursor,cursor+page_size))?;
+                let start_index = cursor.clone();
+                let mut end_index = start_index;
+                for (number,row) in rows.iter().enumerate(){
+                    if condition_checker(row, &col_names, &conditions)?{
+                        end_index = start_index + number as u64;
+                    }
+                }
+                cursor += rows.len() as u64;
+                final_query.pages.push((start_index,end_index,container_name.to_string()));
+            }
+            return Ok(final_query);
+        }
+        Err(gerr("No valid containers specified for query processing"))
+    }
+
+    fn query_diver(&mut self,col_names : &Vec<String>,containers : &[AlbaContainer],conditions : &QueryConditions) -> Result<Query,Error>{
+        
+        let cl = containers.len();
+
+        if cl == 1{
+            return Ok(self.ancient_query(col_names, containers,conditions)?)
+        }
+        if cl > 1{
+            let mut final_query = Query::new();
+            final_query.column_names = col_names.to_vec();
+
+            let middle = cl/2;
+            let q1 = self.query_diver(&col_names, &containers[..middle],&conditions)?;
+            let q2 = self.query_diver(&col_names, &containers[middle..],&conditions)?;
+            final_query.join(q1);
+            final_query.join(q2);
+            return Ok(final_query)
+        }
+
+
+        Err(gerr("No valid containers specified for query processing"))
+    }
+
+}
+impl Database{
+    pub async fn query<'a>(&'a mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
+        Ok(self.query_diver(&col_names, &containers, &conditions)?)
+    }
+}
+
+
+
 impl Database {
     fn set_default_settings(&self) -> Result<(), Error> {
         let path = format!("{}/{}", self.location,SETTINGS_FILE);
@@ -532,7 +750,7 @@ memory_limit: {}
         let path = format!("{}/{}",self.location,container_name);
         let max_columns : usize = self.settings.max_columns as usize;
         let max_str_len : usize = self.settings.max_str_length;
-        let strhs = (max_str_len * max_columns);
+        let strhs = max_str_len * max_columns;
         let exists = fs::exists(&path)?;
         if exists{
             let header_size = calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize);
@@ -601,100 +819,7 @@ memory_limit: {}
         Err(gerr("Container not found"))
     }
     
-    pub fn query<'a>(
-        &'a mut self,
-        col_names: Vec<String>,
-        containers: Vec<AlbaContainer>,
-        _conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>)
-    ) -> Pin<Box<dyn Future<Output = Result<Rows, Error>> + 'a>> {
-        Box::pin(async move {
-        let mut result: Rows = (col_names.clone(), Vec::new());
-    
-        for container in containers {
-            match container {
-                AlbaContainer::Real(container_name) => {
-                    let container = match self.container.get(&container_name) {
-                        Some(c) => c,
-                        None => return Err(gerr(&format!("There is no container named {}", container_name))),
-                    };
-    
-                    let length = container.len()?;
-                    let row_count = (length - container.headers_offset) / container.element_size as u64;
-                    let max_rows = self.settings.memory_limit / container.element_size as u64;
-    
-                    let mut processed: u64 = 0;
-                    let mut idxs: Vec<(usize, usize)> = Vec::new();
-    
-                    for (i, c1) in col_names.iter().enumerate() {
-                        for (j, c2) in container.column_names.iter().enumerate() {
-                            if c1 == c2 {
-                                idxs.push((i, j));
-                            }
-                        }
-                    }
-    
-                    while processed < row_count {
-                        let end = (processed + max_rows).min(row_count) - 1;
-                        let rows = container.get_rows((processed, end)).await?;
-                        processed = end + 1;
-    
-                        for r in rows {
-                            let mut projected = Vec::with_capacity(idxs.len());
-                            for &(_, j) in &idxs {
-                                if let Some(val) = r.get(j) {
-                                    projected.push(val.clone());
-                                }
-                            }
-                            if projected.len() == col_names.len() {
-                                result.1.push(projected);
-                            }
-                        }
-                    }
-                }
-    
-                AlbaContainer::Virtual(tokens) => {
-                    let p = debug_tokens(&tokens)?;
-                let rrr = match p {
-                    AST::Search(s) => {
-                        // This is where we need recursion, and you can directly call the function recursively
-                        self.query(s.col_nam, s.container, s.conditions).await
-                    },
-                    _ => return Err(gerr("Failed to parse")),
-                };
-
-                let ast = rrr?;
-                    let headers = ast.0;
-                    let data = ast.1;
-    
-                    let mut idxs: Vec<(usize, usize)> = Vec::new();
-    
-                    for (i, c1) in col_names.iter().enumerate() {
-                        for (j, c2) in headers.iter().enumerate() {
-                            if c1 == c2 {
-                                idxs.push((i, j));
-                            }
-                        }
-                    }
-    
-                    for row in data {
-                        let mut projected = Vec::with_capacity(idxs.len());
-                        for &(_, j) in &idxs {
-                            if let Some(val) = row.get(j) {
-                                projected.push(val.clone());
-                            }
-                        }
-                        if projected.len() == col_names.len() {
-                            result.1.push(projected);
-                        }
-                    }
-                }
-            }
-        }
-    
-        Ok(result)
-    })}
-    
-    pub async fn run(&mut self, ast : AST) -> Result<Rows,Error>{
+    pub async fn run(&mut self, ast : AST) -> Result<Query,Error>{
 
         let min_column : usize = self.settings.min_columns as usize;
         let max_columns : usize = self.settings.max_columns as usize;
@@ -706,7 +831,7 @@ memory_limit: {}
                 let cv_len = structure.col_val.len();
 
                 if cn_len != cv_len{
-                    return Err(gerr("Mismatch between number of column names and column values"))
+                    return Err(gerr(&format!("Mismatch in CREATE CONTAINER: provided {} column names but {} column types", cn_len, cv_len)))
                 }
                 if cn_len < min_column || cv_len < min_column{
                     if cn_len < min_column {
@@ -804,11 +929,10 @@ memory_limit: {}
                     None => return Err(gerr(&format!("Container '{}' does not exist.", structure.container))),
                     Some(a) => a
                 };
-                if structure.col_nam.len()!=structure.col_val.len(){
+                if structure.col_nam.len() != structure.col_val.len() {
                     return Err(gerr(&format!(
-                        "Column count mismatch: expected {} values for {} columns, but got {}.",
+                        "In CREATE ROW, expected {} values for the specified columns, but got {}",
                         structure.col_nam.len(),
-                        structure.col_nam.join(", "),
                         structure.col_val.len()
                     )));
                 }
@@ -887,18 +1011,23 @@ memory_limit: {}
             _ =>{return Err(gerr("Failed to parse"));}
         }
     
-        Ok((Vec::new(),Vec::new()))
+        Ok(Query::new())
     }
-    pub async fn execute(&mut self,input : &str) -> Result<(), Error>{
+    pub async fn execute(&mut self,input : &str) -> Result<Query, Error>{
         let ast = parse(input.to_owned())?;
-        self.run(ast).await?;
-        Ok(())
+        Ok(self.run(ast).await?)
     }
     
 }
 type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
-pub async fn connect(path : &str) -> Result<Database, Error>{
+pub async fn connect(input_path : &str) -> Result<Database, Error>{
+    let path : &str = if input_path.ends_with('/') {
+        &input_path[..input_path.len()-1]
+    }else{
+        input_path
+    };
+
     let db_path = PathBuf::from(path);
     println!("{}",path);
     if db_path.exists() {

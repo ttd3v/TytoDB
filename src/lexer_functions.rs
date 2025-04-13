@@ -51,8 +51,8 @@ impl TryFrom<Token> for AlbaTypes {
                 "TEXT" => Ok(AlbaTypes::Text(String::new())),
                 _ => return Err(format!("Unknown type keyword: {}", s).leak()),
             },
-            _ =>{
-                let va = format!("unsupported token type: {:#?}",token);
+            _ => {
+                let va = format!("Cannot convert token to AlbaTypes: unsupported token type {:#?}. Expected one of: String, Int, Float, Bool, or Keyword (for type definitions).", token);
                 return Err(va.leak());
             }
         }

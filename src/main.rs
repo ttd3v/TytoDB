@@ -1,4 +1,3 @@
-mod create_inputs_for_testing;
 mod lexer_functions;
 mod database;
 use std::{io::{Error,ErrorKind}, sync::Arc};
@@ -42,7 +41,7 @@ fn lexer(input: String) -> Result<Vec<Token>, Error> {
     }
 
     if !dough.trim().is_empty() {
-        return Err(Error::new(ErrorKind::InvalidInput, format!("Unexpected token: {}", dough)));
+        return Err(Error::new(ErrorKind::InvalidInput, format!("Unexpected token '{}' at end of input. Expected a valid keyword, string, number, boolean, group, or operator.", dough)));
     }
 
     if result.is_empty() {
@@ -139,7 +138,7 @@ fn parser_debugger_extract_string(output : &mut String,list : &Vec<Token>,index 
                 output.push_str(s.as_str());
                 return None
             },
-            _ => {print!("{:?}",output);return Some(gerr("Invalid type, must be a string"));}
+            _ => { return Some(gerr(&format!("Expected a string token at position {}, but found {:?}", index, cn))); }
         }
     }else{
         return Some(gerr("Missing a string"));
@@ -273,7 +272,7 @@ fn debug_edit_command(tokens : &Vec<Token>) -> Result<AST,Error> {
                                 Token::Keyword(a) if a.to_uppercase() == "WHERE" => false,
                                 _ => true,
                             } {
-                                return Err(gerr(r#"Expected keyword "WHERE" at position 6"#));
+                                return Err(gerr(&format!(r#"In EDIT ROW command, expected keyword 'WHERE' at position 6, but found {:?}"#, tok)));
                             }
 
                             if let Some(iterator_of_tokens) = tokens.get(7..) {
@@ -407,7 +406,7 @@ fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
             Token::Keyword(a) if a.to_uppercase() == "ON" => false,
             _ => true,
         } {
-            return Err(gerr(r#"Expected keyword "ON" at position 2"#));
+            return Err(gerr(&format!(r#"In SEARCH command, expected keyword 'ON' at position 2, but found {:?}"#, tok)));
         }
     }
 
@@ -512,7 +511,11 @@ fn parse(input : String) -> Result<AST, Error>{
     return debug_tokens(&tokens)
 }
 
-fn main() {
-    let tokens = parse("SEARCH ['age'] ON [ 'people', (SEARCH ['age'] ON ['people'] WHERE 'job' != ''), (SEARCH ['age'] ON ['projects'] WHERE 'completed' = true) ] WHERE 'age' > 0".to_string());
-    println!("{:?}",tokens);
+#[tokio::main]
+async fn main() {
+    if let  Ok(mut c) = connect("/home/theo/Desktop/tytodb/").await{
+        let tokens = c.execute("SEARCH ['1'] ON ['my_container']").await.unwrap();
+        println!("{:?}",tokens);
+    }
+    
 }
