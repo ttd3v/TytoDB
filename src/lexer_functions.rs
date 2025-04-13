@@ -305,6 +305,42 @@ pub fn lexer_operator_match<T: Iterator<Item = char>>(
                 "<"
             }
         },
+        '&' => {
+            if let Some(&next_char) = itr.peek() {
+                if next_char == '&' {
+                    itr.next();
+                    if let Some(&third_char) = itr.peek() {
+                        if third_char == '&' {
+                            itr.next();
+                            if let Some(&fourth_char) = itr.peek() {
+                                if fourth_char == '>' {
+                                    itr.next();
+                                    "&&&>"
+                                } else {
+                                    "&&&"
+                                }
+                            } else {
+                                "&&&"
+                            }
+                        } else if third_char == '>' {
+                            itr.next();
+                            "&&>"
+                        } else {
+                            "&&"
+                        }
+                    } else {
+                        "&&"
+                    }
+                } else if next_char == '>' {
+                    itr.next();
+                    "&>"
+                } else {
+                    "&"
+                }
+            } else {
+                "&"
+            }
+        },
         '=' => {
             if let Some(&next_char) = itr.peek() {
                 if next_char == '=' {

@@ -4,6 +4,7 @@ use size_of;
 use serde_yaml;
 use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AstSearch, AST};
 use rand::{Rng, distributions::Alphanumeric};
+use regex::Regex;
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
@@ -251,7 +252,11 @@ impl Container{
     }
     pub fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
         let mut lidx = index.1;
-        let maxl = self.len()? - (self.headers_offset / self.element_size as u64);
+        let maxl = if self.len()? > self.headers_offset {
+            (self.len()? - self.headers_offset) / self.element_size as u64
+        } else {
+            0
+        };
         if lidx > maxl {
             lidx = maxl;
         }
@@ -413,23 +418,83 @@ fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
 
 
 
-
-type QueryPage = (u64,u64,String);
+const PAGE_SIZE : usize = 100;
+type QueryPage = (Vec<u64>,String);
 type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
 #[derive(Debug)]
 pub struct Query{
     pub rows: Rows,
     pub pages : Vec<QueryPage>,
-    pub current_page : QueryPage,
+    pub current_page : usize,
     pub column_names : Vec<String>,
-    pub column_types : Vec<AlbaTypes>
+    column_types : Vec<AlbaTypes>
 }
 impl Query{
-    fn new() -> Self{
-        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: (0,0,String::new()), column_names: Vec::new(), column_types: Vec::new() }
+    fn new(column_types : Vec<AlbaTypes>) -> Self{
+        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: 0, column_names: Vec::new(), column_types: column_types}
     }
-    fn join(&mut self,foreign : Query){
-        self.pages.extend_from_slice(&foreign.pages);
+    pub fn join(&mut self, foreign: Query) {
+        if foreign.column_types != self.column_types {
+            return;
+        }
+        let mut foreign_vec = foreign.pages;
+        for (i, _cn) in self.pages.iter_mut() {
+            for (f_i, _f_cn) in foreign_vec.iter_mut() {
+                if i.len() < PAGE_SIZE && !f_i.is_empty() {
+                    while i.len() < PAGE_SIZE && !f_i.is_empty() {
+                        if let Some(a) = f_i.pop() {
+                            i.push(a);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pub fn load_rows(&mut self,database : &mut Database) -> Result<(),Error>{
+        let page = match self.pages.get(self.current_page) {
+            Some(a) => a,
+            None => return Err(gerr("The is no page"))
+        };
+        let container = match database.container.get(&page.1){
+            Some(a) => a,
+            None => {
+                return Err(gerr(&format!("There is no container in the given database named {}",page.1)))
+            }
+        };
+        let mut rows = Vec::new();
+        for i in &page.0{
+            match container.get_rows((*i,*i+1))?.get(0) {
+                Some(a) => rows.push(a.clone()),
+                None => {continue;}
+            }
+        }
+        self.rows = (container.column_names.clone(),rows);
+        Ok(())
+    }
+    pub fn next(&mut self, database: &mut Database) -> Result<(), Error> {
+        if self.pages.is_empty() {
+            return Ok(());
+        }
+        let new_page = self.current_page.saturating_add(1);
+        if new_page >= self.pages.len() {
+            return Ok(()); 
+        }
+        self.current_page = new_page;
+        self.load_rows(database)?;
+        Ok(())
+    }
+
+    pub fn previous(&mut self, database: &mut Database) -> Result<(), Error> {
+        if self.pages.is_empty() {
+            return Ok(());
+        }
+        let new_page = self.current_page.saturating_sub(1);
+        if self.current_page == 0 {
+            return Ok(()); 
+        }
+        self.current_page = new_page;
+        self.load_rows(database)?;
+        Ok(())
     }
 }
 
@@ -523,8 +588,14 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
                     "=" | "==" => val1 == *val2,
                     "!=" | "<>" => val1 != *val2,
                     "&>" => val1.contains(val2),
-                    "&&>" => val1.to_lowercase().contains(&val2.to_lowercase()),
-                    "&&&>" => val1.to_lowercase().trim().contains(val2.to_lowercase().trim()),
+                    "&&>" => val1.to_lowercase().contains(val2.to_lowercase().as_str()),
+                    "&&&>" => {
+                        let reg = match Regex::new(&val2){
+                            Ok(a) => a,
+                            Err(e) => return Err(gerr(&e.to_string()))
+                        };
+                        reg.is_match(&val1)
+                    },
                     _ => return Err(gerr(&format!("Invalid operator '{}' for string comparison", operator)))
                 }
                     
@@ -555,30 +626,35 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 }
 
 impl Database{
-    fn ancient_query(&mut self, col_names : &Vec<String>,containers : &[AlbaContainer],conditions : &QueryConditions) -> Result<Query,Error>{
-        let mut final_query = Query::new();
-        if let AlbaContainer::Real(container_name) = &containers[0]{
-            let container = match self.container.get(container_name){
+    fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
+        
+        if let AlbaContainer::Real(container_name) = &containers[0] {
+            let container = match self.container.get(container_name) {
                 Some(a) => a,
-                None => return Err(gerr(&format!("No container named {}",container_name)))
+                None => return Err(gerr(&format!("No container named {}", container_name))),
             };
+            let mut final_query = Query::new(container.columns.clone());
             let length = container.arrlen()?;
-            let page_size = (length*container.element_size as u64)/self.settings.memory_limit;
-            let mut cursor : u64 = 0;
-
+            let mut page_size = (length * container.element_size as u64) / self.settings.memory_limit;
+            if page_size < 1 {
+                page_size = 1;
+            }
+            let mut cursor: u64 = 0;
             final_query.column_names = col_names.clone();
-            while cursor < length{
-                let rows = container.get_rows((cursor,cursor+page_size))?;
-                let start_index = cursor.clone();
-                let mut end_index = start_index;
-                for (number,row) in rows.iter().enumerate(){
-                    if condition_checker(row, &col_names, &conditions)?{
-                        end_index = start_index + number as u64;
+            let mut list : Vec<u64> = Vec::new();
+            while cursor < length {
+                let rows = container.get_rows((cursor, cursor + page_size))?;
+    
+                for (number, row) in rows.iter().enumerate() {
+                    let row_index = cursor + number as u64;
+                    if condition_checker(row, &container.column_names, conditions)? {
+                        list.push(row_index);
                     }
                 }
-                cursor += rows.len() as u64;
-                final_query.pages.push((start_index,end_index,container_name.to_string()));
+                cursor += page_size as u64;
             }
+    
+            final_query.pages = vec![(list,container_name.clone())];
             return Ok(final_query);
         }
         Err(gerr("No valid containers specified for query processing"))
@@ -589,28 +665,33 @@ impl Database{
         let cl = containers.len();
 
         if cl == 1{
-            return Ok(self.ancient_query(col_names, containers,conditions)?)
+            let d = self.ancient_query(col_names, containers,conditions)?;
+            println!("{:?}",d);
+            return Ok(d)
         }
         if cl > 1{
-            let mut final_query = Query::new();
-            final_query.column_names = col_names.to_vec();
 
             let middle = cl/2;
             let q1 = self.query_diver(&col_names, &containers[..middle],&conditions)?;
+            let mut final_query = Query::new(q1.column_types.clone());
+            final_query.column_names = col_names.to_vec();
             let q2 = self.query_diver(&col_names, &containers[middle..],&conditions)?;
             final_query.join(q1);
             final_query.join(q2);
+            println!("{:?}{:?}{:?}",col_names,containers,final_query);
             return Ok(final_query)
         }
-
 
         Err(gerr("No valid containers specified for query processing"))
     }
 
 }
 impl Database{
-    pub async fn query<'a>(&'a mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
-        Ok(self.query_diver(&col_names, &containers, &conditions)?)
+    pub async fn query(&mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
+        let mut query: Query = self.query_diver(&col_names, &containers, &conditions)?;
+        query.load_rows(self)?;
+        println!("{:?}",query);
+        return Ok(query)
     }
 }
 
@@ -923,8 +1004,7 @@ memory_limit: {}
                 return Err(gerr("A container with the specified name already exists"))
             }
             },
-            AST::CreateRow(mut structure) => {
-                // CREATE ROW [col_nam][col_val] ON <container:name>
+            AST::CreateRow(structure) => {
                 let container = match self.container.get_mut(&structure.container) {
                     None => return Err(gerr(&format!("Container '{}' does not exist.", structure.container))),
                     Some(a) => a
@@ -936,72 +1016,52 @@ memory_limit: {}
                         structure.col_val.len()
                     )));
                 }
-                for i in &structure.col_nam{
-                    if !container.column_names.contains(&i){
-                        return Err(gerr(&format!("There is no column {} in the container {}",i,structure.container)))
+                for i in &structure.col_nam {
+                    if !container.column_names.contains(&i) {
+                        return Err(gerr(&format!("There is no column {} in the container {}", i, structure.container)))
                     }
                 }
-
-                let mut written_text : Vec<String> = Vec::new();
+            
                 let mut val: Vec<AlbaTypes> = container.columns.clone();
                 for (index, col_name) in structure.col_nam.iter().enumerate() {
                     match container.column_names.iter().position(|c| c == col_name) {
                         Some(ri) => {
-                            let input_val = structure.col_val.get(index)
-                                .ok_or_else(|| gerr("Internal error: missing value during assignment."))?;
-                            let expected_val = container.columns.get(ri)
-                                .ok_or_else(|| gerr("Internal error: missing column type definition."))?;
-                            let _ = discriminant(input_val) == discriminant(expected_val)
-                                || (matches!(expected_val, AlbaTypes::Bigint(_)) && matches!(input_val, AlbaTypes::Int(_)));
-
-                
-                            if discriminant(input_val) == discriminant(expected_val) {
-                                if discriminant(expected_val) == discriminant(&AlbaTypes::Text(String::new())){
+                            let input_val = structure.col_val.get(index).cloned().unwrap();
+                            let expected_val = container.columns[ri].clone();
+                            match (&expected_val, &input_val) {
+                                (AlbaTypes::Text(_), AlbaTypes::Text(s)) => {
                                     let mut code = generate_secure_code(self.settings.max_str_length);
-                                    let txt_path = format!("{}/rf/{}",self.location,code);
-                                    while fs::exists(&txt_path)?{
+                                    let txt_path = format!("{}/rf/{}", self.location, code);
+                                    while fs::exists(&txt_path)? {
                                         let code_full = generate_secure_code(self.settings.max_str_length);
                                         code = code_full.chars().take(max_str_len).collect::<String>();
-
                                     }
-                                    written_text.push(code.clone());
-                                    let to_write = match structure.col_val.get(index).clone(){
-                                        Some(a) => a.to_owned(),
-                                        None => {return Err(gerr("failed to get the given value"))}
-                                    };
-                                    
-                                    structure.col_val[index] = AlbaTypes::Text(code.clone());
-
-                                    let mut txt_mvcc = match container.text_mvcc.lock(){
-                                        Ok(a) => a,
-                                        Err(e) => {
-                                            return Err(gerr(&e.to_string()))
-                                        }
-                                    };
-                                    let text_to_write : String = match to_write{
-                                        AlbaTypes::Text(a) => a.to_string(),
-                                        _ => "".to_string()
-                                    };
-                                    txt_mvcc.insert(code,(false,text_to_write));
-                                    drop(txt_mvcc);
-                                }else{
-                                    val[ri] = input_val.clone();
+                                    val[ri] = AlbaTypes::Text(code.clone());
+                                    let mut txt_mvcc = container.text_mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+                                    txt_mvcc.insert(code, (false, s.to_string()));
+                                },
+                                (AlbaTypes::Bigint(_), AlbaTypes::Int(i)) => {
+                                    val[ri] = AlbaTypes::Bigint(*i as i64);
+                                },
+                                _ if discriminant(&input_val) == discriminant(&expected_val) => {
+                                    val[ri] = input_val;
+                                },
+                                _ => {
+                                    return Err(gerr(&format!(
+                                        "Type mismatch for column '{}': expected {:?}, got {:?}.",
+                                        col_name, expected_val, input_val
+                                    )));
                                 }
-                            } else {
-                                return Err(gerr(&format!(
-                                    "Type mismatch for column '{}': expected {:?}, got {:?}.",
-                                    col_name, expected_val, input_val
-                                )));
                             }
                         },
                         None => return Err(gerr(&format!(
                             "Column '{}' not found in container '{}'.",
                             col_name, structure.container
-                        )))
+                        ))),
                     }
                 }
                 container.push_row(&val)?;
-                if self.settings.auto_commit{
+                if self.settings.auto_commit {
                     container.commit().await?;
                 }
             },
@@ -1011,7 +1071,7 @@ memory_limit: {}
             _ =>{return Err(gerr("Failed to parse"));}
         }
     
-        Ok(Query::new())
+        Ok(Query::new(Vec::new()))
     }
     pub async fn execute(&mut self,input : &str) -> Result<Query, Error>{
         let ast = parse(input.to_owned())?;
