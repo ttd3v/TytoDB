@@ -1,4 +1,4 @@
-use std::io::Error;
+use std::{io::{Error, ErrorKind}, mem::discriminant};
 
 use crate::lexer;
 
@@ -22,6 +22,156 @@ pub enum AlbaTypes{
     Bool(bool),
     NONE
 }
+
+impl AlbaTypes {
+    pub fn try_from_existing(&self, i: AlbaTypes) -> Result<AlbaTypes, Error> {
+        match self {
+            AlbaTypes::Text(_) => {
+                let text = match i {
+                    AlbaTypes::Text(s) => s,
+                    AlbaTypes::Int(n) => n.to_string(),
+                    AlbaTypes::Bigint(n) => n.to_string(),
+                    AlbaTypes::Float(f) => f.to_string(),
+                    AlbaTypes::Bool(b) => b.to_string(),
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Text")),
+                };
+                Ok(AlbaTypes::Text(text))
+            }
+            AlbaTypes::Int(_) => {
+                let int_val = match i {
+                    AlbaTypes::Int(n) => n,
+                    AlbaTypes::Bigint(n) => {
+                        if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
+                            n as i32
+                        } else {
+                            return Err(Error::new(ErrorKind::InvalidData, "Bigint value out of range for i32"));
+                        }
+                    }
+                    AlbaTypes::Float(f) => {
+                        if f.is_nan() || f.is_infinite() {
+                            return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NaN or infinite float to i32"));
+                        }
+                        f as i32
+                    }
+                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Text(s) => {
+                        match s.parse::<i32>() {
+                            Ok(n) => n,
+                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as i32", s))),
+                        }
+                    }
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Int")),
+                };
+                Ok(AlbaTypes::Int(int_val))
+            }
+            AlbaTypes::Bigint(_) => {
+                let bigint_val = match i {
+                    AlbaTypes::Bigint(n) => n,
+                    AlbaTypes::Int(n) => n as i64,
+                    AlbaTypes::Float(f) => {
+                        if f.is_nan() || f.is_infinite() {
+                            return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NaN or infinite float to i64"));
+                        }
+                        f as i64
+                    }
+                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Text(s) => {
+                        match s.parse::<i64>() {
+                            Ok(n) => n,
+                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as i64", s))),
+                        }
+                    }
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bigint")),
+                };
+                Ok(AlbaTypes::Bigint(bigint_val))
+            }
+            AlbaTypes::Float(_) => {
+                let float_val = match i {
+                    AlbaTypes::Float(f) => f,
+                    AlbaTypes::Int(n) => n as f64,
+                    AlbaTypes::Bigint(n) => n as f64,
+                    AlbaTypes::Bool(b) => if b { 1.0 } else { 0.0 },
+                    AlbaTypes::Text(s) => {
+                        match s.parse::<f64>() {
+                            Ok(f) => f,
+                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as f64", s))),
+                        }
+                    }
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Float")),
+                };
+                Ok(AlbaTypes::Float(float_val))
+            }
+            AlbaTypes::Bool(_) => {
+                let bool_val = match i {
+                    AlbaTypes::Bool(b) => b,
+                    AlbaTypes::Int(n) => n != 0,
+                    AlbaTypes::Bigint(n) => n != 0,
+                    AlbaTypes::Float(f) => f != 0.0,
+                    AlbaTypes::Text(s) => {
+                        let trimmed = s.trim().to_lowercase();
+                        match trimmed.as_str() {
+                            "0" => false,
+                            "1" => true,
+                            "f" => false,
+                            "t" => true,
+                            "false" => false,
+                            "true" => true,
+                            "" => return Err(Error::new(ErrorKind::InvalidData, "Empty string cannot be converted to boolean")),
+                            _ => return Err(Error::new(ErrorKind::InvalidData, format!("Invalid boolean string: '{}'", s))),
+                        }
+                    }
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bool")),
+                };
+                Ok(AlbaTypes::Bool(bool_val))
+            }
+            AlbaTypes::NONE => {
+                Ok(AlbaTypes::NONE)
+            }
+        }
+    }
+}
+
+/*
+Types and it's size
++-----------+---------------+
+| TYPE NAME |   BYTE SIZE   |
++-----------+---------------+
+| CHAR      |   1           |
+| STRING-SS |   5           |
+| STRING-SM |   20          |
+| STRING-SB |   50          |
+| STRING-SL |   75          |
+| STRING-MS |   100         |
+| STRING-MM |   135         |
+| STRING-MB |   150         |
+| STRING-ML |   175         |
+| STRING-BS |   200         |
+| STRING-BM |   250         |
+| STRING-BB |   350         |
+| STRING-BL |   400         |
+| STRING-LS |   500         |
+| STRING-LM |   600         |
+| STRING-LB |   700         |
+| STRING-LL |   10000       |
+| BLOB-SS   |   250         |
+| BLOB-SM   |   500         |
+| BLOB-SB   |   750         |
+| BLOB-SL   |   1000        |
+| BLOB-MS   |   25000       |
+| BLOB-MM   |   50000       |
+| BLOB-MB   |   75000       |
+| BLOB-ML   |   100000      |
+| BLOB-BS   |   250000      |
+| BLOB-BM   |   500000      |
+| BLOB-BB   |   750000      |
+| BLOB-BL   |   1000000     |
+| BLOB-LS   |   250000000   |
+| BLOB-LM   |   500000000   |
+| BLOB-LB   |   750000000   |
+| BLOB-LL   |   1000000000  |
++-----------+---------------+
+*/
+
 
 
 impl TryFrom<Token> for AlbaTypes {
@@ -77,9 +227,14 @@ pub fn lexer_string_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,doug
     }
     if dough.starts_with('\'') || dough.starts_with('"'){
         if let Some(quote_type) = dough.chars().nth(0){
+            let mut escaped = false;
             while let Some(s) = itr.next() {
+                if s == '\\'{
+                    escaped = true
+                }
                 dough.push(s);
-                if s == quote_type {
+                
+                if s == quote_type && !escaped {
                     break;
                 }
             }

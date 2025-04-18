@@ -244,8 +244,7 @@ impl Container{
         println!("commit: COMMIT SUCCESSFUL!");
         println!("commit: Starting to sync...");
                 
-        let file = self.file.try_clone()?; 
-        tokio::task::spawn_blocking(move || sync_file(&file));
+        sync_file(&self.file)?;
         println!("commit: Sync!");
     
         Ok(())
@@ -265,6 +264,7 @@ impl Container{
             index.0 * self.element_size as u64 + self.headers_offset,
             lidx * self.element_size as u64 + self.headers_offset,
         );
+        
         let buff_size: usize = (idxs.1 - idxs.0) as usize;
         let mut buff = vec![0u8; buff_size];
         self.file.read_exact_at(&mut buff, idxs.0)?;
@@ -280,11 +280,28 @@ impl Container{
                 }
     
                 let mut row = row_data.clone();
+                match v_c.get(&i){
+                    Some(row_in_mvcc) => {
+                        if !row_in_mvcc.0{
+                            row = row_in_mvcc.1.clone()
+                        }
+                    },
+                    None => {}
+                }
                 for value in row.iter_mut() {
                     if let AlbaTypes::Text(c) = value {
                         if let Some((deleted, new_text)) = t_c.get(c) {
                             if !*deleted {
                                 *value = AlbaTypes::Text(new_text.to_string());
+                            }
+                        }else{
+                            match fs::File::open(format!("{}/rf/{}",self.location,c)){
+                                Ok(mut a) => {
+                                    let mut bu : Vec<u8> = Vec::new();
+                                    a.read_to_end(&mut bu)?;
+                                    *value = AlbaTypes::Text(match String::from_utf8(bu){Ok(a) => a,Err(e)=>return Err(gerr(&e.to_string()))})
+                                },
+                                Err(e) => {return Err(e)}
                             }
                         }
                     }
@@ -451,9 +468,12 @@ impl Query{
         }
     }
     pub fn load_rows(&mut self,database : &mut Database) -> Result<(),Error>{
+        if self.pages.len() == 0{
+            return Ok(())
+        }
         let page = match self.pages.get(self.current_page) {
             Some(a) => a,
-            None => return Err(gerr("The is no page"))
+            None => return Err(gerr("There is no page"))
         };
         let container = match database.container.get(&page.1){
             Some(a) => a,
@@ -672,32 +692,25 @@ impl Database{
         if cl > 1{
 
             let middle = cl/2;
-            let q1 = self.query_diver(&col_names, &containers[..middle],&conditions)?;
-            let mut final_query = Query::new(q1.column_types.clone());
-            final_query.column_names = col_names.to_vec();
+            let mut q1 = self.query_diver(&col_names, &containers[..middle],&conditions)?;
             let q2 = self.query_diver(&col_names, &containers[middle..],&conditions)?;
-            final_query.join(q1);
-            final_query.join(q2);
-            println!("{:?}{:?}{:?}",col_names,containers,final_query);
-            return Ok(final_query)
+            q1.join(q2);
+            println!("{:#?}\n",q1);
+            return Ok(q1)
         }
 
         Err(gerr("No valid containers specified for query processing"))
     }
 
-}
-impl Database{
     pub async fn query(&mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
         let mut query: Query = self.query_diver(&col_names, &containers, &conditions)?;
         query.load_rows(self)?;
         println!("{:?}",query);
         return Ok(query)
     }
-}
 
 
 
-impl Database {
     fn set_default_settings(&self) -> Result<(), Error> {
         let path = format!("{}/{}", self.location,SETTINGS_FILE);
         if !match fs::metadata(&path) { Ok(_) => true, Err(_) => false } {
@@ -1067,7 +1080,135 @@ memory_limit: {}
             },
             AST::Search(structure) => {
                 return Ok(self.query(structure.col_nam, structure.container, structure.conditions).await?)
-            }
+            },
+            AST::EditRow(structure) => {
+                let container = match self.container.get(&structure.container){
+                    Some(i) => i,
+                    None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
+                };
+                let mut values = container.columns.clone();
+                let mut hashmap : HashMap<String,usize> = HashMap::new(); 
+                for (index,value) in container.column_names.iter().enumerate(){
+                    hashmap.insert(value.to_string(), index);
+                }
+                for i in structure.col_nam.iter().enumerate(){
+                    if i.0 >= structure.col_val.len(){
+                        continue;
+                    }
+                    let value: &AlbaTypes = &structure.col_val[i.0];
+                    match hashmap.get(i.1){
+                        Some(a) => {
+                            values[*a] = values[*a].try_from_existing(value.clone())?;
+                        },
+                        None => continue
+                    }
+                }
+                
+                let mut row_group =  self.settings.memory_limit / container.element_size as u64;
+                let mut mvcc = match container.mvcc.lock(){
+                    Ok(a) => a,
+                    Err(e) => {
+                        return Err(gerr(&e.to_string()))
+                    }
+                };
+                let text_mvcc = match container.text_mvcc.lock(){
+                    Ok(a) => a,
+                    Err(e) => {
+                        return Err(gerr(&e.to_string()))
+                    }
+                };
+                if row_group < 1{
+                    row_group = 1
+                }
+                let arrl = container.arrlen()?;
+                if row_group > arrl{
+                    row_group = arrl
+                }
+                for i in 0..(arrl/row_group){
+                    let li = container.get_rows(((i-1)*row_group,i*row_group))?;
+                    for j in li.iter().enumerate(){
+                        let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
+                        match mvcc.get(&id){
+                            Some(a) => {
+                                if !a.0 && condition_checker(&a.1, &container.column_names, &structure.conditions)?{
+                                    mvcc.insert(id,(false,values.clone()));
+                                }
+                            },
+                            None => {
+                                if condition_checker(&j.1, &container.column_names, &structure.conditions)?{
+                                    mvcc.insert(id,(false,values.clone()));
+                                } 
+                            }
+                        }
+                    }
+                }
+                if self.settings.auto_commit{
+                    drop(mvcc);
+                    drop(text_mvcc);
+                    self.commit().await?;
+                }
+            },
+            AST::DeleteRow(structure) => {
+                let container = match self.container.get(&structure.container){
+                    Some(i) => i,
+                    None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
+                };
+                
+                let mut row_group =  self.settings.memory_limit / container.element_size as u64;
+                let mut mvcc = match container.mvcc.lock(){
+                    Ok(a) => a,
+                    Err(e) => {
+                        return Err(gerr(&e.to_string()))
+                    }
+                };
+                if row_group < 1{
+                    row_group = 1
+                }
+                let arrl = container.arrlen()?;
+                if row_group > arrl{
+                    row_group = arrl
+                }
+                for i in 0..(arrl/row_group){
+                    let li = container.get_rows(((i-1)*row_group,i*row_group))?;
+                    for j in li.iter().enumerate(){
+                        let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
+                        match &structure.conditions{
+                            Some(conditions) => {
+                                if condition_checker(&j.1, &container.column_names, &conditions)?{
+                                    mvcc.insert(id,(true,j.1.clone()));
+                                } 
+                            },
+                            None => {
+                                mvcc.insert(id,(true,j.1.clone()));
+                            }
+                        }
+                        
+                    }
+                }
+                if self.settings.auto_commit{
+                    drop(mvcc);
+                    self.commit().await?;
+                }
+            },
+            AST::DeleteContainer(structure) => {
+                if self.containers.contains(&structure.container){
+                    let container = match self.container.get(&structure.container){
+                        Some(a) => a,
+                        None => {return Err(gerr(&format!("There is no database with the name {}",structure.container)))}
+                    };
+                    for i in container.column_names.iter().enumerate(){
+                        if structure.container == *i.1{
+                            self.containers.remove(i.0);
+                        }
+                    }
+                    self.container.remove(&structure.container);
+                    fs::remove_file(format!("{}/{}",self.location,structure.container))?;
+                    self.save_containers()?;
+
+                }else{
+                    return Err(gerr(&format!("There is no database with the name {}",structure.container)))
+                }
+            },
             _ =>{return Err(gerr("Failed to parse"));}
         }
     

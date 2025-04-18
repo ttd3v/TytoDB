@@ -106,7 +106,7 @@ struct AstEditRow{
 #[derive(Debug, Clone, PartialEq)]
 struct AstDeleteRow{
     container : String,
-    conditions : Option<Vec<Token>>
+    conditions : Option<(Vec<(Token,Token,Token)>,Vec<(usize,char)>)>
 }
 #[derive(Debug, Clone, PartialEq)]
 struct AstDeleteContainer{
@@ -195,6 +195,14 @@ fn debug_create_command(tokens: &Vec<Token>) -> Result<AST,Error>{
                         if let Some(cva) = parser_debugger_extract_group_elstr(&mut col_name, tokens, 3){
                             return Err(cva)
                         }
+                        let mut col_name_holder : Vec<String> = Vec::with_capacity(5);
+                        for i in col_name.iter(){
+                            if col_name_holder.contains(&i){
+                                return Err(gerr("Repeated column names"))
+                            }
+                            col_name_holder.push(i.clone());
+                        }
+                        drop(col_name_holder);
                         if let Some(bruh) = parser_debugger_extract_group_albatype(&mut col_types, tokens, 4){
                             return Err(bruh)
                         }
@@ -510,236 +518,8 @@ fn parse(input : String) -> Result<AST, Error>{
     return debug_tokens(&tokens)
 }
 
-/* Test Functions */
-async fn test_container_creation(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Container Creation");
-
-    let query = "CREATE CONTAINER 'test_container' [ 'id' ] [ INT ]";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to create container with one column");
-
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should not be able to create duplicate container");
-
-    let mut col_names: Vec<String> = (0..50).map(|i| format!("col{}", i)).collect();
-    let col_types = vec!["INT"; 50];
-    let col_names_str = col_names.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ");
-    let col_types_str = col_types.join(", ");
-    let query = format!("CREATE CONTAINER 'max_container' [ {} ] [ {} ]", col_names_str, col_types_str);
-    let result = db.execute(&query).await;
-    assert!(result.is_ok(), "Failed to create container with maximum columns");
-
-    col_names.push("col50".to_string());
-    let col_names_str = col_names.iter().map(|s| format!("'{}'", s)).collect::<Vec<_>>().join(", ");
-    let col_types_str = vec!["INT"; 51].join(", ");
-    let query = format!("CREATE CONTAINER 'over_max_container' [ {} ] [ {} ]", col_names_str, col_types_str);
-    let result = db.execute(&query).await;
-    assert!(result.is_err(), "Should not create container with more than 50 columns");
-
-    let query = "CREATE CONTAINER 'mixed_container' [ 'id', 'name', 'age', 'active', 'salary' ] [ INT, TEXT, BIGINT, BOOL, FLOAT ]";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to create container with mixed data types");
-
-    println!("Test passed: Container Creation");
-    Ok(())
-}
-
-async fn test_row_insertion(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Row Insertion");
-
-    let query = "CREATE ROW [ 'id' ] [ 1 ] ON 'test_container'";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to insert row");
-
-    let query = "CREATE ROW [ 'id' ] [ 2 ] ON 'test_container'";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to insert another row");
-
-    let query = "CREATE ROW [ 'id' ] [ 'not_an_int' ] ON 'test_container'";
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should not insert string into INT column");
-
-    let query = "CREATE ROW [ 'id', 'name', 'age', 'active', 'salary' ] [ 1, 'Alice', 30, true, 50000.0 ] ON 'mixed_container'";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to insert row into mixed_container");
-
-    println!("Test passed: Row Insertion");
-    Ok(())
-}
-
-async fn test_searching(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Searching");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ]";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 2, "Should have 2 rows");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' > 1";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 1, "Should have 1 row where id > 1");
-
-    let query = "SEARCH [ 'id', 'name', 'age' ] ON [ 'mixed_container' ] WHERE 'age' > 20 AND 'name' = 'Alice'";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 1, "Should have 1 row matching complex conditions");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' <= 2 OR 'id' = 1";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 2, "Should match rows with id <= 2 or id = 1");
-
-    db.execute("CREATE ROW [ 'id', 'name', 'age', 'active', 'salary' ] [ 2, 'Alicia', 25, true, 60000.0 ] ON 'mixed_container'").await?;
-    let query = "SEARCH [ 'name' ] ON [ 'mixed_container' ] WHERE 'name' &> 'Ali'";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 2, "Should match names containing 'Ali'");
-
-    let query = "SEARCH [ 'name' ] ON [ 'mixed_container' ] WHERE 'name' &&> 'ali'";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 2, "Should match case-insensitive 'alice'");
-
-    db.execute("CREATE CONTAINER 'test_container2' [ 'id' ] [ INT ]").await?;
-    db.execute("CREATE ROW [ 'id' ] [ 3 ] ON 'test_container2'").await?;
-    let query = "SEARCH [ 'id' ] ON [ 'test_container', 'test_container2' ] WHERE 'id' > 1";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 2, "Should aggregate rows from both containers");
-
-    for i in 3..10 {
-        db.execute(&format!("CREATE ROW [ 'id' ] [ {} ] ON 'test_container'", i)).await?;
-    }
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ]";
-    let mut result = db.execute(query).await?;
-    assert!(result.pages.len() >= 1, "Should have at least one page");
-    let initial_rows = result.rows.1.len();
-    result.next(db)?;
-    assert_ne!(result.rows.1.len(), initial_rows, "Pagination should change row set");
-
-    db.execute("CREATE CONTAINER 'null_container' [ 'id', 'value' ] [ INT, TEXT ]").await?;
-    db.execute("CREATE ROW [ 'id', 'value' ] [ 1, '' ] ON 'null_container'").await?;
-    let query = "SEARCH [ 'id' ] ON [ 'null_container' ] WHERE 'value' = 'test'";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 0, "Should exclude rows with empty/NULL-like values");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'invalid_col' = 1";
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should error on invalid column name");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' > 100";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.1.len(), 0, "Should return 0 rows when no match");
-
-    println!("Test passed: Searching");
-    Ok(())
-}
-
-async fn test_row_editing(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Row Editing");
-
-    let query = "EDIT ROW [ 'id' ] [ 3 ] ON 'test_container' WHERE 'id' = 1";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to update row");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' = 3";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.0.len(), 1, "Should have 1 row with id = 3");
-
-    println!("Test passed: Row Editing");
-    Ok(())
-}
-
-async fn test_row_deletion(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Row Deletion");
-
-    let query = "DELETE ROW ON 'test_container' WHERE 'id' = 2";
-    let result = db.execute(query).await;
-    assert!(result.is_ok(), "Failed to delete row");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ]";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.0.len(), 1, "Should have 1 row left");
-
-    println!("Test passed: Row Deletion");
-    Ok(())
-}
-
-async fn test_transaction_handling(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Transaction Handling");
-
-    db.execute("CREATE ROW [ 'id' ] [ 4 ] ON 'test_container'").await?;
-    let result = db.execute("SEARCH [ 'id' ] ON [ 'test_container' ]").await?;
-    assert_eq!(result.rows.0.len(), 2, "Should see uncommitted row in mvcc");
-
-    db.rollback().await?;
-    let result = db.execute("SEARCH [ 'id' ] ON [ 'test_container' ]").await?;
-    assert_eq!(result.rows.0.len(), 1, "Should not see rolled back row");
-
-    db.execute("CREATE ROW [ 'id' ] [ 4 ] ON 'test_container'").await?;
-    db.commit().await?;
-    let result = db.execute("SEARCH [ 'id' ] ON [ 'test_container' ]").await?;
-    assert_eq!(result.rows.0.len(), 2, "Should see committed row");
-
-    println!("Test passed: Transaction Handling");
-    Ok(())
-}
-
-async fn test_error_handling(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Error Handling");
-
-    let query = "CREATE CONTAINER invalid_container [ 'id' ] [ UNKNOWN ]";
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should not create container with invalid type");
-
-    let query = "CREATE ROW [ 'id' ] [ 1 ] ON 'non_existent'";
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should not insert into non-existent container");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' = ";
-    let result = db.execute(query).await;
-    assert!(result.is_err(), "Should not execute invalid search query");
-
-    println!("Test passed: Error Handling");
-    Ok(())
-}
-
-async fn test_performance(db: &mut database::Database) -> Result<(), Error> {
-    println!("Running test: Performance");
-
-    for i in 0..10000 {
-        let query = format!("CREATE ROW [ 'id' ] [ {} ] ON 'test_container'", i);
-        db.execute(&query).await?;
-    }
-    db.commit().await?;
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ]";
-    let result = db.execute(query).await?;
-    assert_eq!(result.rows.0.len(), 10000, "Should have 10000 rows");
-
-    let start = Instant::now();
-    let result = db.execute(query).await?;
-    let duration = start.elapsed();
-    println!("Time to search 10,000 rows: {:?}", duration);
-    assert_eq!(result.rows.0.len(), 10000, "Should retrieve 10000 rows");
-
-    let query = "SEARCH [ 'id' ] ON [ 'test_container' ] WHERE 'id' > 5000";
-    let start = Instant::now();
-    let result = db.execute(query).await?;
-    let duration = start.elapsed();
-    println!("Time to search with condition on 10,000 rows: {:?}", duration);
-    assert_eq!(result.rows.0.len(), 4999, "Should have 4999 rows where id > 5000");
-
-    println!("Test passed: Performance");
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path = "/home/theo/Desktop/%test%/";
-    let mut db = connect(db_path).await?;
-    test_container_creation(&mut db).await?;
-    test_row_insertion(&mut db).await?;
-    test_searching(&mut db).await?;
-    test_row_editing(&mut db).await?;
-    test_row_deletion(&mut db).await?;
-    test_transaction_handling(&mut db).await?;
-    test_error_handling(&mut db).await?;
-    test_performance(&mut db).await?;
-
-    println!("All tests completed successfully!");
+    //
     Ok(())
 }
