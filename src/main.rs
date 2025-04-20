@@ -1,6 +1,6 @@
 mod lexer_functions;
 mod database;
-use std::{fmt::format, fs::File, io::{Error,ErrorKind}, sync::Arc, time::Instant};
+use std::io::{Error,ErrorKind};
 use tokio;
 use database::connect;
 use lexer_functions::{
@@ -78,7 +78,9 @@ enum AST{
     EditRow(AstEditRow),
     DeleteRow(AstDeleteRow),
     DeleteContainer(AstDeleteContainer),
-    Search(AstSearch)
+    Search(AstSearch),
+    Commit(AstCommit),
+    Rollback(AstRollback),
 }
 
 
@@ -123,6 +125,15 @@ struct AstSearch{
     container : Vec<AlbaContainer>,
     conditions : (Vec<(Token,Token,Token)>,Vec<(usize,char)>),
     col_nam : Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq)]
+struct AstCommit{
+    container : Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AstRollback{
+    container : Option<String>,
 }
 
 fn gerr(msg : &str) -> Error{
@@ -501,11 +512,50 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
             "CREATE" => debug_create_command(tokens),
             "EDIT" => debug_edit_command(tokens),
             "SEARCH" => debug_search(tokens),
+            "COMMIT"|"ROLLBACK" => debug_finishers_command(tokens),
             _ => Err(gerr("Invalid command keyword")),
         }
     } else {
         Err(gerr("First token is not a keyword"))
     }
+}
+
+
+fn debug_finishers_command(tokens : &Vec<Token>) -> Result<AST,Error> {
+    if let Some(kw) = tokens.get(0){
+        if let Token::Keyword(st) = kw {
+            match st.to_uppercase().as_str(){
+                "COMMIT" => {
+                    let con : Option<String> = match tokens.get(1){
+                        Some(ttt) => match ttt{
+                            Token::String(a) => Some(a.to_string()),
+                            _ => None
+                        },
+                        None => None
+                    };
+                    return Ok(AST::Commit(AstCommit{
+                        container:con
+                    }))
+                },
+                "ROLLBACK" => {
+                    let con : Option<String> = match tokens.get(1){
+                        Some(ttt) => match ttt{
+                            Token::String(a) => Some(a.to_string()),
+                            _ => None
+                        },
+                        None => None
+                    };
+                    return Ok(AST::Rollback(AstRollback{
+                        container:con
+                    }))
+                },
+                _ => {
+                    return Err(gerr("Failed to process the entered finisher"));
+                }
+            }
+        }
+    }
+    return Err(gerr("Missing the instance to be editted"));
 }
 
 
@@ -519,7 +569,7 @@ fn parse(input : String) -> Result<AST, Error>{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = match connect().await{
+    let db = match connect().await{
         Ok(database) => database,
         Err(e) => panic!("{}",e.to_string())
     };

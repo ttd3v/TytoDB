@@ -1,4 +1,4 @@
-use std::{io::{Error, ErrorKind}, mem::discriminant};
+use std::io::{Error, ErrorKind};
 
 use serde::{Deserialize, Serialize};
 
@@ -210,7 +210,7 @@ impl TryFrom<Token> for AlbaTypes {
         }
     }
 }
-const KEYWORDS: &[&str] = &["CREATE","DELETE","EDIT","SEARCH","WHERE","ROW","CONTAINER","ON","USING","INT","BIGINT","TEXT","BOOL","FLOAT","AND","OR"];
+const KEYWORDS: &[&str] = &["CREATE","COMMIT","ROLLBACK","DELETE","EDIT","SEARCH","WHERE","ROW","CONTAINER","ON","USING","INT","BIGINT","TEXT","BOOL","FLOAT","AND","OR"];
 
 pub fn lexer_keyword_match(result: &mut Vec<Token>, dough: &mut String) -> bool {
     let keyword = dough.to_uppercase(); // Remove spaces and normalize

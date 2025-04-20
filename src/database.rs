@@ -1227,7 +1227,43 @@ impl Database{
                     return Err(gerr(&format!("There is no database with the name {}",structure.container)))
                 }
             },
-            _ =>{return Err(gerr("Failed to parse"));}
+            AST::Commit(structure) => {
+                match structure.container{
+                    Some(container) => {
+                        match self.container.get_mut(&container){
+                            Some(a) => {
+                                a.commit().await?;
+                                return Ok(Query::new(Vec::new()))
+                            },
+                            None => {
+                                return Err(gerr(&format!("There is no container named {}",container)))
+                            }
+                        }
+                    },
+                    None => {
+                        self.commit().await?;
+                    }
+                }
+            },
+            AST::Rollback(structure) => {
+                match structure.container{
+                    Some(container) => {
+                        match self.container.get_mut(&container){
+                            Some(a) => {
+                                a.rollback().await?;
+                                return Ok(Query::new(Vec::new()))
+                            },
+                            None => {
+                                return Err(gerr(&format!("There is no container named {}",container)))
+                            }
+                        }
+                    },
+                    None => {
+                        self.rollback().await?;
+                    }
+                }
+            },
+            // _ =>{return Err(gerr("Failed to parse"));}
         }
     
         Ok(Query::new(Vec::new()))
@@ -1304,8 +1340,8 @@ async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database
     }
 }
 
-use aes_gcm::{aead::{generic_array::{sequence::GenericSequence, GenericArray}, Aead, AeadMut, KeyInit, OsRng}, aes::cipher::{self, BlockEncrypt}, AeadCore, Key};
-use aes_gcm::{Aes256Gcm, Nonce};
+use aes_gcm::{aead::{Aead, KeyInit, OsRng}, aes::cipher::{self}, AeadCore, Key};
+use aes_gcm::Aes256Gcm;
 use lzma::{compress as lzma_compress,decompress as lzma_decompress};
 
 lazy_static!{
@@ -1405,7 +1441,7 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
                             Err(_) => {
                                 eprintln!("Decryption failed with session secret for session_id: {:?}", session_id);
                                 let mut b = false;
-                                for (key, secret) in &secrets {
+                                for (_, secret) in &secrets {
                                     match decrypt(cipher_payload, secret) {
                                         Ok(k) => {
                                             secret_from_client = secret.clone();
