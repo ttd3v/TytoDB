@@ -1,10 +1,74 @@
-use std::{collections::HashMap, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc, Mutex}, vec};
+/////////////////////////////////////////////////
+/////////     DEFAULT_SETTINGS    ///////////////
+/////////////////////////////////////////////////
+
+
+const DEFAULT_SETTINGS : &str = r#"
+max_columns: 50
+min_columns: 1
+max_str_length: 128
+auto_commit: false            
+memory_limit: 1048576000
+ip: 127.0.0.1
+connections_port: 153971
+data_port: 893127
+max_connections: 10
+max_connection_requests_per_minute: 10
+max_data_requests_per_minute: 10000000
+on_insecure_rejection_delay_ms: 100
+safety_level: strict # strict | permissive
+request_handling: sync # sync | asynchronous
+secret_key_count: 10
+"#;
+#[derive(Serialize, Deserialize, Debug, Default)]
+enum SafetyLevel {
+    #[default]
+    Strict,
+    Permissive,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+enum RequestHandling {
+    #[default]
+    Sync,
+    Asynchronous,
+}
+#[derive(Serialize,Deserialize, Default,Debug)]
+struct Settings{
+    max_columns : u32,
+    min_columns : u32,
+    max_str_length : usize,
+    memory_limit : u64,
+    auto_commit : bool,
+    ip:String,
+    connections_port: u32,
+    data_port: u32,
+    max_connections: u32,
+    max_connection_request_per_minute: u32,
+    max_data_requests_per_minute: u32,
+    on_insecure_rejection_delay_ms: u64,
+    safety_level: SafetyLevel,
+    request_handling: RequestHandling,
+    secret_key_count: u64
+}
+
+const SECRET_KEY_PATH : &str = "~/.TytoDB.keys";
+const DATABASE_PATH : &str = "~/TytoDB";
+
+/////////////////////////////////////////////////
+/////////////////////////////////////////////////
+/////////////////////////////////////////////////
+
+
+use std::{collections::{HashMap, HashSet}, ffi::CString, fmt::format, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc,Mutex}, vec};
+
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
 use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AstSearch, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
+use tokio::sync::Mutex as tmutx;
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
@@ -20,12 +84,16 @@ fn generate_secure_code(len: usize) -> String {
     code
 }
 
+#[derive(Default)]
 pub struct Database{
     location : String,
     settings : Settings,
     containers : Vec<String>,
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
-    container : HashMap<String,Container>
+    container : HashMap<String,Container>,
+    connections : Arc<tmutx<HashSet<[u8;32]>>>,
+    queries : Arc<tmutx<HashMap<u64,Query>>>,
+    secret_keys : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>>,
 }
 
 fn check_for_reference_folder(location : &String) -> Result<(), Error>{
@@ -39,14 +107,7 @@ fn check_for_reference_folder(location : &String) -> Result<(), Error>{
     Ok(())
 }
 
-#[derive(Serialize,Deserialize, Default,Debug)]
-struct Settings{
-    max_columns : u32,
-    min_columns : u32,
-    max_str_length : usize,
-    memory_limit : u64,
-    auto_commit : bool
-}
+
 
 fn text_type_identifier(max_str_length: usize) -> u8 {
     if max_str_length > 255 {
@@ -715,17 +776,7 @@ impl Database{
         let path = format!("{}/{}", self.location,SETTINGS_FILE);
         if !match fs::metadata(&path) { Ok(_) => true, Err(_) => false } {
             let mut file =fs::File::create_new(&path)?;
-            let content = format!(r#"
-# WARNING: If you change 'max_columns' or 'max_str_length' after creating a container, it might not work until you revert the changes.
-max_columns: {}
-min_columns: {}
-max_str_length: {}
-
-auto_commit: {}
-            
-# Memory limit: defines how much memory the database can use during operations. Setting a higher value might improve performance, but exceeding hardware limits could have the opposite effect.
-memory_limit: {}
-            "#, 50, 1, 128, true,104_857_600);
+            let content = DEFAULT_SETTINGS.to_string();
             match file.write_all(content.as_bytes()) {
                 Ok(_) => {}
                 Err(e) => return Err(e),
@@ -1222,11 +1273,11 @@ memory_limit: {}
 }
 type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
-pub async fn connect(input_path : &str) -> Result<Database, Error>{
-    let path : &str = if input_path.ends_with('/') {
-        &input_path[..input_path.len()-1]
+pub async fn connect() -> Result<Database, Error>{
+    let path : &str = if DATABASE_PATH.ends_with('/') {
+        &DATABASE_PATH[..DATABASE_PATH.len()-1]
     }else{
-        input_path
+        DATABASE_PATH
     };
 
     let db_path = PathBuf::from(path);
@@ -1242,7 +1293,7 @@ pub async fn connect(input_path : &str) -> Result<Database, Error>{
         fs::create_dir_all(&db_path)?;
     }
 
-    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new()};
+    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(tmutx::new(HashMap::new())),connections:Arc::new(tmutx::new(HashSet::new())),secret_keys:Arc::new(tmutx::new(HashMap::new()))};
     if let Err(e) = db.load_settings(){
         eprintln!("err: load_settings");
         return Err(e)
@@ -1252,4 +1303,52 @@ pub async fn connect(input_path : &str) -> Result<Database, Error>{
     };
     println!("{:?}",db.settings);
     return Ok(db)
+}
+
+use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const SESSION_ID_LENGTH : usize = 32;
+
+async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database>>){
+    loop {
+        let (mut socket, addr) = listener.accept().await.unwrap();
+        println!("Accepted connection from: {}", addr);
+        let arc_db = ardb.clone(); 
+        tokio::spawn(async move {
+            let mut buffer = [0; 32];
+            match socket.read(&mut buffer).await {
+                Ok(_) => {
+                    let db = arc_db.lock().await;
+                    let mut content : Vec<u8> = Vec::new();
+                    
+                    if db.secret_keys.lock().await.get(&buffer).is_some(){
+                        let id = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
+                        if db.connections.lock().await.insert(id.clone()){
+                            content = id.to_vec();
+                        }
+                    }
+                    let _ = socket.write_all(&content).await;
+                }
+                Err(e) => eprintln!("Failed to read from socket: {}", e),
+            };
+        });
+    }
+}
+
+
+async fn handle_data_tcp(listener : TcpListener,arc_db : Arc<tmutx<Database>>){
+
+}
+
+impl Database{
+    pub async fn run_database(mut self){
+        let settings = &self.settings;
+        let ConnectionsTCP: TcpListener = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.connections_port)).await.unwrap();
+        let DataTCP = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.data_port)).await.unwrap();
+        let mtx_db = Arc::new(tmutx::new(self));
+        let connections_task = tokio::spawn(handle_connections_tcp(ConnectionsTCP,mtx_db.clone()));
+        let data_task = tokio::spawn(handle_data_tcp(DataTCP,mtx_db));
+        let _ = tokio::try_join!(connections_task, data_task);
+    }
 }

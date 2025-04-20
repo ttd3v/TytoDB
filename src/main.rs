@@ -1,7 +1,6 @@
 mod lexer_functions;
 mod database;
-use std::{fs::File, io::{Error,ErrorKind}, sync::Arc, time::Instant};
-use tokio::sync::Mutex;
+use std::{fmt::format, fs::File, io::{Error,ErrorKind}, sync::Arc, time::Instant};
 use tokio;
 use database::connect;
 use lexer_functions::{
@@ -520,6 +519,10 @@ fn parse(input : String) -> Result<AST, Error>{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //
+    let mut db = match connect().await{
+        Ok(database) => database,
+        Err(e) => panic!("{}",e.to_string())
+    };
+    db.run_database().await;
     Ok(())
 }
