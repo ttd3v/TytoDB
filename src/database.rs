@@ -62,6 +62,7 @@ const DATABASE_PATH : &str = "~/TytoDB";
 
 use std::{collections::{HashMap, HashSet}, ffi::CString, fmt::format, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc,Mutex}, vec};
 
+use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
@@ -1314,16 +1315,16 @@ async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database
     loop {
         let (mut socket, addr) = listener.accept().await.unwrap();
         println!("Accepted connection from: {}", addr);
-        let arc_db = ardb.clone(); 
+        let arc_db: Arc<tmutx<Database>> = ardb.clone(); 
         tokio::spawn(async move {
-            let mut buffer = [0; 32];
+            let mut buffer: [u8; 32] = [0; 32];
             match socket.read(&mut buffer).await {
                 Ok(_) => {
-                    let db = arc_db.lock().await;
+                    let db: tokio::sync::MutexGuard<'_, Database> = arc_db.lock().await;
                     let mut content : Vec<u8> = Vec::new();
                     
                     if db.secret_keys.lock().await.get(&buffer).is_some(){
-                        let id = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
+                        let id: [u8; 32] = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
                         if db.connections.lock().await.insert(id.clone()){
                             content = id.to_vec();
                         }
@@ -1336,9 +1337,71 @@ async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database
     }
 }
 
+use aes_gcm::{aead::{generic_array::GenericArray, Aead, AeadMut, KeyInit, OsRng}, aes::cipher::{self, BlockEncrypt}, AeadCore, Key};
+use aes_gcm::{Aes256Gcm, Nonce};
+
+lazy_static!{
+    static ref cipher_map : Arc<Mutex<HashMap<Vec<u8>,aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>>>>> = Arc::new(Mutex::new(HashMap::new()));
+}
+
+fn encrypt(content : &[u8],secret_key : &[u8]) -> Vec<u8>{
+    let key = Key::<Aes256Gcm>::from_slice(secret_key);
+    let mut cm = cipher_map.lock().unwrap();
+    let cipher: &aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>> = 
+    if let Some(a) = cm.get(&key.to_vec()){
+        a
+    } else{
+        cm.insert(key.to_vec(), Aes256Gcm::new(key));
+        drop(cm);
+        return encrypt(content, secret_key)
+    };
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng); 
+    let mut result : Vec<u8> = Vec::new();
+    result.extend_from_slice(&nonce.to_vec());
+    result.extend_from_slice(&cipher.encrypt(&nonce, content.as_ref()).unwrap());
+    result
+}
+fn decrypt(cipher_text : &Vec<u8>,secret_key : &[u8]) -> Vec<u8>{
+    let key = Key::<Aes256Gcm>::from_slice(secret_key);
+    let nonce = &cipher_text[0..12];
+    let cipher_b = &cipher_text[12..];
+    let mut cm = cipher_map.lock().unwrap();
+    let cipher: &aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>> = 
+    if let Some(a) = cm.get(&key.to_vec()){
+        a
+    } else{
+        cm.insert(key.to_vec(), Aes256Gcm::new(key));
+        drop(cm);
+        return decrypt(cipher_text, secret_key)
+    };
+    cipher.decrypt(nonce.into(), cipher_b.as_ref()).unwrap()
+}
 
 async fn handle_data_tcp(listener : TcpListener,arc_db : Arc<tmutx<Database>>){
-
+    loop {
+        let (mut socket, addr) = listener.accept().await.unwrap();
+        println!("Accepted connection from: {}", addr);
+        let arc_db: Arc<tmutx<Database>> = arc_db.clone(); 
+        tokio::spawn(async move {
+            let mut buffer: Vec<u8> = Vec::with_capacity(64);
+            let mut response : Vec<u8> = Vec::new();
+            match socket.read_to_end(&mut buffer).await {
+                Ok(_) => {
+                    if buffer.len() < 32{
+                        let _ = socket.write_all(&response).await;
+                        return
+                    }
+                    let db = arc_db.lock().await;
+                    let secrets_lock = db.secret_keys.lock().await;
+                    let secrets = secrets_lock.clone();
+                    drop(secrets_lock);
+                    drop(db);
+                    
+                }
+                Err(e) => eprintln!("Failed to read from socket: {}", e),
+            };
+        });
+    }
 }
 
 impl Database{
