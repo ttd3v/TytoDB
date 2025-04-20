@@ -62,6 +62,7 @@ const DATABASE_PATH : &str = "~/TytoDB";
 
 use std::{collections::{HashMap, HashSet}, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc,Mutex}};
 
+use base64::{alphabet, engine, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
@@ -93,7 +94,7 @@ pub struct Database{
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
     container : HashMap<String,Container>,
     connections : Arc<tmutx<HashSet<[u8;32]>>>,
-    queries : Arc<tmutx<HashMap<u64,Query>>>,
+    queries : Arc<tmutx<HashMap<[u8;32],Query>>>,
     secret_keys : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>>,
 }
 
@@ -490,7 +491,7 @@ fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
 const PAGE_SIZE : usize = 100;
 type QueryPage = (Vec<u64>,String);
 type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Query{
     pub rows: Rows,
     pub pages : Vec<QueryPage>,
@@ -1303,7 +1304,7 @@ async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database
     }
 }
 
-use aes_gcm::{aead::{generic_array::GenericArray, Aead, AeadMut, KeyInit, OsRng}, aes::cipher::{self, BlockEncrypt}, AeadCore, Key};
+use aes_gcm::{aead::{generic_array::{sequence::GenericSequence, GenericArray}, Aead, AeadMut, KeyInit, OsRng}, aes::cipher::{self, BlockEncrypt}, AeadCore, Key};
 use aes_gcm::{Aes256Gcm, Nonce};
 use lzma::{compress as lzma_compress,decompress as lzma_decompress};
 
@@ -1379,7 +1380,7 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
                         let _ = socket.write_all(&response).await;
                         return;
                     }
-                    let session_id = &buffer[..32];
+                    let session_id: &[u8] = &buffer[..32];
                     let cipher_payload = &buffer[32..];
                     let mut db = arc_db.lock().await;
                     let secrets_lock = db.secret_keys.lock().await;
@@ -1440,6 +1441,7 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
                         Ok(v) => {
                             match db.execute(&v.command).await {
                                 Ok(query_result) => {
+                                    db.queries.lock().await.insert(session_id.try_into().unwrap(), query_result.clone());
                                     drop(db);
                                     match serde_json::to_string(&query_result) {
                                         Ok(q) => {
@@ -1487,12 +1489,46 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
 }
 impl Database{
     pub async fn run_database(self){
+        let crazy_config = engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_encode_padding(true)
+        .with_decode_padding_mode(engine::DecodePaddingMode::RequireNone);
+        let eng = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").unwrap(), crazy_config);
+
+        if fs::exists(SECRET_KEY_PATH).unwrap(){
+            let mut buffer : Vec<u8> = Vec::new();
+            fs::File::open(SECRET_KEY_PATH).unwrap().read_to_end(&mut buffer).unwrap();
+            let val = serde_yaml::from_slice::<Vec<String>>(&buffer).unwrap();
+            let bv : Vec<Vec<u8>> = val.iter().map(|s|{eng.decode(s).unwrap()}).collect();
+            let mut sk = self.secret_keys.lock().await;
+            for i in bv{
+                sk.insert(blake3::hash(&i).as_bytes().to_owned(), i);
+            }
+        }else{
+            let mut file = fs::File::create_new(SECRET_KEY_PATH).unwrap();
+            let mut keys : Vec<Vec<u8>> = Vec::new();
+            for _ in 0..self.settings.secret_key_count{
+                keys.push(Aes256Gcm::generate_key(OsRng).to_vec());
+            }
+            let mut sk = self.secret_keys.lock().await;
+            for i in keys.iter(){
+                sk.insert(blake3::hash(&i).as_bytes().to_owned(), i.clone());
+            }
+
+            let mut b64_list : Vec<String> = Vec::new();
+            for i in keys{
+                b64_list.push(eng.encode(i))
+            }
+            serde_yaml::to_writer(&mut file, &b64_list).unwrap();
+            file.flush().unwrap();
+            file.sync_all().unwrap();
+        }
         
 
 
         let settings = &self.settings;
-        let connections_tcp: TcpListener = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.connections_port)).await.unwrap();
-        let data_tcp = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.data_port)).await.unwrap();
+        let connections_tcp: TcpListener = TcpListener::bind(format!("{}:{}",settings.ip,settings.connections_port)).await.unwrap();
+        let data_tcp = TcpListener::bind(format!("{}:{}",settings.ip,settings.data_port)).await.unwrap();
         let mtx_db = Arc::new(tmutx::new(self));
         let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone()));
         let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db));
