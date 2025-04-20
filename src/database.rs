@@ -60,13 +60,13 @@ const DATABASE_PATH : &str = "~/TytoDB";
 /////////////////////////////////////////////////
 
 
-use std::{collections::{HashMap, HashSet}, ffi::CString, fmt::format, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, pin::Pin, sync::{Arc,Mutex}, vec};
+use std::{collections::{HashMap, HashSet}, ffi::CString, fs::{self, File}, io::{self, Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc,Mutex}};
 
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{debug_tokens, gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AstSearch, AST};
+use crate::{gerr, lexer_functions::{AlbaTypes, Token}, parse, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::sync::Mutex as tmutx;
@@ -121,14 +121,14 @@ fn from_usize_to_u8(i:usize) -> u8{
     return i as u8;
 }
 
-type MvccType = Arc<Mutex<HashMap<u64,(bool,Vec<AlbaTypes>)>>>;
+type MvccType = Arc<tmutx<HashMap<u64,(bool,Vec<AlbaTypes>)>>>;
 struct Container{
     file : File,
     element_size : usize,
     columns : Vec<AlbaTypes>,
     str_size : usize,
     mvcc : MvccType,
-    text_mvcc : Arc<Mutex<HashMap<String,(bool,String)>>>,
+    text_mvcc : Arc<tmutx<HashMap<String,(bool,String)>>>,
     headers_offset : u64,
     column_names : Vec<String>,
     location : String,
@@ -148,8 +148,8 @@ impl New for Container {
             element_size,
             columns,
             str_size,
-            mvcc: Arc::new(Mutex::new(HashMap::new())),
-            text_mvcc: Arc::new(Mutex::new(HashMap::new())),
+            mvcc: Arc::new(tmutx::new(HashMap::new())),
+            text_mvcc: Arc::new(tmutx::new(HashMap::new())),
             headers_offset ,
             column_names,
             location
@@ -192,9 +192,9 @@ impl Container{
     }
     
     
-    pub fn get_next_addr(&self) -> Result<u64, Error> {
+    pub async fn get_next_addr(&self) -> Result<u64, Error> {
         let current_rows = self.arrlen()?;
-        let mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        let mvcc_guard = self.mvcc.lock().await;
         for (&key, (deleted, _)) in mvcc_guard.iter() {
             if *deleted {
                 return Ok(key);
@@ -202,30 +202,25 @@ impl Container{
         }
         Ok(current_rows)
     } 
-    pub fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
-        let ind = self.get_next_addr()?;
-        let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+    pub async fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
+        let ind = self.get_next_addr().await?;
+        let mut mvcc_guard = self.mvcc.lock().await;
         mvcc_guard.insert(ind, (false,data.clone()));
         Ok(())
     }
     async fn rollback(&mut self) -> Result<(),Error> {
-        let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        let mut mvcc_guard = self.mvcc.lock().await;
         mvcc_guard.clear();
         drop(mvcc_guard);
 
-        let mut txt_mvcc = match self.text_mvcc.lock(){
-            Ok(a) => a,
-            Err(e) => {
-                return Err(gerr(&e.to_string()))
-            }
-        };
+        let mut txt_mvcc = self.text_mvcc.lock().await;
         txt_mvcc.clear();
         Ok(())
     }
     async fn commit(&mut self) -> Result<(), Error> {
         let mut total = self.arrlen()?;
         println!("commit: Locking MVCC...");
-        let mut mvcc_guard = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        let mut mvcc_guard = self.mvcc.lock().await;
     
         println!("commit: Separating insertions and deletions...");
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
@@ -270,12 +265,7 @@ impl Container{
         let new_len = hdr_off + total * row_sz;
         self.file.set_len(new_len)?;
         
-        let mut txt_mvcc = match self.text_mvcc.lock(){
-            Ok(a) => a,
-            Err(e) => {
-                return Err(gerr(&e.to_string()))
-            }
-        };
+        let mut txt_mvcc = self.text_mvcc.lock().await;
 
         for (i, txt) in  txt_mvcc.iter(){
             let path = format!("{}/rf/{}", self.location, i); 
@@ -311,7 +301,7 @@ impl Container{
     
         Ok(())
     }
-    pub fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
+    pub async fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
         let mut lidx = index.1;
         let maxl = if self.len()? > self.headers_offset {
             (self.len()? - self.headers_offset) / self.element_size as u64
@@ -331,8 +321,8 @@ impl Container{
         let mut buff = vec![0u8; buff_size];
         self.file.read_exact_at(&mut buff, idxs.0)?;
     
-        let v_c = self.mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
-        let t_c = self.text_mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+        let v_c = self.mvcc.lock().await;
+        let t_c = self.text_mvcc.lock().await;
     
         let mut result: Vec<Vec<AlbaTypes>> = Vec::new(); 
         for i in index.0..lidx {
@@ -500,7 +490,7 @@ fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
 const PAGE_SIZE : usize = 100;
 type QueryPage = (Vec<u64>,String);
 type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Query{
     pub rows: Rows,
     pub pages : Vec<QueryPage>,
@@ -529,7 +519,7 @@ impl Query{
             }
         }
     }
-    pub fn load_rows(&mut self,database : &mut Database) -> Result<(),Error>{
+    pub async fn load_rows(&mut self,database : &mut Database) -> Result<(),Error>{
         if self.pages.len() == 0{
             return Ok(())
         }
@@ -545,7 +535,7 @@ impl Query{
         };
         let mut rows = Vec::new();
         for i in &page.0{
-            match container.get_rows((*i,*i+1))?.get(0) {
+            match container.get_rows((*i,*i+1)).await?.get(0) {
                 Some(a) => rows.push(a.clone()),
                 None => {continue;}
             }
@@ -553,7 +543,7 @@ impl Query{
         self.rows = (container.column_names.clone(),rows);
         Ok(())
     }
-    pub fn next(&mut self, database: &mut Database) -> Result<(), Error> {
+    pub async fn next(&mut self, database: &mut Database) -> Result<(), Error> {
         if self.pages.is_empty() {
             return Ok(());
         }
@@ -562,11 +552,11 @@ impl Query{
             return Ok(()); 
         }
         self.current_page = new_page;
-        self.load_rows(database)?;
+        self.load_rows(database).await?;
         Ok(())
     }
 
-    pub fn previous(&mut self, database: &mut Database) -> Result<(), Error> {
+    pub async fn previous(&mut self, database: &mut Database) -> Result<(), Error> {
         if self.pages.is_empty() {
             return Ok(());
         }
@@ -575,7 +565,7 @@ impl Query{
             return Ok(()); 
         }
         self.current_page = new_page;
-        self.load_rows(database)?;
+        self.load_rows(database).await?;
         Ok(())
     }
 }
@@ -708,7 +698,7 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 }
 
 impl Database{
-    fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
+    async fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
         
         if let AlbaContainer::Real(container_name) = &containers[0] {
             let container = match self.container.get(container_name) {
@@ -725,7 +715,7 @@ impl Database{
             final_query.column_names = col_names.clone();
             let mut list : Vec<u64> = Vec::new();
             while cursor < length {
-                let rows = container.get_rows((cursor, cursor + page_size))?;
+                let rows = container.get_rows((cursor, cursor + page_size)).await?;
     
                 for (number, row) in rows.iter().enumerate() {
                     let row_index = cursor + number as u64;
@@ -742,31 +732,21 @@ impl Database{
         Err(gerr("No valid containers specified for query processing"))
     }
 
-    fn query_diver(&mut self,col_names : &Vec<String>,containers : &[AlbaContainer],conditions : &QueryConditions) -> Result<Query,Error>{
-        
-        let cl = containers.len();
-
-        if cl == 1{
-            let d = self.ancient_query(col_names, containers,conditions)?;
-            println!("{:?}",d);
-            return Ok(d)
+    async fn query_diver(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {  
+        if containers.is_empty() {
+            return Err(gerr("No valid containers specified for query processing"));
         }
-        if cl > 1{
-
-            let middle = cl/2;
-            let mut q1 = self.query_diver(&col_names, &containers[..middle],&conditions)?;
-            let q2 = self.query_diver(&col_names, &containers[middle..],&conditions)?;
-            q1.join(q2);
-            println!("{:#?}\n",q1);
-            return Ok(q1)
+        let mut result = self.ancient_query(col_names, &containers[0..1], conditions).await?;
+        for i in 1..containers.len() {
+            let single_container_slice = &containers[i..i+1];
+            let query = self.ancient_query(col_names, single_container_slice, conditions).await?;
+            result.join(query);
         }
-
-        Err(gerr("No valid containers specified for query processing"))
+        Ok(result)
     }
-
     pub async fn query(&mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
-        let mut query: Query = self.query_diver(&col_names, &containers, &conditions)?;
-        query.load_rows(self)?;
+        let mut query: Query = self.query_diver(&col_names, &containers, &conditions).await?;
+        query.load_rows(self).await?;
         println!("{:?}",query);
         return Ok(query)
     }
@@ -1102,7 +1082,7 @@ impl Database{
                                         code = code_full.chars().take(max_str_len).collect::<String>();
                                     }
                                     val[ri] = AlbaTypes::Text(code.clone());
-                                    let mut txt_mvcc = container.text_mvcc.lock().map_err(|e| gerr(&e.to_string()))?;
+                                    let mut txt_mvcc = container.text_mvcc.lock().await;
                                     txt_mvcc.insert(code, (false, s.to_string()));
                                 },
                                 (AlbaTypes::Bigint(_), AlbaTypes::Int(i)) => {
@@ -1125,7 +1105,7 @@ impl Database{
                         ))),
                     }
                 }
-                container.push_row(&val)?;
+                container.push_row(&val).await?;
                 if self.settings.auto_commit {
                     container.commit().await?;
                 }
@@ -1157,18 +1137,8 @@ impl Database{
                 }
                 
                 let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = match container.mvcc.lock(){
-                    Ok(a) => a,
-                    Err(e) => {
-                        return Err(gerr(&e.to_string()))
-                    }
-                };
-                let text_mvcc = match container.text_mvcc.lock(){
-                    Ok(a) => a,
-                    Err(e) => {
-                        return Err(gerr(&e.to_string()))
-                    }
-                };
+                let mut mvcc = container.mvcc.lock().await;
+                let text_mvcc = container.text_mvcc.lock().await;
                 if row_group < 1{
                     row_group = 1
                 }
@@ -1177,7 +1147,7 @@ impl Database{
                     row_group = arrl
                 }
                 for i in 0..(arrl/row_group){
-                    let li = container.get_rows(((i-1)*row_group,i*row_group))?;
+                    let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
                     for j in li.iter().enumerate(){
                         let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
                         match mvcc.get(&id){
@@ -1207,12 +1177,7 @@ impl Database{
                 };
                 
                 let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = match container.mvcc.lock(){
-                    Ok(a) => a,
-                    Err(e) => {
-                        return Err(gerr(&e.to_string()))
-                    }
-                };
+                let mut mvcc = container.mvcc.lock().await;
                 if row_group < 1{
                     row_group = 1
                 }
@@ -1221,7 +1186,7 @@ impl Database{
                     row_group = arrl
                 }
                 for i in 0..(arrl/row_group){
-                    let li = container.get_rows(((i-1)*row_group,i*row_group))?;
+                    let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
                     for j in li.iter().enumerate(){
                         let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
                         match &structure.conditions{
@@ -1272,6 +1237,7 @@ impl Database{
     }
     
 }
+
 type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
 pub async fn connect() -> Result<Database, Error>{
@@ -1339,9 +1305,12 @@ async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database
 
 use aes_gcm::{aead::{generic_array::GenericArray, Aead, AeadMut, KeyInit, OsRng}, aes::cipher::{self, BlockEncrypt}, AeadCore, Key};
 use aes_gcm::{Aes256Gcm, Nonce};
+use lzma::{compress as lzma_compress,decompress as lzma_decompress};
 
 lazy_static!{
     static ref cipher_map : Arc<Mutex<HashMap<Vec<u8>,aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>>>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref session_secret_rel : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>> = Arc::new(tmutx::new(HashMap::new()));
+    static ref session_id_curr_query : Arc<tmutx<HashMap<[u8;32],Query>>> = Arc::new(tmutx::new(HashMap::new()));
 }
 
 fn encrypt(content : &[u8],secret_key : &[u8]) -> Vec<u8>{
@@ -1361,7 +1330,7 @@ fn encrypt(content : &[u8],secret_key : &[u8]) -> Vec<u8>{
     result.extend_from_slice(&cipher.encrypt(&nonce, content.as_ref()).unwrap());
     result
 }
-fn decrypt(cipher_text : &Vec<u8>,secret_key : &[u8]) -> Vec<u8>{
+fn decrypt(cipher_text : &[u8],secret_key : &[u8]) -> Result<Vec<u8>,()>{
     let key = Key::<Aes256Gcm>::from_slice(secret_key);
     let nonce = &cipher_text[0..12];
     let cipher_b = &cipher_text[12..];
@@ -1374,44 +1343,159 @@ fn decrypt(cipher_text : &Vec<u8>,secret_key : &[u8]) -> Vec<u8>{
         drop(cm);
         return decrypt(cipher_text, secret_key)
     };
-    cipher.decrypt(nonce.into(), cipher_b.as_ref()).unwrap()
-}
-
-async fn handle_data_tcp(listener : TcpListener,arc_db : Arc<tmutx<Database>>){
-    loop {
-        let (mut socket, addr) = listener.accept().await.unwrap();
-        println!("Accepted connection from: {}", addr);
-        let arc_db: Arc<tmutx<Database>> = arc_db.clone(); 
-        tokio::spawn(async move {
-            let mut buffer: Vec<u8> = Vec::with_capacity(64);
-            let mut response : Vec<u8> = Vec::new();
-            match socket.read_to_end(&mut buffer).await {
-                Ok(_) => {
-                    if buffer.len() < 32{
-                        let _ = socket.write_all(&response).await;
-                        return
-                    }
-                    let db = arc_db.lock().await;
-                    let secrets_lock = db.secret_keys.lock().await;
-                    let secrets = secrets_lock.clone();
-                    drop(secrets_lock);
-                    drop(db);
-                    
-                }
-                Err(e) => eprintln!("Failed to read from socket: {}", e),
-            };
-        });
+    match cipher.decrypt(nonce.into(), cipher_b.as_ref()){
+        Ok(a) => Ok(a),
+        Err(_) => Err(())
     }
 }
 
+
+#[derive(Deserialize)]
+struct DataConnection{
+    command : String,
+    arguments : Vec<String>
+}
+fn interpolate(x: u32) -> u32 {
+    1 + 3 * x.max(0).min(1)
+}
+async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
+    loop {
+        let (mut socket, addr) = match listener.accept().await {
+            Ok((socket, addr)) => (socket, addr),
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+                continue;
+            }
+        };
+        println!("Accepted connection from: {}", addr);
+        let arc_db: Arc<tmutx<Database>> = arc_db.clone();
+        tokio::spawn(async move {
+            let mut buffer: Vec<u8> = Vec::with_capacity(64);
+            let mut response: Vec<u8> = Vec::new();
+            match socket.read_to_end(&mut buffer).await {
+                Ok(_) => {
+                    if buffer.len() < 32 {
+                        eprintln!("Received data is too short: {} bytes", buffer.len());
+                        let _ = socket.write_all(&response).await;
+                        return;
+                    }
+                    let session_id = &buffer[..32];
+                    let cipher_payload = &buffer[32..];
+                    let mut db = arc_db.lock().await;
+                    let secrets_lock = db.secret_keys.lock().await;
+                    let ssr = session_secret_rel.lock().await;
+                    let secrets: HashMap<[u8; 32], Vec<u8>> = secrets_lock.clone();
+
+                    let mut payload: Vec<u8> = Vec::new();
+                    let mut secret_from_client: Vec<u8> = Vec::with_capacity(32);
+                    if let Some(sec) = ssr.get(session_id) {
+                        match decrypt(cipher_payload, sec) {
+                            Ok(k) => {
+                                secret_from_client = sec.to_vec();
+                                payload = match lzma_decompress(&k) {
+                                    Ok(a) => a,
+                                    Err(e) => {
+                                        eprintln!("Failed to decompress payload with session secret: {}", e);
+                                        let _ = socket.write_all(&response).await;
+                                        return;
+                                    }
+                                };
+                            }
+                            Err(_) => {
+                                eprintln!("Decryption failed with session secret for session_id: {:?}", session_id);
+                                let mut b = false;
+                                for (key, secret) in &secrets {
+                                    match decrypt(cipher_payload, secret) {
+                                        Ok(k) => {
+                                            secret_from_client = secret.clone();
+                                            payload = match lzma_decompress(&k) {
+                                                Ok(a) => a,
+                                                Err(e) => {
+                                                    eprintln!("Failed to decompress payload with secret key: {}", e);
+                                                    let _ = socket.write_all(&response).await;
+                                                    return;
+                                                }
+                                            };
+                                            b = true;
+                                            break;
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                                if !b {
+                                    eprintln!("Decryption failed with all available secret keys");
+                                    let _ = socket.write_all(&response).await;
+                                    return;
+                                }
+                            }
+                        }
+                    } else {
+                        eprintln!("No session secret found for session_id: {:?}", session_id);
+                        let _ = socket.write_all(&response).await;
+                        return;
+                    }
+
+                    drop(secrets_lock);
+                    match serde_json::from_slice::<DataConnection>(&payload) {
+                        Ok(v) => {
+                            match db.execute(&v.command).await {
+                                Ok(query_result) => {
+                                    drop(db);
+                                    match serde_json::to_string(&query_result) {
+                                        Ok(q) => {
+                                            let bytes = q.as_bytes();
+                                            match lzma_compress(bytes, interpolate(bytes.len() as u32)) {
+                                                Ok(a) => {
+                                                    response = encrypt(&a, &secret_from_client);
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Failed to compress query result: {}", e);
+                                                    let _ = socket.write_all(&response).await;
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to serialize query result: {}", e);
+                                            let _ = socket.write_all(&response).await;
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to execute command '{}': {}", v.command, e);
+                                    let _ = socket.write_all(&response).await;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to deserialize payload: {}", e);
+                            let _ = socket.write_all(&response).await;
+                            return;
+                        }
+                    }
+
+                    if let Err(e) = socket.write_all(&response).await {
+                        eprintln!("Failed to write response to socket: {}", e);
+                    }
+                }
+                Err(e) => eprintln!("Failed to read from socket: {}", e),
+            }
+        });
+    }
+}
 impl Database{
-    pub async fn run_database(mut self){
+    pub async fn run_database(self){
+        
+
+
         let settings = &self.settings;
-        let ConnectionsTCP: TcpListener = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.connections_port)).await.unwrap();
-        let DataTCP = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.data_port)).await.unwrap();
+        let connections_tcp: TcpListener = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.connections_port)).await.unwrap();
+        let data_tcp = TcpListener::bind(format!("http://{}:{}",settings.ip,settings.data_port)).await.unwrap();
         let mtx_db = Arc::new(tmutx::new(self));
-        let connections_task = tokio::spawn(handle_connections_tcp(ConnectionsTCP,mtx_db.clone()));
-        let data_task = tokio::spawn(handle_data_tcp(DataTCP,mtx_db));
+        let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone()));
+        let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db));
         let _ = tokio::try_join!(connections_task, data_task);
     }
 }

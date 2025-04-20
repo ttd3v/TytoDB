@@ -1,5 +1,7 @@
 use std::{io::{Error, ErrorKind}, mem::discriminant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::lexer;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,7 +15,7 @@ pub enum Token{
     Group(Vec<Token>),
     SubCommand(Vec<Token>)
 }
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum AlbaTypes{
     Text(String),
     Int(i32),
