@@ -94,7 +94,7 @@ pub struct Database{
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
     container : HashMap<String,Container>,
     connections : Arc<tmutx<HashSet<[u8;32]>>>,
-    queries : Arc<tmutx<HashMap<[u8;32],Query>>>,
+    queries : Arc<tmutx<HashMap<String,Query>>>,
     secret_keys : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>>,
 }
 
@@ -497,11 +497,12 @@ pub struct Query{
     pub pages : Vec<QueryPage>,
     pub current_page : usize,
     pub column_names : Vec<String>,
-    column_types : Vec<AlbaTypes>
+    column_types : Vec<AlbaTypes>,
+    id : String,
 }
 impl Query{
     fn new(column_types : Vec<AlbaTypes>) -> Self{
-        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: 0, column_names: Vec::new(), column_types: column_types}
+        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: 0, column_names: Vec::new(), column_types: column_types,id:generate_secure_code(100)}
     }
     pub fn join(&mut self, foreign: Query) {
         if foreign.column_types != self.column_types {
@@ -1268,8 +1269,8 @@ impl Database{
     
         Ok(Query::new(Vec::new()))
     }
-    pub async fn execute(&mut self,input : &str) -> Result<Query, Error>{
-        let ast = parse(input.to_owned())?;
+    pub async fn execute(&mut self,input : &str,arguments : Vec<String>) -> Result<Query, Error>{
+        let ast = parse(input.to_owned(),arguments)?;
         Ok(self.run(ast).await?)
     }
     
@@ -1475,9 +1476,9 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
                     drop(secrets_lock);
                     match serde_json::from_slice::<DataConnection>(&payload) {
                         Ok(v) => {
-                            match db.execute(&v.command).await {
+                            match db.execute(&v.command,v.arguments).await {
                                 Ok(query_result) => {
-                                    db.queries.lock().await.insert(session_id.try_into().unwrap(), query_result.clone());
+                                    db.queries.lock().await.insert(query_result.id.clone(), query_result.clone());
                                     drop(db);
                                     match serde_json::to_string(&query_result) {
                                         Ok(q) => {

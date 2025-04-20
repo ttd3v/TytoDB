@@ -13,7 +13,8 @@ pub enum Token{
     Bool(bool),
     Operator(String),
     Group(Vec<Token>),
-    SubCommand(Vec<Token>)
+    SubCommand(Vec<Token>),
+    Argument,
 }
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub enum AlbaTypes{

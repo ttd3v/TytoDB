@@ -18,6 +18,10 @@ fn lexer(input: String) -> Result<Vec<Token>, Error> {
     let mut dough = String::new();
 
     while let Some(c) = characters.next() {
+        if c == '?'{
+            result.push(Token::Argument);
+            continue;
+        }
         dough.push(c);
         lexer_ignore_comments_match(&mut dough, &mut characters);
         lexer_keyword_match(&mut result, &mut dough);
@@ -559,11 +563,44 @@ fn debug_finishers_command(tokens : &Vec<Token>) -> Result<AST,Error> {
 }
 
 
-fn parse(input : String) -> Result<AST, Error>{
-    let tokens = match lexer(input){
+fn parse(input : String,arguments_input : Vec<String>) -> Result<AST, Error>{
+    let mut arguments : Vec<Token> = Vec::with_capacity(arguments_input.len());
+    for i in arguments_input{
+        let toks = lexer(i)?;
+        if toks.len() > 1{
+            return Err(gerr("Invalid argument"))
+        }
+        if let Some(tttoks) = toks.first(){
+            match tttoks{
+                Token::Bool(a) => arguments.push(Token::Bool(*a)),
+                Token::Int(a) => arguments.push(Token::Int(*a)),
+                Token::Float(a) => arguments.push(Token::Float(*a)),
+                Token::String(a) => arguments.push(Token::String(a.to_string())),
+                _ => return Err(gerr("Invalid argument"))
+            }
+        }
+    }
+
+    let mut tokens: Vec<Token> = match lexer(input){
         Ok(a) => {a},
         Err(e) => {return Err(e)}
     };
+    let mut argument_index: usize = 0;
+
+    for token in tokens.iter_mut() {
+        if *token == Token::Argument {
+            if argument_index >= arguments.len() {
+                return Err(gerr("Not enough arguments"));
+            }
+            *token = arguments[argument_index].clone();
+            argument_index += 1;
+        }
+    }
+
+    if argument_index < arguments.len() {
+        return Err(gerr("Too many arguments"));
+    }
+
     return debug_tokens(&tokens)
 }
 
