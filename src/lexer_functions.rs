@@ -211,14 +211,37 @@ impl TryFrom<Token> for AlbaTypes {
         }
     }
 }
-const KEYWORDS: &[&str] = &["CREATE","COMMIT","ROLLBACK","DELETE","EDIT","SEARCH","WHERE","ROW","CONTAINER","ON","USING","INT","BIGINT","TEXT","BOOL","FLOAT","AND","OR"];
+const KEYWORDS: &[&str] = &[
+    "CREATE",
+    "COMMIT",
+    "ROLLBACK",
+    "DELETE",
+    "EDIT",
+    "SEARCH",
+    "WHERE",
+    "ROW",
+    "CONTAINER",
+    "ON",
+    "USING",
+    "INT",
+    "BIGINT",
+    "TEXT",
+    "BOOL",
+    "FLOAT",
+    "AND",
+    "OR",
+
+    // weird looking because connection handlers that should use this
+    "QYCNPVS", // query control previous 
+    "QYCNNXT" // query control next
+];
 
 pub fn lexer_keyword_match(result: &mut Vec<Token>, dough: &mut String) -> bool {
-    let keyword = dough.to_uppercase(); // Remove spaces and normalize
+    let keyword = dough.to_uppercase(); 
 
     if KEYWORDS.contains(&keyword.as_str()) {
-        result.push(Token::Keyword(keyword.to_uppercase())); // Store the normalized keyword
-        dough.clear(); // Clear after matching
+        result.push(Token::Keyword(keyword.to_uppercase())); 
+        dough.clear(); 
         return true
     }
     false
@@ -372,7 +395,6 @@ pub fn lexer_subcommand_match<T: Iterator<Item = char>>(
         println!("{}",dough);
 
         if dough.ends_with(')') {
-            // strip the brackets
             let inner = &dough.clone()[1..dough.len() - 1];
             dough.clear();
             result.push(Token::SubCommand(lexer(inner.to_string())?));
