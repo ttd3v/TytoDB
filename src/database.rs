@@ -70,7 +70,7 @@ use serde_yaml;
 use crate::{container::{Container, New}, gerr, lexer_functions::{AlbaTypes, Token}, parser::parse, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
-use tokio::sync::Mutex as tmutx;
+use tokio::{net::{TcpListener, TcpStream}, sync::Mutex as tmutx};
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
@@ -984,34 +984,41 @@ pub async fn connect() -> Result<Database, Error>{
     return Ok(db)
 }
 
-use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const SESSION_ID_LENGTH : usize = 32;
 
-async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database>>){
+async fn handle_connections_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Database>>){
+    let mut buffer: [u8; 32] = [0; 32];
+    match socket.read(&mut buffer).await {
+        Ok(_) => {
+            let db: tokio::sync::MutexGuard<'_, Database> = arc_db.lock().await;
+            let mut content : Vec<u8> = Vec::new();
+            
+            if db.secret_keys.lock().await.get(&buffer).is_some(){
+                let id: [u8; 32] = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
+                if db.connections.lock().await.insert(id.clone()){
+                    content = id.to_vec();
+                }
+            }
+            let _ = socket.write_all(&content).await;
+        }
+        Err(e) => eprintln!("Failed to read from socket: {}", e),
+    };
+}
+
+async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database>>,parallel : bool){
     loop {
         let (mut socket, addr) = listener.accept().await.unwrap();
         println!("Accepted connection from: {}", addr);
         let arc_db: Arc<tmutx<Database>> = ardb.clone(); 
-        tokio::spawn(async move {
-            let mut buffer: [u8; 32] = [0; 32];
-            match socket.read(&mut buffer).await {
-                Ok(_) => {
-                    let db: tokio::sync::MutexGuard<'_, Database> = arc_db.lock().await;
-                    let mut content : Vec<u8> = Vec::new();
-                    
-                    if db.secret_keys.lock().await.get(&buffer).is_some(){
-                        let id: [u8; 32] = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
-                        if db.connections.lock().await.insert(id.clone()){
-                            content = id.to_vec();
-                        }
-                    }
-                    let _ = socket.write_all(&content).await;
-                }
-                Err(e) => eprintln!("Failed to read from socket: {}", e),
-            };
-        });
+        if parallel{
+            tokio::spawn(async move {
+                handle_connections_tcp_inner(&mut socket, arc_db).await        
+            });
+        }else{
+            handle_connections_tcp_inner(&mut socket, arc_db).await
+        }
     }
 }
 
@@ -1070,7 +1077,124 @@ struct DataConnection{
 fn interpolate(x: u32) -> u32 {
     1 + 3 * x.max(0).min(1)
 }
-async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
+
+async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Database>>){
+    let mut buffer: Vec<u8> = Vec::with_capacity(64);
+    let mut response: Vec<u8> = Vec::new();
+    match socket.read_to_end(&mut buffer).await {
+        Ok(_) => {
+            if buffer.len() < 32 {
+                eprintln!("Received data is too short: {} bytes", buffer.len());
+                let _ = socket.write_all(&response).await;
+                return;
+            }
+            let session_id: &[u8] = &buffer[..32];
+            let cipher_payload = &buffer[32..];
+            let mut db = arc_db.lock().await;
+            let secrets_lock = db.secret_keys.lock().await;
+            let ssr = session_secret_rel.lock().await;
+            let secrets: HashMap<[u8; 32], Vec<u8>> = secrets_lock.clone();
+
+            let mut payload: Vec<u8> = Vec::new();
+            let mut secret_from_client: Vec<u8> = Vec::with_capacity(32);
+            if let Some(sec) = ssr.get(session_id) {
+                match decrypt(cipher_payload, sec) {
+                    Ok(k) => {
+                        secret_from_client = sec.to_vec();
+                        payload = match lzma_decompress(&k) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                eprintln!("Failed to decompress payload with session secret: {}", e);
+                                let _ = socket.write_all(&response).await;
+                                return;
+                            }
+                        };
+                    }
+                    Err(_) => {
+                        eprintln!("Decryption failed with session secret for session_id: {:?}", session_id);
+                        let mut b = false;
+                        for (_, secret) in &secrets {
+                            match decrypt(cipher_payload, secret) {
+                                Ok(k) => {
+                                    secret_from_client = secret.clone();
+                                    payload = match lzma_decompress(&k) {
+                                        Ok(a) => a,
+                                        Err(e) => {
+                                            eprintln!("Failed to decompress payload with secret key: {}", e);
+                                            let _ = socket.write_all(&response).await;
+                                            return;
+                                        }
+                                    };
+                                    b = true;
+                                    break;
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                        if !b {
+                            eprintln!("Decryption failed with all available secret keys");
+                            let _ = socket.write_all(&response).await;
+                            return;
+                        }
+                    }
+                }
+            } else {
+                eprintln!("No session secret found for session_id: {:?}", session_id);
+                let _ = socket.write_all(&response).await;
+                return;
+            }
+
+            drop(secrets_lock);
+            match serde_json::from_slice::<DataConnection>(&payload) {
+                Ok(v) => {
+                    match db.execute(&v.command,v.arguments).await {
+                        Ok(query_result) => {
+                            db.queries.lock().await.insert(query_result.id.clone(), query_result.clone());
+                            drop(db);
+                            match serde_json::to_string(&query_result) {
+                                Ok(q) => {
+                                    let bytes = q.as_bytes();
+                                    match lzma_compress(bytes, interpolate(bytes.len() as u32)) {
+                                        Ok(a) => {
+                                            response = encrypt(&a, &secret_from_client);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to compress query result: {}", e);
+                                            let _ = socket.write_all(&response).await;
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to serialize query result: {}", e);
+                                    let _ = socket.write_all(&response).await;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to execute command '{}': {}", v.command, e);
+                            let _ = socket.write_all(&response).await;
+                            return;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to deserialize payload: {}", e);
+                    let _ = socket.write_all(&response).await;
+                    return;
+                }
+            }
+
+            if let Err(e) = socket.write_all(&response).await {
+                eprintln!("Failed to write response to socket: {}", e);
+            }
+        }
+        Err(e) => eprintln!("Failed to read from socket: {}", e),
+    }
+}
+
+async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>,parallel : bool) {
     loop {
         let (mut socket, addr) = match listener.accept().await {
             Ok((socket, addr)) => (socket, addr),
@@ -1081,121 +1205,14 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>) {
         };
         println!("Accepted connection from: {}", addr);
         let arc_db: Arc<tmutx<Database>> = arc_db.clone();
-        tokio::spawn(async move {
-            let mut buffer: Vec<u8> = Vec::with_capacity(64);
-            let mut response: Vec<u8> = Vec::new();
-            match socket.read_to_end(&mut buffer).await {
-                Ok(_) => {
-                    if buffer.len() < 32 {
-                        eprintln!("Received data is too short: {} bytes", buffer.len());
-                        let _ = socket.write_all(&response).await;
-                        return;
-                    }
-                    let session_id: &[u8] = &buffer[..32];
-                    let cipher_payload = &buffer[32..];
-                    let mut db = arc_db.lock().await;
-                    let secrets_lock = db.secret_keys.lock().await;
-                    let ssr = session_secret_rel.lock().await;
-                    let secrets: HashMap<[u8; 32], Vec<u8>> = secrets_lock.clone();
-
-                    let mut payload: Vec<u8> = Vec::new();
-                    let mut secret_from_client: Vec<u8> = Vec::with_capacity(32);
-                    if let Some(sec) = ssr.get(session_id) {
-                        match decrypt(cipher_payload, sec) {
-                            Ok(k) => {
-                                secret_from_client = sec.to_vec();
-                                payload = match lzma_decompress(&k) {
-                                    Ok(a) => a,
-                                    Err(e) => {
-                                        eprintln!("Failed to decompress payload with session secret: {}", e);
-                                        let _ = socket.write_all(&response).await;
-                                        return;
-                                    }
-                                };
-                            }
-                            Err(_) => {
-                                eprintln!("Decryption failed with session secret for session_id: {:?}", session_id);
-                                let mut b = false;
-                                for (_, secret) in &secrets {
-                                    match decrypt(cipher_payload, secret) {
-                                        Ok(k) => {
-                                            secret_from_client = secret.clone();
-                                            payload = match lzma_decompress(&k) {
-                                                Ok(a) => a,
-                                                Err(e) => {
-                                                    eprintln!("Failed to decompress payload with secret key: {}", e);
-                                                    let _ = socket.write_all(&response).await;
-                                                    return;
-                                                }
-                                            };
-                                            b = true;
-                                            break;
-                                        }
-                                        Err(_) => continue,
-                                    }
-                                }
-                                if !b {
-                                    eprintln!("Decryption failed with all available secret keys");
-                                    let _ = socket.write_all(&response).await;
-                                    return;
-                                }
-                            }
-                        }
-                    } else {
-                        eprintln!("No session secret found for session_id: {:?}", session_id);
-                        let _ = socket.write_all(&response).await;
-                        return;
-                    }
-
-                    drop(secrets_lock);
-                    match serde_json::from_slice::<DataConnection>(&payload) {
-                        Ok(v) => {
-                            match db.execute(&v.command,v.arguments).await {
-                                Ok(query_result) => {
-                                    db.queries.lock().await.insert(query_result.id.clone(), query_result.clone());
-                                    drop(db);
-                                    match serde_json::to_string(&query_result) {
-                                        Ok(q) => {
-                                            let bytes = q.as_bytes();
-                                            match lzma_compress(bytes, interpolate(bytes.len() as u32)) {
-                                                Ok(a) => {
-                                                    response = encrypt(&a, &secret_from_client);
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("Failed to compress query result: {}", e);
-                                                    let _ = socket.write_all(&response).await;
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to serialize query result: {}", e);
-                                            let _ = socket.write_all(&response).await;
-                                            return;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("Failed to execute command '{}': {}", v.command, e);
-                                    let _ = socket.write_all(&response).await;
-                                    return;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to deserialize payload: {}", e);
-                            let _ = socket.write_all(&response).await;
-                            return;
-                        }
-                    }
-
-                    if let Err(e) = socket.write_all(&response).await {
-                        eprintln!("Failed to write response to socket: {}", e);
-                    }
-                }
-                Err(e) => eprintln!("Failed to read from socket: {}", e),
-            }
-        });
+        if parallel{
+            tokio::spawn(async move {
+                handle_data_tcp_inner(&mut socket, arc_db).await
+            }); 
+        }else{
+            handle_data_tcp_inner(&mut socket, arc_db).await
+        }
+        
     }
 }
 impl Database{
@@ -1235,14 +1252,20 @@ impl Database{
             file.sync_all().unwrap();
         }
         
-
+        let parallel = if let RequestHandling::Asynchronous = self.settings.request_handling{
+            true
+        }else{
+            false
+        } ;
 
         let settings = &self.settings;
         let connections_tcp: TcpListener = TcpListener::bind(format!("{}:{}",settings.ip,settings.connections_port)).await.unwrap();
         let data_tcp = TcpListener::bind(format!("{}:{}",settings.ip,settings.data_port)).await.unwrap();
         let mtx_db = Arc::new(tmutx::new(self));
-        let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone()));
-        let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db));
-        let _ = tokio::try_join!(connections_task, data_task);
+        let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone(),parallel));
+        let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db,parallel));
+        if let Err(e) = tokio::try_join!(connections_task, data_task){
+            eprintln!("Error: {}",e);
+        }
     }
 }
