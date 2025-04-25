@@ -1,6 +1,7 @@
 SPDX-License-Identifier: TytoDB-1.0
 
 Copyright (c) 2025 Théo Ribeiro Silva
+
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software, permitted to make a personal or commercial use, copying and distributing, but being limited to selling, sublicensing or renaming. 
 
 1. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. 
