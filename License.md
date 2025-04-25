@@ -1,19 +1,12 @@
+SPDX-License-Identifier: TytoDB-1.0
+
 Copyright (c) 2025 Théo
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software, permitted to make a personal or commercial use, copying and distributing, but being limited to selling, sublicensing or renaming. 
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the “Software”), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software. 
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+2. The Software is provided "as is", without warranty of any kind, express or implied. 
 
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+3. A perpetual, worldwide, royalty-free is hereby granted to all recipients of the Software, solely for using or distributing the Software. This license is a condition of use; anyone using the Software agrees to be bound by these patent terms.
+
+4. Modified versions of the Software must not misrepresent the origin. Any derivative work must clearly state that it is a modified version and must use the name “TytoDB” or the original author's name in a way that implies endorsement or authorship, unless explicit permission is granted.
