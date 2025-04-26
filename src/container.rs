@@ -18,7 +18,25 @@ pub struct Container{
     pub graveyard : Arc<tmutx<BTreeSet<u64>>>
 }
 
-
+fn serialize_closed_string(item : &AlbaTypes,s : &String,buffer : &mut Vec<u8>){
+    let mut bytes = Vec::with_capacity(item.size());
+    let mut str_bytes = s.as_bytes().to_vec();
+    let str_length = str_bytes.len().to_le_bytes().to_vec();
+    str_bytes.truncate(item.size()-size_of::<usize>());
+    bytes.extend_from_slice(&str_length);
+    bytes.extend_from_slice(&str_bytes);
+    bytes.resize(item.size(),0);
+    buffer.extend_from_slice(&bytes);
+}
+fn serialize_closed_blob(item : &AlbaTypes,blob : &mut Vec<u8>,buffer : &mut Vec<u8>){
+    let mut bytes: Vec<u8> = Vec::with_capacity(item.size());
+    let blob_length: Vec<u8> = blob.len().to_le_bytes().to_vec();
+    blob.truncate(item.size()-size_of::<usize>());
+    bytes.extend_from_slice(&blob_length);
+    bytes.extend_from_slice(blob);
+    bytes.resize(item.size(),0);
+    buffer.extend_from_slice(&bytes);
+}
 
 pub trait New {
     async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
@@ -53,6 +71,51 @@ async fn try_open_file(path: &str) -> io::Result<Option<File>> {
         Err(e) => Err(e),
     }
 }
+fn handle_fixed_string(buf: &[u8],index: &mut usize,instance_size: usize,values: &mut Vec<AlbaTypes>) -> Result<(), Error> {
+    let bytes = &buf[*index..*index+instance_size];
+    let mut size : [u8;8] = [0u8;8];
+    size.clone_from_slice(bytes); 
+    let string_length = usize::from_le_bytes(size);
+    let string_bytes = &bytes[8..string_length];
+    
+    *index += instance_size;
+    let trimmed: Vec<u8> = string_bytes.iter()
+        .take_while(|&&b| b != 0)
+        .cloned()
+        .collect();
+    let s = String::from_utf8(trimmed)
+        .map_err(|e| gerr(&format!("String decoding failed: {}", e)))?;
+    
+    match instance_size {
+        10 => values.push(AlbaTypes::NanoString(s)),
+        100 => values.push(AlbaTypes::SmallString(s)),
+        500 => values.push(AlbaTypes::MediumString(s)),
+        2000 => values.push(AlbaTypes::BigString(s)),
+        3000 => values.push(AlbaTypes::LargeString(s)),
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn handle_bytes(buf: &[u8],index: &mut usize,size: usize,values: &mut Vec<AlbaTypes>) -> Result<(), Error> {
+    let bytes = buf[*index..*index+size].to_vec();
+    let mut blob_size : [u8;8] = [0u8;8];
+    blob_size.clone_from_slice(&bytes); 
+    let blob_length = usize::from_le_bytes(blob_size);
+    let blob = bytes[8..blob_length].to_vec();
+    *index += size;
+    
+    match size {
+        10 => values.push(AlbaTypes::NanoBytes(blob)),
+        1000 => values.push(AlbaTypes::SmallBytes(blob)),
+        10_000 => values.push(AlbaTypes::MediumBytes(blob)),
+        100_000 => values.push(AlbaTypes::BigSBytes(blob)),
+        1_000_000 => values.push(AlbaTypes::LargeBytes(blob)),
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
 impl Container{
     pub async fn len(&self) -> Result<u64,Error>{
         Ok(self.file.metadata()?.len())
@@ -279,92 +342,175 @@ impl Container{
                 (AlbaTypes::Bool(v), AlbaTypes::Bool(_)) => {
                     buffer.push(if *v { 1 } else { 0 });
                 },
+                (AlbaTypes::Char(c), AlbaTypes::Char(_)) => {
+                    let code = *c as u32;
+                    buffer.extend_from_slice(&code.to_le_bytes());
+                },
                 (AlbaTypes::Text(s), AlbaTypes::Text(_)) => {
                     let mut bytes = s.as_bytes().to_vec();
                     bytes.resize(self.str_size, 0);
                     buffer.extend_from_slice(&bytes);
                 },
-                (AlbaTypes::NONE, AlbaTypes::NONE) => {
+                (AlbaTypes::NanoString(s), AlbaTypes::NanoString(_)) => {
+                    serialize_closed_string(item,s,&mut buffer);
                 },
-                _ => {
-                    return Err(gerr("Mismatched types during serialization."));
-                }
+                (AlbaTypes::SmallString(s), AlbaTypes::SmallString(_)) => {
+                    serialize_closed_string(item,s,&mut buffer);
+                },
+                (AlbaTypes::MediumString(s), AlbaTypes::MediumString(_)) => {
+                    serialize_closed_string(item,s,&mut buffer);
+                },
+                (AlbaTypes::BigString(s), AlbaTypes::BigString(_)) => {
+                    serialize_closed_string(item,s,&mut buffer);
+                },
+                (AlbaTypes::LargeString(s), AlbaTypes::LargeString(_)) => {
+                    serialize_closed_string(item,s,&mut buffer);
+                },
+                (AlbaTypes::NanoBytes(v ), AlbaTypes::NanoBytes(_)) => {
+                    let mut blob: Vec<u8> = v.to_owned();
+                    serialize_closed_blob(item, &mut blob, &mut buffer);
+                },
+                (AlbaTypes::SmallBytes(v), AlbaTypes::SmallBytes(_)) => {
+                    let mut blob: Vec<u8> = v.to_owned();
+                    serialize_closed_blob(item, &mut blob, &mut buffer);
+                },
+                (AlbaTypes::MediumBytes(v), AlbaTypes::MediumBytes(_)) => {
+                    let mut blob: Vec<u8> = v.to_owned();
+                    serialize_closed_blob(item, &mut blob, &mut buffer);
+                },
+                (AlbaTypes::BigSBytes(v), AlbaTypes::BigSBytes(_)) => {
+                    let mut blob: Vec<u8> = v.to_owned();
+                    serialize_closed_blob(item, &mut blob, &mut buffer);
+                },
+                (AlbaTypes::LargeBytes(v), AlbaTypes::LargeBytes(_)) => {
+                    let mut blob: Vec<u8> = v.to_owned();
+                    serialize_closed_blob(item, &mut blob, &mut buffer);
+                },
+                (AlbaTypes::NONE, AlbaTypes::NONE) => {
+                    let size = item.size();
+                    buffer.extend(vec![0u8; size]);
+                },
+                _ => return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Type mismatch between value {:?} and column type {:?}", item, ty)
+                )),
             }
+        }
+    
+        // Validate buffer size matches element_size
+        if buffer.len() != self.element_size {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Serialized size mismatch: expected {}, got {}",
+                    self.element_size,
+                    buffer.len()
+                )
+            ));
         }
     
         Ok(buffer)
     }
-    
-    async fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>,Error> {
+    async fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>, Error> {
         let mut index = 0;
-        let mut value : Vec<AlbaTypes> = Vec::new();
-        for item in self.columns.iter(){
-            match item {
+        let mut values = Vec::new();
+    
+        for column_type in &self.columns {
+            match column_type {
+                // Primitive types
                 AlbaTypes::Bigint(_) => {
-                    let size = size_of::<i64>();
-                    let paydo : [u8; 8] = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
+                    let size = std::mem::size_of::<i64>();
+                    let bytes: [u8; 8] = buf[index..index+size].try_into()
+                        .map_err(|e| gerr(&format!("Failed to read bigint: {}", e)))?;
                     index += size;
-                    value.push(AlbaTypes::Bigint(i64::from_be_bytes(paydo)))
+                    values.push(AlbaTypes::Bigint(i64::from_be_bytes(bytes)));
                 },
+                
                 AlbaTypes::Int(_) => {
-                    let size = size_of::<i32>();
-                    let paydo : [u8; 4] = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
+                    let size = std::mem::size_of::<i32>();
+                    let bytes: [u8; 4] = buf[index..index+size].try_into()
+                        .map_err(|e| gerr(&format!("Failed to read int: {}", e)))?;
                     index += size;
-                    value.push(AlbaTypes::Int(i32::from_be_bytes(paydo)))
+                    values.push(AlbaTypes::Int(i32::from_be_bytes(bytes)));
                 },
+    
                 AlbaTypes::Float(_) => {
-                    let size = size_of::<f64>();
-                    let paydo : [u8; 8] = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
+                    let size = std::mem::size_of::<f64>();
+                    let bytes: [u8; 8] = buf[index..index+size].try_into()
+                        .map_err(|e| gerr(&format!("Failed to read float: {}", e)))?;
                     index += size;
-                    value.push(AlbaTypes::Float(f64::from_be_bytes(paydo)))
+                    values.push(AlbaTypes::Float(f64::from_be_bytes(bytes)));
                 },
+    
                 AlbaTypes::Bool(_) => {
-                    let size = size_of::<bool>();
-                    let paydo : [u8; 1] = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
+                    let size = std::mem::size_of::<bool>();
+                    let byte = *buf.get(index).ok_or(gerr("Incomplete bool data"))?;
                     index += size;
-                    let bool_value = paydo[0] != 0;
-                    value.push(AlbaTypes::Bool(bool_value))
+                    values.push(AlbaTypes::Bool(byte != 0));
                 },
+    
+                AlbaTypes::Char(_) => {
+                    let size = std::mem::size_of::<u32>();
+                    let bytes: [u8; 4] = buf[index..index+size].try_into()
+                        .map_err(|e| gerr(&format!("Failed to read char: {}", e)))?;
+                    index += size;
+                    let code = u32::from_le_bytes(bytes);
+                    values.push(AlbaTypes::Char(match char::from_u32(code){
+                        Some(a) => a,
+                        None => {
+                            return Err(gerr("Invalid Unicode scalar value"))
+                        }
+                    }));
+                },
+    
+                // Text types
                 AlbaTypes::Text(_) => {
                     let size = self.str_size;
-                    let paydo : Vec<u8> = match buf[index..index+size].try_into() { Ok(a) => a, Err(e) => return Err(gerr(&e.to_string()))};
+                    let bytes = buf[index..index+size].to_vec();
                     index += size;
-                    let trimmed = paydo.iter()
-                        .take_while(|&&c| c != 0) 
-                        .cloned()
-                        .collect::<Vec<u8>>();
-
-                    let str_id = match String::from_utf8(trimmed) {
-                        Ok(s) => s,
-                        Err(e) => return Err(gerr(&format!("Erro ao converter bytes para String: {}", e))),
-                    };
-                    let mut file = match try_open_file(&format!("{}/rf/{}",self.location,str_id)).await? {
-                        Some(a) => a,
-                        None => {value.push(AlbaTypes::Text(str_id)); continue},
-                    };
-                    let mut buffer : Vec<u8> = Vec::with_capacity(100);
-                    match file.read_to_end(&mut buffer).await{
-                        Ok(_) => {
-                            value.push(AlbaTypes::Text(
-                                match String::from_utf8(buffer){
-                                    Ok(str) => str,
-                                    Err(e) => {
-                                        return Err(gerr(&e.to_string()))
-                                    }
-                                }
-                            ));
-                        },
-                        Err(e) => {
-                            eprintln!(r#"failed to search for a compatible text file on the "rf" dir, using the id instead. Err: {}"#,e);
-                            value.push(AlbaTypes::Text(str_id));
+                    let trimmed: Vec<u8> = bytes.into_iter()
+                        .take_while(|&b| b != 0)
+                        .collect();
+                    let str_id = String::from_utf8(trimmed)
+                        .map_err(|e| gerr(&format!("Text decoding failed: {}", e)))?;
+    
+                    // Check external text storage
+                    let mut file = match try_open_file(&format!("{}/rf/{}", self.location, str_id)).await? {
+                        Some(f) => f,
+                        None => {
+                            values.push(AlbaTypes::Text(str_id));
+                            continue;
                         }
                     };
+    
+                    let mut content = Vec::new();
+                    file.read_to_end(&mut content).await?;
+                    values.push(AlbaTypes::Text(String::from_utf8(content)
+                        .map_err(|e| gerr(&format!("Text file corrupt: {}", e)))?));
                 },
+    
+                // Fixed-size string types
+                AlbaTypes::NanoString(_) => handle_fixed_string(&buf, &mut index, 10, &mut values)?,
+                AlbaTypes::SmallString(_) => handle_fixed_string(&buf, &mut index, 100, &mut values)?,
+                AlbaTypes::MediumString(_) => handle_fixed_string(&buf, &mut index, 500, &mut values)?,
+                AlbaTypes::BigString(_) => handle_fixed_string(&buf, &mut index, 2000, &mut values)?,
+                AlbaTypes::LargeString(_) => handle_fixed_string(&buf, &mut index, 3000, &mut values)?,
+    
+                // Byte array types
+                AlbaTypes::NanoBytes(_) => handle_bytes(&buf, &mut index, 10, &mut values)?,
+                AlbaTypes::SmallBytes(_) => handle_bytes(&buf, &mut index, 1000, &mut values)?,
+                AlbaTypes::MediumBytes(_) => handle_bytes(&buf, &mut index, 10_000, &mut values)?,
+                AlbaTypes::BigSBytes(_) => handle_bytes(&buf, &mut index, 100_000, &mut values)?,
+                AlbaTypes::LargeBytes(_) => handle_bytes(&buf, &mut index, 1_000_000, &mut values)?,
+    
+                // Null handling
                 AlbaTypes::NONE => {
-                    value.push(AlbaTypes::NONE);
+                    values.push(AlbaTypes::NONE);
                 }
             }
         }
-        Ok(value)
+    
+        Ok(values)
     }
+    
 }

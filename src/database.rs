@@ -2,11 +2,10 @@
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
 
-
+pub const MAX_STR_LEN : usize = 128;
 const DEFAULT_SETTINGS : &str = r#"
 max_columns: 50
 min_columns: 1
-max_str_length: 128
 auto_commit: false            
 memory_limit: 1048576000
 ip: 127.0.0.1
@@ -37,7 +36,6 @@ enum RequestHandling {
 struct Settings{
     max_columns : u32,
     min_columns : u32,
-    max_str_length : usize,
     memory_limit : u64,
     auto_commit : bool,
     ip:String,
@@ -86,6 +84,7 @@ fn generate_secure_code(len: usize) -> String {
     code
 }
 
+
 #[derive(Default)]
 pub struct Database{
     location : String,
@@ -122,8 +121,8 @@ fn from_usize_to_u8(i:usize) -> u8{
     return i as u8;
 }
 const SETTINGS_FILE : &str = "settings.yaml";
-fn calculate_header_size(max_str_len: usize, max_columns: usize) -> usize {
-    let column_names_size = max_str_len * max_columns;
+fn calculate_header_size(max_columns: usize) -> usize {
+    let column_names_size = MAX_STR_LEN * max_columns;
     let column_types_size = max_columns;
     column_names_size + column_types_size
 }
@@ -434,16 +433,9 @@ impl Database{
             self.headers.push(he.clone());
             let mut element_size : usize = 0;
             for el in he.1.iter(){
-                element_size += match el {
-                    AlbaTypes::Bigint(_) => size_of::<i64>(),
-                    AlbaTypes::Int(_) => size_of::<i32>(),
-                    AlbaTypes::Float(_) => size_of::<f64>(),
-                    AlbaTypes::Bool(_) => size_of::<bool>(),
-                    AlbaTypes::Text(_) => self.settings.max_str_length,
-                    AlbaTypes::NONE => 0
-                }
+                element_size += el.size()
             }
-            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,he.0.clone()).await?);
+            self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, MAX_STR_LEN,calculate_header_size(self.settings.max_columns as usize) as u64,he.0.clone()).await?);
         }
         for (_,wedfygt) in self.container.iter(){
             let count = wedfygt.len().await? - wedfygt.headers_offset / wedfygt.element_size as u64;
@@ -511,10 +503,6 @@ impl Database{
             settings.memory_limit = 1_048_576;
             rewrite = true;
         }
-        if settings.max_str_length < 1 {
-            settings.max_str_length = 1;
-            rewrite = true;
-        }
         if rewrite {
             let new_yaml = serde_yaml::to_string(&settings)
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Serialize failed: {}", e)))?;
@@ -529,11 +517,10 @@ impl Database{
     fn get_container_headers(&self, container_name: &str) -> Result<(Vec<String>, Vec<AlbaTypes>), Error> {
         let path = format!("{}/{}",self.location,container_name);
         let max_columns : usize = self.settings.max_columns as usize;
-        let max_str_len : usize = self.settings.max_str_length;
-        let strhs = max_str_len * max_columns;
+        let strhs = MAX_STR_LEN * max_columns;
         let exists = fs::exists(&path)?;
         if exists{
-            let header_size = calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize);
+            let header_size = calculate_header_size(self.settings.max_columns as usize);
             let file = fs::File::open(&path)?;
             let mut buffer : Vec<u8> = vec![0u8;header_size];
             file.read_exact_at(&mut buffer,0)?;
@@ -543,9 +530,9 @@ impl Database{
             let mut column_types: Vec<AlbaTypes> = Vec::with_capacity(max_columns);
 
             for i in 0..max_columns {
-                let start_pos = i * max_str_len;
+                let start_pos = i * MAX_STR_LEN;
                 let mut actual_length = 0;
-                for j in 0..max_str_len {
+                for j in 0..MAX_STR_LEN {
                     if j + start_pos >= name_headers_bytes.len() || name_headers_bytes[start_pos + j] == 0 {
                         break;
                     }
@@ -569,7 +556,7 @@ impl Database{
                         size if size == from_usize_to_u8(size_of::<i64>()) => {
                             AlbaTypes::Bigint(0)
                         },
-                        size if size == text_type_identifier(max_str_len) => AlbaTypes::Text(String::new()),
+                        size if size == text_type_identifier(MAX_STR_LEN) => AlbaTypes::Text(String::new()),
                         size if size == from_usize_to_u8(size_of::<f64>()) => AlbaTypes::Float(0.0),
                         size if size == from_usize_to_u8(size_of::<bool>()) => AlbaTypes::Bool(false),
                         _ => return Err(gerr("Unknown type size in column value types"))
@@ -603,7 +590,6 @@ impl Database{
 
         let min_column : usize = self.settings.min_columns as usize;
         let max_columns : usize = self.settings.max_columns as usize;
-        let max_str_len : usize = self.settings.max_str_length;
         match ast{
             AST::CreateContainer(structure) => {
               if !match fs::exists(format!("{}/{}",self.location,structure.name)) {Ok(a)=>a,Err(bruh)=>{return Err(bruh)}}{
@@ -638,12 +624,12 @@ impl Database{
                     column_val_headers[num] = v.clone();
                 }
                 
-                let mut column_name_bytes: Vec<Vec<u8>> = vec![vec![0u8; max_str_len]; max_columns];
+                let mut column_name_bytes: Vec<Vec<u8>> = vec![vec![0u8; MAX_STR_LEN]; max_columns];
                 let mut column_val_bytes: Vec<u8> = vec![0u8; max_columns];
 
                 for (i,item) in column_name_headers.iter().enumerate(){
                     let bytes = item.as_bytes();
-                    if bytes.len() > max_str_len {
+                    if bytes.len() > MAX_STR_LEN {
                         return Err(Error::new(std::io::ErrorKind::Other, "String too long"));
                     }
                     column_name_bytes[i][..bytes.len()].copy_from_slice(bytes);
@@ -654,8 +640,19 @@ impl Database{
                         AlbaTypes::Bigint(_) => from_usize_to_u8(size_of::<i64>()),
                         AlbaTypes::Float(_) => from_usize_to_u8(size_of::<f64>()),
                         AlbaTypes::Bool(_) => from_usize_to_u8(size_of::<bool>()),
-                        AlbaTypes::Text(_) => max_str_len as u8,
-                        AlbaTypes::NONE => 0
+                        AlbaTypes::Text(_) => MAX_STR_LEN as u8,
+                        AlbaTypes::NONE => 0,
+                        AlbaTypes::Char(_) => from_usize_to_u8(size_of::<char>()),
+                        AlbaTypes::NanoString(_) => from_usize_to_u8(10),
+                        AlbaTypes::SmallString(_) => from_usize_to_u8(100),
+                        AlbaTypes::MediumString(_) => from_usize_to_u8(500),
+                        AlbaTypes::BigString(_) => from_usize_to_u8(2000),
+                        AlbaTypes::LargeString(_) => from_usize_to_u8(3000),
+                        AlbaTypes::NanoBytes(_) => from_usize_to_u8(10),
+                        AlbaTypes::SmallBytes(_) => from_usize_to_u8(1000),
+                        AlbaTypes::MediumBytes(_) => from_usize_to_u8(10_000),
+                        AlbaTypes::BigSBytes(_) => from_usize_to_u8(100_000),
+                        AlbaTypes::LargeBytes(_) => from_usize_to_u8(1_000_000),
                     }
                 }
 
@@ -683,16 +680,9 @@ impl Database{
                 self.containers.push(structure.name.clone());
                 let mut element_size : usize = 0;
                 for el in column_val_headers.iter(){
-                    element_size += match el {
-                        AlbaTypes::Bigint(_) => size_of::<i64>(),
-                        AlbaTypes::Int(_) => size_of::<i32>(),
-                        AlbaTypes::Float(_) => size_of::<f64>(),
-                        AlbaTypes::Bool(_) => size_of::<bool>(),
-                        AlbaTypes::Text(_) => self.settings.max_str_length,
-                        AlbaTypes::NONE => 0
-                    }
+                    element_size += el.size()
                 }
-                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name),self.location.clone(), element_size, column_val_headers.clone(), self.settings.max_str_length,calculate_header_size(self.settings.max_str_length,self.settings.max_columns as usize) as u64,column_name_headers.clone()).await?);
+                self.container.insert(structure.name.clone(), Container::new(&format!("{}/{}",self.location,structure.name),self.location.clone(), element_size, column_val_headers.clone(), MAX_STR_LEN,calculate_header_size(self.settings.max_columns as usize) as u64,column_name_headers.clone()).await?);
                 if let Err(e) = self.save_containers(){return Err(gerr(&e.to_string()))};
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
@@ -729,11 +719,11 @@ impl Database{
                             let expected_val = container.columns[ri].clone();
                             match (&expected_val, &input_val) {
                                 (AlbaTypes::Text(_), AlbaTypes::Text(s)) => {
-                                    let mut code = generate_secure_code(self.settings.max_str_length);
+                                    let mut code = generate_secure_code(MAX_STR_LEN);
                                     let txt_path = format!("{}/rf/{}", self.location, code);
                                     while fs::exists(&txt_path)? {
-                                        let code_full = generate_secure_code(self.settings.max_str_length);
-                                        code = code_full.chars().take(max_str_len).collect::<String>();
+                                        let code_full = generate_secure_code(MAX_STR_LEN);
+                                        code = code_full.chars().take(MAX_STR_LEN).collect::<String>();
                                     }
                                     val[ri] = AlbaTypes::Text(code.clone());
                                     let mut txt_mvcc = container.text_mvcc.lock().await;

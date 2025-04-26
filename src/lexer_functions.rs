@@ -2,7 +2,7 @@ use std::io::{Error, ErrorKind};
 
 use serde::{Deserialize, Serialize};
 
-use crate::lexer;
+use crate::{database::MAX_STR_LEN, lexer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token{
@@ -23,8 +23,34 @@ pub enum AlbaTypes{
     Bigint(i64),
     Float(f64),
     Bool(bool),
+    Char(char),
+    NanoString(String),
+    SmallString(String),
+    MediumString(String),
+    BigString(String),
+    LargeString(String),
+
+    NanoBytes(Vec<u8>),
+    SmallBytes(Vec<u8>),
+    MediumBytes(Vec<u8>),
+    BigSBytes(Vec<u8>),
+    LargeBytes(Vec<u8>),
     NONE
 }
+/*
+char ~ 1
+string~n ~ 10
+string~s ~ 100
+string-m ~ 500
+string-b ~ 2,000
+string-l ~ 3,000
+bytes~n ~ 10
+bytes~s ~ 1,000
+bytes-m ~ 10,000
+bytes-b ~ 100,000
+bytes-l ~ 1,000,000
+
+*/
 
 impl AlbaTypes {
     pub fn try_from_existing(&self, i: AlbaTypes) -> Result<AlbaTypes, Error> {
@@ -37,6 +63,7 @@ impl AlbaTypes {
                     AlbaTypes::Float(f) => f.to_string(),
                     AlbaTypes::Bool(b) => b.to_string(),
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Text")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Text")),
                 };
                 Ok(AlbaTypes::Text(text))
             }
@@ -64,6 +91,7 @@ impl AlbaTypes {
                         }
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Int")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Int")),
                 };
                 Ok(AlbaTypes::Int(int_val))
             }
@@ -85,6 +113,7 @@ impl AlbaTypes {
                         }
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bigint")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Bigint")),
                 };
                 Ok(AlbaTypes::Bigint(bigint_val))
             }
@@ -101,6 +130,7 @@ impl AlbaTypes {
                         }
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Float")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Float")),
                 };
                 Ok(AlbaTypes::Float(float_val))
             }
@@ -124,58 +154,38 @@ impl AlbaTypes {
                         }
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bool")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Bool")),
                 };
                 Ok(AlbaTypes::Bool(bool_val))
             }
             AlbaTypes::NONE => {
                 Ok(AlbaTypes::NONE)
             }
+            _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported target type for conversion")),
+        }
+    }
+    pub fn size(&self) -> usize{
+        match self {
+            AlbaTypes::Bigint(_) => size_of::<i64>(),
+            AlbaTypes::Int(_) => size_of::<i32>(),
+            AlbaTypes::Float(_) => size_of::<f64>(),
+            AlbaTypes::Bool(_) => size_of::<bool>(),
+            AlbaTypes::Text(_) => MAX_STR_LEN,
+            AlbaTypes::NONE => 0,
+            AlbaTypes::Char(_) => size_of::<char>(),
+            AlbaTypes::NanoString(_) => 10 + size_of::<usize>(),
+            AlbaTypes::SmallString(_) => 100 + size_of::<usize>(),
+            AlbaTypes::MediumString(_) => 500 + size_of::<usize>(),
+            AlbaTypes::BigString(_) => 2_000 + size_of::<usize>(),
+            AlbaTypes::LargeString(_) => 3_000 + size_of::<usize>(),
+            AlbaTypes::NanoBytes(_) => 10 + size_of::<usize>(),
+            AlbaTypes::SmallBytes(_) => 1000 + size_of::<usize>(),
+            AlbaTypes::MediumBytes(_) => 10_000 + size_of::<usize>(),
+            AlbaTypes::BigSBytes(_) => 100_000 + size_of::<usize>(),
+            AlbaTypes::LargeBytes(_) => 1_000_000 + size_of::<usize>(),
         }
     }
 }
-
-/*
-Types and it's size
-+-----------+---------------+
-| TYPE NAME |   BYTE SIZE   |
-+-----------+---------------+
-| CHAR      |   1           |
-| STRING-SS |   5           |
-| STRING-SM |   20          |
-| STRING-SB |   50          |
-| STRING-SL |   75          |
-| STRING-MS |   100         |
-| STRING-MM |   135         |
-| STRING-MB |   150         |
-| STRING-ML |   175         |
-| STRING-BS |   200         |
-| STRING-BM |   250         |
-| STRING-BB |   350         |
-| STRING-BL |   400         |
-| STRING-LS |   500         |
-| STRING-LM |   600         |
-| STRING-LB |   700         |
-| STRING-LL |   10000       |
-| BLOB-SS   |   250         |
-| BLOB-SM   |   500         |
-| BLOB-SB   |   750         |
-| BLOB-SL   |   1000        |
-| BLOB-MS   |   25000       |
-| BLOB-MM   |   50000       |
-| BLOB-MB   |   75000       |
-| BLOB-ML   |   100000      |
-| BLOB-BS   |   250000      |
-| BLOB-BM   |   500000      |
-| BLOB-BB   |   750000      |
-| BLOB-BL   |   1000000     |
-| BLOB-LS   |   250000000   |
-| BLOB-LM   |   500000000   |
-| BLOB-LB   |   750000000   |
-| BLOB-LL   |   1000000000  |
-+-----------+---------------+
-*/
-
-
 
 impl TryFrom<Token> for AlbaTypes {
     type Error = &'static str;
@@ -202,6 +212,16 @@ impl TryFrom<Token> for AlbaTypes {
                 "FLOAT" => Ok(AlbaTypes::Float(0.0)),
                 "BOOL" => Ok(AlbaTypes::Bool(false)),
                 "TEXT" => Ok(AlbaTypes::Text(String::new())),
+                "NANO-STRING" => Ok(AlbaTypes::NanoString(String::new())),
+                "SMALL-STRING" => Ok(AlbaTypes::SmallString(String::new())),
+                "MEDIUM-STRING" => Ok(AlbaTypes::MediumString(String::new())),
+                "BIG-STRING" => Ok(AlbaTypes::BigString(String::new())),
+                "LARGE-STRING" => Ok(AlbaTypes::LargeString(String::new())),
+                "NANO-BYTES" => Ok(AlbaTypes::NanoBytes(Vec::new())),
+                "SMALL-BYTES" => Ok(AlbaTypes::SmallBytes(Vec::new())),
+                "MEDIUM-BYTES" => Ok(AlbaTypes::MediumBytes(Vec::new())),
+                "BIG-BYTES" => Ok(AlbaTypes::BigSBytes(Vec::new())),
+                "LARGE-BYTES" => Ok(AlbaTypes::LargeBytes(Vec::new())),
                 _ => return Err(format!("Unknown type keyword: {}", s).leak()),
             },
             _ => {
@@ -230,6 +250,16 @@ const KEYWORDS: &[&str] = &[
     "FLOAT",
     "AND",
     "OR",
+    "NANO-STRING",
+    "SMALL-STRING",
+    "MEDIUM-STRING",
+    "BIG-STRING",
+    "LARGE-STRING",
+    "NANO-BYTES",
+    "SMALL-BYTES",
+    "MEDIUM-BYTES",
+    "BIG-BYTES",
+    "LARGE-BYTES",
 
     // weird looking because connection handlers that should use this
     "QYCNPVS", // query control previous 
