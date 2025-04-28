@@ -131,7 +131,7 @@ fn calculate_header_size(max_columns: usize) -> usize {
 
 const PAGE_SIZE : usize = 100;
 type QueryPage = (Vec<u64>,String);
-type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
+pub type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Query{
     pub rows: Rows,
@@ -183,7 +183,7 @@ impl Query{
                 None => {continue;}
             }
         }
-        self.rows = (container.column_names.clone(),rows);
+        self.rows = (container.column_names(),rows);
         Ok(())
     }
     pub async fn next(&mut self, database: &mut Database) -> Result<(), Error> {
@@ -210,6 +210,9 @@ impl Query{
         self.current_page = new_page;
         self.load_rows(database).await?;
         Ok(())
+    }
+    pub fn push(&mut self,subject : (Vec<u64>,String)){
+        self.pages.push(subject);
     }
 }
 
@@ -341,6 +344,13 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 }
 
 impl Database{
+    
+    fn interact_with_ancient_query_bucket(&mut self,bucket : &mut Vec<usize>,page : &mut Vec<u64>){
+        if bucket.len() >= 40{
+            bucket.sort();
+            todo!()
+        }
+    }
     async fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
         
         if let AlbaContainer::Real(container_name) = &containers[0] {
@@ -348,29 +358,33 @@ impl Database{
                 Some(a) => a,
                 None => return Err(gerr(&format!("No container named {}", container_name))),
             };
-            let mut final_query = Query::new(container.columns.clone());
-            let length = container.arrlen().await?;
-            let mut page_size = (length * container.element_size as u64) / self.settings.memory_limit;
-            if page_size < 1 {
-                page_size = 1;
-            }
-            let mut cursor: u64 = 0;
+            let query_rows = container.get_query_candidates(conditions).await?;
+            let mut final_query = Query::new(container.columns_owned());
             final_query.column_names = col_names.clone();
-            let mut list : Vec<u64> = Vec::new();
-            while cursor < length {
-                let rows = container.get_rows((cursor, cursor + page_size)).await?;
-    
-                for (number, row) in rows.iter().enumerate() {
-                    let row_index = cursor + number as u64;
-                    if condition_checker(row, &container.column_names, conditions)? {
-                        list.push(row_index);
-                    }
-                }
-                cursor += page_size as u64;
+            
+            let mut page : Vec<u64> = Vec::with_capacity(PAGE_SIZE); 
+            let mut iterator = query_rows.iter();
+            let mut bucket : Vec<usize> = Vec::new();
+            while let Some(i) = iterator.next() {
+                bucket.push(i.clone());
             }
-    
-            final_query.pages = vec![(list,container_name.clone())];
+
             return Ok(final_query);
+            // let mut list : Vec<u64> = Vec::new();
+            // while cursor < length {
+            //     let rows = container.get_rows((cursor, cursor + page_size)).await?;
+    
+            //     for (number, row) in rows.iter().enumerate() {
+            //         let row_index = cursor + number as u64;
+            //         if condition_checker(row, &container.column_names, conditions)? {
+            //             list.push(row_index);
+            //         }
+            //     }
+            //     cursor += page_size as u64;
+            // }
+    
+            // final_query.pages = vec![(list,container_name.clone())];
+
         }
         Err(gerr("No valid containers specified for query processing"))
     }
@@ -706,17 +720,17 @@ impl Database{
                     )));
                 }
                 for i in &structure.col_nam {
-                    if !container.column_names.contains(&i) {
+                    if !container.column_names().contains(&i) {
                         return Err(gerr(&format!("There is no column {} in the container {}", i, structure.container)))
                     }
                 }
             
-                let mut val: Vec<AlbaTypes> = container.columns.clone();
+                let mut val: Vec<AlbaTypes> = container.columns_owned();
                 for (index, col_name) in structure.col_nam.iter().enumerate() {
-                    match container.column_names.iter().position(|c| c == col_name) {
+                    match container.column_names().iter().position(|c| c == col_name) {
                         Some(ri) => {
                             let input_val = structure.col_val.get(index).cloned().unwrap();
-                            let expected_val = container.columns[ri].clone();
+                            let expected_val = container.columns()[ri].clone();
                             match (&expected_val, &input_val) {
                                 (AlbaTypes::Text(_), AlbaTypes::Text(s)) => {
                                     let mut code = generate_secure_code(MAX_STR_LEN);
@@ -726,8 +740,8 @@ impl Database{
                                         code = code_full.chars().take(MAX_STR_LEN).collect::<String>();
                                     }
                                     val[ri] = AlbaTypes::Text(code.clone());
-                                    let mut txt_mvcc = container.text_mvcc.lock().await;
-                                    txt_mvcc.insert(code, (false, s.to_string()));
+                                    let mut mvcc = container.mvcc.lock().await;
+                                    mvcc.1.insert(code, (false, s.to_string()));
                                 },
                                 (AlbaTypes::Bigint(_), AlbaTypes::Int(i)) => {
                                     val[ri] = AlbaTypes::Bigint(*i as i64);
@@ -762,9 +776,9 @@ impl Database{
                     Some(i) => i,
                     None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
                 };
-                let mut values = container.columns.clone();
+                let mut values = container.columns_owned().clone();
                 let mut hashmap : HashMap<String,usize> = HashMap::new(); 
-                for (index,value) in container.column_names.iter().enumerate(){
+                for (index,value) in container.column_names().iter().enumerate(){
                     hashmap.insert(value.to_string(), index);
                 }
                 for i in structure.col_nam.iter().enumerate(){
@@ -782,7 +796,6 @@ impl Database{
                 
                 let mut row_group =  self.settings.memory_limit / container.element_size as u64;
                 let mut mvcc = container.mvcc.lock().await;
-                let text_mvcc = container.text_mvcc.lock().await;
                 if row_group < 1{
                     row_group = 1
                 }
@@ -794,15 +807,15 @@ impl Database{
                     let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
                     for j in li.iter().enumerate(){
                         let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
-                        match mvcc.get(&id){
+                        match mvcc.0.get(&id){
                             Some(a) => {
-                                if !a.0 && condition_checker(&a.1, &container.column_names, &structure.conditions)?{
-                                    mvcc.insert(id,(false,values.clone()));
+                                if !a.0 && condition_checker(&a.1, &container.column_names(), &structure.conditions)?{
+                                    mvcc.0.insert(id,(false,values.clone()));
                                 }
                             },
                             None => {
-                                if condition_checker(&j.1, &container.column_names, &structure.conditions)?{
-                                    mvcc.insert(id,(false,values.clone()));
+                                if condition_checker(&j.1, &container.column_names(), &structure.conditions)?{
+                                    mvcc.0.insert(id,(false,values.clone()));
                                 } 
                             }
                         }
@@ -810,7 +823,6 @@ impl Database{
                 }
                 if self.settings.auto_commit{
                     drop(mvcc);
-                    drop(text_mvcc);
                     self.commit().await?;
                 }
             },
@@ -835,12 +847,12 @@ impl Database{
                         let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
                         match &structure.conditions{
                             Some(conditions) => {
-                                if condition_checker(&j.1, &container.column_names, &conditions)?{
-                                    mvcc.insert(id,(true,j.1.clone()));
+                                if condition_checker(&j.1, &container.column_names(), &conditions)?{
+                                    mvcc.0.insert(id,(true,j.1.clone()));
                                 } 
                             },
                             None => {
-                                mvcc.insert(id,(true,j.1.clone()));
+                                mvcc.0.insert(id,(true,j.1.clone()));
                             }
                         }
                         
@@ -857,7 +869,7 @@ impl Database{
                         Some(a) => a,
                         None => {return Err(gerr(&format!("There is no database with the name {}",structure.container)))}
                     };
-                    for i in container.column_names.iter().enumerate(){
+                    for i in container.column_names().iter().enumerate(){
                         if structure.container == *i.1{
                             self.containers.remove(i.0);
                         }

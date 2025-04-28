@@ -464,21 +464,21 @@ pub fn parse(input : String,arguments_input : Vec<String>) -> Result<AST, Error>
         Ok(a) => {a},
         Err(e) => {return Err(e)}
     };
-    let mut argument_index: usize = 0;
-
+    let mut arg_iter = arguments.iter();
     for token in tokens.iter_mut() {
         if *token == Token::Argument {
-            if argument_index >= arguments.len() {
-                return Err(gerr("Not enough arguments"));
+            *token = match arg_iter.next(){
+                Some(arg) => arg.to_owned(),
+                None => {
+                    return Err(gerr("Not enough arguments"))
+                }
             }
-            *token = arguments[argument_index].clone();
-            argument_index += 1;
         }
     }
 
-    if argument_index < arguments.len() {
+    if arg_iter.next().is_some() {
         return Err(gerr("Too many arguments"));
     }
-
+    drop(arguments);
     return debug_tokens(&tokens)
 }

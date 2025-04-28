@@ -1,23 +1,81 @@
-use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
+use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, mem::discriminant, ops::Index, os::unix::fs::FileExt, str::CharIndices, sync::Arc};
+use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
 use tokio::fs::{File,self};
 use std::collections::btree_set::BTreeSet;
-use crate::{database::write_data, gerr, lexer_functions::AlbaTypes};
+use crate::{database::{write_data, QueryConditions}, gerr, index_tree::IndexTree, lexer_functions::{AlbaTypes, Token}};
 
-type MvccType = Arc<tmutx<HashMap<u64,(bool,Vec<AlbaTypes>)>>>;
+type MvccType = Arc<tmutx<(HashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 pub struct Container{
     pub file : std::fs::File,
     pub element_size : usize,
-    pub columns : Vec<AlbaTypes>,
+    pub headers : HashMap<String,AlbaTypes>,
     pub str_size : usize,
     pub mvcc : MvccType,
-    pub text_mvcc : Arc<tmutx<HashMap<String,(bool,String)>>>,
     pub headers_offset : u64,
-    pub column_names : Vec<String>,
     pub location : String,
-    pub graveyard : Arc<tmutx<BTreeSet<u64>>>
+    pub graveyard : Arc<tmutx<BTreeSet<u64>>>,
+    pub indexes : IndexTree
+
 }
 
+#[derive(Clone)]
+enum QueryCandidates {
+    All,
+    Some(BTreeSet<usize>)
+}
+fn bind_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
+    if let QueryCandidates::Some(a) = n{
+        if let QueryCandidates::Some(mut b) = m{
+            b.extend(a.iter());
+            return QueryCandidates::Some(b)
+        }
+    }
+    QueryCandidates::All
+}
+fn link_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
+    if let QueryCandidates::Some(a) = n{
+        if let QueryCandidates::Some(b) = m{
+            let mut c = BTreeSet::new();
+            for i in b.iter(){
+                if a.contains(i){
+                    c.insert(i.clone());
+                }
+            }
+            return QueryCandidates::Some(c)
+        }
+    }
+    QueryCandidates::All 
+}
+fn weird_thing_to_QueryCandidates(m : BTreeSet<BTreeSet<usize>>) -> QueryCandidates{
+    let mut main = QueryCandidates::Some(BTreeSet::new());
+    for i in m{
+        main = bind_QueryCandidates(main, QueryCandidates::Some(i))
+    } 
+    main
+}
+
+
+pub fn is_coherent(input1: &Token, input2: &AlbaTypes) -> bool {
+    matches!(
+        (input1, input2),
+        (Token::String(_), AlbaTypes::Text(_)
+            | AlbaTypes::Char(_)
+            | AlbaTypes::NanoString(_)
+            | AlbaTypes::SmallString(_)
+            | AlbaTypes::MediumString(_)
+            | AlbaTypes::BigString(_)
+            | AlbaTypes::LargeString(_)
+            | AlbaTypes::NanoBytes(_)
+            | AlbaTypes::SmallBytes(_)
+            | AlbaTypes::MediumBytes(_)
+            | AlbaTypes::BigSBytes(_)
+            | AlbaTypes::LargeBytes(_))
+        | (Token::Int(_), AlbaTypes::Int(_) | AlbaTypes::Bigint(_))
+        | (Token::Float(_), AlbaTypes::Float(_))
+        | (Token::Bool(_), AlbaTypes::Bool(_))
+    )
+}
 fn serialize_closed_string(item : &AlbaTypes,s : &String,buffer : &mut Vec<u8>){
     let mut bytes = Vec::with_capacity(item.size());
     let mut str_bytes = s.as_bytes().to_vec();
@@ -45,20 +103,73 @@ pub trait New {
 
 impl New for Container {
     async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
-        Ok(Container{
+        let mut  headers = HashMap::new();
+        for index in 0..((columns.len()+column_names.len())/2){
+            let name = match column_names.get(index){
+                Some(nm) => nm,
+                None => {
+                    return Err(gerr("Failed to create container, the size of column types and names must be equal. And this error is a consequence of that property not being respected."))
+                } 
+            };
+            let value = match columns.get(index){
+                Some(vl) => vl,
+                None => {
+                    return Err(gerr("Failed to create container, the size of column types and names must be equal. And this error is a consequence of that property not being respected."))
+                }
+            };
+            headers.insert(name.to_owned(), value.to_owned());
+        }
+
+        let mut container = Container{
             file : std::fs::OpenOptions::new().read(true).write(true).open(&path)?,
             element_size,
-            columns,
             str_size,
-            mvcc: Arc::new(tmutx::new(HashMap::new())),
-            text_mvcc: Arc::new(tmutx::new(HashMap::new())),
+            mvcc: Arc::new(tmutx::new((HashMap::new(),HashMap::new()))),
             headers_offset ,
-            column_names,
+            headers,
             location,
-            graveyard: Arc::new(tmutx::new(BTreeSet::new()))
-        })
+            graveyard: Arc::new(tmutx::new(BTreeSet::new())),
+            indexes: IndexTree::default()
+        };
+        container.load_indexing().await?;
+        Ok(container)
     }
     
+}
+/*
+    TODO: INDEX LOADING
+*/
+
+const INDEXING_CHUNK_SIZE : u64 = 50;
+impl Container{
+    pub fn column_names(&self) -> Vec<String>{
+        self.headers.keys().cloned().collect()
+    }
+    async fn load_indexing(&mut self) -> Result<(),Error>{
+        self.indexes.data.clear();
+        let row_length = self.arrlen().await?;
+        if row_length == 0{
+            return Ok(())
+        }
+        let mut cursor : u64 = 0;
+        while cursor < row_length{
+            let end_index = if cursor+INDEXING_CHUNK_SIZE > row_length{
+                cursor+INDEXING_CHUNK_SIZE - row_length
+            }else{
+                cursor+INDEXING_CHUNK_SIZE
+            };
+            let rows_not_formatted = self.get_rows((cursor,end_index)).await?;
+            let mut rows = Vec::with_capacity(INDEXING_CHUNK_SIZE as usize);
+
+            for i in rows_not_formatted.iter().enumerate(){
+                rows.push((i.0*self.element_size,i.1.to_owned()));
+            }
+            
+            self.indexes.insert_gently(self.column_names(), rows);
+            cursor = end_index;
+        }
+        Ok(())
+    }
 }
 
 async fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
@@ -90,8 +201,8 @@ fn handle_fixed_string(buf: &[u8],index: &mut usize,instance_size: usize,values:
         10 => values.push(AlbaTypes::NanoString(s)),
         100 => values.push(AlbaTypes::SmallString(s)),
         500 => values.push(AlbaTypes::MediumString(s)),
-        2000 => values.push(AlbaTypes::BigString(s)),
-        3000 => values.push(AlbaTypes::LargeString(s)),
+        2_000 => values.push(AlbaTypes::BigString(s)),
+        3_000 => values.push(AlbaTypes::LargeString(s)),
         _ => unreachable!(),
     }
     Ok(())
@@ -135,12 +246,125 @@ impl Container{
                     return Err(gerr("Could not lock mvcc"));
                 }
             };
-            mvcc.keys().copied().max().map_or(0, |max_index| max_index + 1)
+            mvcc.0.keys().copied().max().map_or(0, |max_index| max_index + 1)
         };
         Ok(file_rows.max(mvcc_max))
     }
+
+    pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<&AlbaTypes>{
+        if  let Some(g) = self.headers.get(column_name){
+            return Some(g)
+        }
+        None
+    }
     
-    
+
+    pub async fn candidates_from_unit(&self,condition : &(Token,Token,Token)) -> Result<QueryCandidates,Error>{
+        let column_name_token = &condition.0;
+
+        let column_name : &String = if let Token::String(cn) = column_name_token{
+            cn
+        }else{
+            return Err(gerr("Invalid column name type, expected \"Token::String\"."))
+        };
+        
+
+        let operator = if let Token::Operator(oprt) = &condition.1{
+            oprt
+        }else{
+            return Err(gerr("Invalid operator type, expected \"Token::Operator\"."))
+        };
+
+        let column_alba_type = match self.get_alba_type_from_column_name(column_name){
+            Some(at) => at,
+            None => return Err(
+                gerr(
+                    &format!("There is no column named \"{}\", even while you try to use it. Verify if that is or isn\'t your fault, if isn\'t then the error may belong to the database system.",column_name)
+                )
+            )
+        };
+
+        if !is_coherent(&condition.2, column_alba_type) {
+            return Err(gerr(
+                &format!(
+                    r#"Type mismatch: Got {:?} with {:?}. Valid pairs:\n\
+                     - Token::String: Text, Char, *String, *Bytes\n\
+                     - Token::Int: Int, Bigint\n\
+                     - Token::Float: Float\n\
+                     - Token::Bool: Bool"#,
+                    condition.2, column_alba_type
+                )
+            ));
+        }
+
+        Ok(match operator.as_str(){
+            "==" | "=" => {
+                match self.indexes.get_all_in_group(&column_name, condition.2.clone())?{
+                    Some(a) => {
+                        QueryCandidates::Some(a.clone())
+                    },
+                    None =>{
+                        QueryCandidates::All
+                    }
+                }
+            },
+            ">=" | ">" => {
+                match self.indexes.get_most_in_group_raising(&column_name, condition.2.clone())?{
+                    Some(a) => {
+                        weird_thing_to_QueryCandidates(a.clone())
+                    },
+                    None =>{
+                        QueryCandidates::All
+                    }
+                }
+            },
+            "<=" | "<" => {
+                match self.indexes.get_most_in_group_lowering(&column_name, condition.2.clone())?{
+                    Some(a) => {
+                        weird_thing_to_QueryCandidates(a.clone())
+                    },
+                    None =>{
+                        QueryCandidates::All
+                    }
+                }
+            },
+            _ => {
+                QueryCandidates::All
+            }
+        })
+    }
+
+    pub async fn get_query_candidates(&self,query_conditions : &QueryConditions) -> Result<BTreeSet<usize>,Error>{
+        let candidates_set : BTreeSet<usize> = BTreeSet::new();
+        let mut condition_groups : Vec<QueryCandidates> = Vec::new();
+        for i in query_conditions.0.iter(){
+            let wsoeufh = self.candidates_from_unit(i).await?;
+            condition_groups.push(wsoeufh);
+        }
+        let mut the_main_thing_idk_how_to_name_this = QueryCandidates::Some(BTreeSet::new());
+        let mut conditons_hmap : AHashMap<usize, char> = AHashMap::new();
+        for i in &query_conditions.1{
+            conditons_hmap.insert(i.0.clone(), i.1.clone());
+        }
+        let mut comparision : char = 'o';
+        for i in condition_groups.iter().enumerate(){
+            if let Some(a) = conditons_hmap.get(&i.0){
+                comparision = *a;
+            }
+            match comparision{
+                'o' => {
+                    the_main_thing_idk_how_to_name_this = link_QueryCandidates(the_main_thing_idk_how_to_name_this, i.1.clone())
+                },
+                _ => {
+                    the_main_thing_idk_how_to_name_this = bind_QueryCandidates(the_main_thing_idk_how_to_name_this, i.1.clone())
+                }
+            }
+        }
+        if let QueryCandidates::Some(tmtihtnt) = the_main_thing_idk_how_to_name_this{
+            return Ok(tmtihtnt)
+        }
+        return Ok(candidates_set)
+    }
     pub async fn get_next_addr(&self) -> Result<u64, Error> {
         let mut graveyard = self.graveyard.lock().await;
         if graveyard.len() > 0{
@@ -149,8 +373,8 @@ impl Container{
             }
         }
         let current_rows = self.arrlen().await?;
-        let mvcc_guard = self.mvcc.lock().await;
-        for (&key, (deleted, _)) in mvcc_guard.iter() {
+        let mvcc = self.mvcc.lock().await;
+        for (&key, (deleted, _)) in mvcc.0.iter() {
             if *deleted {
                 return Ok(key);
             }
@@ -160,27 +384,25 @@ impl Container{
     pub async fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
         let ind = self.get_next_addr().await?;
         let mut mvcc_guard = self.mvcc.lock().await;
-        mvcc_guard.insert(ind, (false,data.clone()));
+        mvcc_guard.0.insert(ind, (false,data.clone()));
         Ok(())
     }
     pub async fn rollback(&mut self) -> Result<(),Error> {
         let mut mvcc_guard = self.mvcc.lock().await;
-        mvcc_guard.clear();
+        mvcc_guard.0.clear();
+        mvcc_guard.1.clear();
         drop(mvcc_guard);
-
-        let mut txt_mvcc = self.text_mvcc.lock().await;
-        txt_mvcc.clear();
         Ok(())
     }
     pub async fn commit(&mut self) -> Result<(), Error> {
         let mut total = self.arrlen().await?;
         println!("commit: Locking MVCC...");
-        let mut mvcc_guard = self.mvcc.lock().await;
+        let mut mvcc = self.mvcc.lock().await;
     
         println!("commit: Separating insertions and deletions...");
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         let mut deletes: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
-        for (index, value) in mvcc_guard.iter() {
+        for (index, value) in mvcc.0.iter() {
             let v = (*index, value.1.clone());
             if value.0 {
                 deletes.push(v);
@@ -188,7 +410,7 @@ impl Container{
                 insertions.push(v);
             }
         }
-        mvcc_guard.clear();
+        mvcc.0.clear();
     
         println!("commit: Sorting insertions and deletions...");
         insertions.sort_by_key(|(index, _)| *index);
@@ -218,9 +440,8 @@ impl Container{
         let new_len = hdr_off + total * row_sz;
         self.file.set_len(new_len)?;
         
-        let mut txt_mvcc = self.text_mvcc.lock().await;
 
-        for (i, txt) in  txt_mvcc.iter(){
+        for (i, txt) in  mvcc.1.iter(){
             let path = format!("{}/rf/{}", self.location, i); 
             if !txt.0 {
                 let mut file: std::fs::File = std::fs::File::create_new(&path)?;
@@ -243,8 +464,8 @@ impl Container{
         
         }
 
-        txt_mvcc.clear();
-        txt_mvcc.shrink_to_fit();
+        mvcc.1.clear();
+        mvcc.1.shrink_to_fit();
     
         println!("commit: COMMIT SUCCESSFUL!");
         println!("commit: Starting to sync...");
@@ -274,18 +495,17 @@ impl Container{
         let mut buff = vec![0u8; buff_size];
         self.file.read_exact_at(&mut buff, idxs.0)?;
     
-        let v_c = self.mvcc.lock().await;
-        let t_c = self.text_mvcc.lock().await;
+        let mvcc = self.mvcc.lock().await;
     
         let mut result: Vec<Vec<AlbaTypes>> = Vec::new(); 
         for i in index.0..lidx {
-            if let Some((deleted, row_data)) = v_c.get(&i) {
+            if let Some((deleted, row_data)) = mvcc.0.get(&i) {
                 if *deleted {
                     continue;
                 }
     
                 let mut row = row_data.clone();
-                match v_c.get(&i){
+                match mvcc.0.get(&i){
                     Some(row_in_mvcc) => {
                         if !row_in_mvcc.0{
                             row = row_in_mvcc.1.clone()
@@ -295,7 +515,7 @@ impl Container{
                 }
                 for value in row.iter_mut() {
                     if let AlbaTypes::Text(c) = value {
-                        if let Some((deleted, new_text)) = t_c.get(c) {
+                        if let Some((deleted, new_text)) = mvcc.1.get(c) {
                             if !*deleted {
                                 *value = AlbaTypes::Text(new_text.to_string());
                             }
@@ -324,11 +544,16 @@ impl Container{
     
         Ok(result)
     }
-    
+    pub fn columns(&self) -> Vec<&AlbaTypes>{
+        self.headers.values().by_ref().collect()
+    }
+    pub fn columns_owned(&self) -> Vec<AlbaTypes>{
+        self.headers.values().cloned().collect()
+    }
     pub fn serialize_row(&self, row: &[AlbaTypes]) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(self.element_size);
     
-        for (item, ty) in row.iter().zip(self.columns.iter()) {
+        for (item, ty) in row.iter().zip(self.columns().iter()) {
             match (item, ty) {
                 (AlbaTypes::Bigint(v), AlbaTypes::Bigint(_)) => {
                     buffer.extend_from_slice(&v.to_be_bytes());
@@ -415,7 +640,7 @@ impl Container{
         let mut index = 0;
         let mut values = Vec::new();
     
-        for column_type in &self.columns {
+        for column_type in &self.columns() {
             match column_type {
                 // Primitive types
                 AlbaTypes::Bigint(_) => {

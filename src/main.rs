@@ -2,6 +2,7 @@ mod lexer_functions;
 mod database;
 mod container;
 mod parser;
+mod index_tree;
 use std::io::{Error,ErrorKind};
 use tokio;
 use database::connect;
