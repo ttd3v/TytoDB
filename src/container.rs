@@ -1,8 +1,8 @@
-use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, mem::discriminant, ops::Index, os::unix::fs::FileExt, str::CharIndices, sync::Arc};
+use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, IoSliceMut, Read, Write}, mem::discriminant, ops::Index, os::unix::fs::FileExt, str::CharIndices, sync::Arc};
 use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
 use tokio::fs::{File,self};
-use std::collections::btree_set::BTreeSet;
+use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
 use crate::{database::{write_data, QueryConditions}, gerr, index_tree::IndexTree, lexer_functions::{AlbaTypes, Token}};
 
 type MvccType = Arc<tmutx<(HashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -158,7 +158,7 @@ impl Container{
             }else{
                 cursor+INDEXING_CHUNK_SIZE
             };
-            let rows_not_formatted = self.get_rows((cursor,end_index)).await?;
+            let rows_not_formatted = self.get_rows((cursor..end_index)).await?;
             let mut rows = Vec::with_capacity(INDEXING_CHUNK_SIZE as usize);
 
             for i in rows_not_formatted.iter().enumerate(){
@@ -544,6 +544,63 @@ impl Container{
     
         Ok(result)
     }
+    pub async fn get_spread_rows(&mut self, index: &mut Vec<u64>) -> Result<Vec<Vec<AlbaTypes>>, Error> {
+        let maxl = if self.len().await? > self.headers_offset {
+            (self.len().await? - self.headers_offset) / self.element_size as u64
+        } else {
+            0
+        };
+        for i in index.iter_mut(){
+            if *i > maxl {
+                *i = maxl;
+            }
+        }
+        index.sort();
+        let mut buffers : BTreeMap<u64,Vec<u8>> = BTreeMap::new();
+        let mut result : Vec<Vec<AlbaTypes>> = Vec::new();
+        let mvcc = self.mvcc.lock().await;
+        for i in index{
+            if let Some(g) = mvcc.0.get(&i){
+                if !g.0{
+                    result.push(g.1.clone());
+                    continue;
+                }
+            }
+            buffers.insert(*i, vec![0u8;self.element_size]);
+        }
+        drop(mvcc);
+        let mut it = buffers.iter_mut();
+        while let Some(b) = it.next(){
+            
+            if let Some(c) = it.next(){
+                if *c.0-*b.0 < 10{
+                    let buff_size = ((*c.0 - *b.0 + 1) * self.element_size as u64) as usize;
+                    let mut buff = vec![0u8;buff_size];
+                    self.file.read_exact_at(&mut buff, (b.0*self.element_size as u64)+self.headers_offset)?;
+                    *b.1 = buff[0..self.element_size].to_vec();
+                    let c_off = ((*c.0-*b.0)*self.element_size as u64) as usize;
+                    *c.1 = buff[c_off..(c_off+self.element_size)].to_vec();
+                    result.push(self.deserialize_row(b.1.to_vec()).await?);
+                    result.push(self.deserialize_row(c.1.to_vec()).await?);
+                    continue;
+                }else{
+                    self.file.read_exact_at(b.1, (b.0*self.element_size as u64)+self.headers_offset)?;
+                    self.file.read_exact_at(c.1, (c.0*self.element_size as u64)+self.headers_offset)?;
+                    result.push(self.deserialize_row(b.1.to_vec()).await?);
+                    result.push(self.deserialize_row(c.1.to_vec()).await?);
+
+                    continue;
+                }
+            }
+            self.file.read_exact_at(b.1, (b.0*self.element_size as u64)+self.headers_offset)?;
+            result.push(self.deserialize_row(b.1.to_vec()).await?);
+        }
+        
+        result.shrink_to_fit();
+        Ok(result)
+    }
+    
+    
     pub fn columns(&self) -> Vec<&AlbaTypes>{
         self.headers.values().by_ref().collect()
     }

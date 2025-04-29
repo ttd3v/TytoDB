@@ -345,9 +345,9 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 
 impl Database{
     
-    fn interact_with_ancient_query_bucket(&mut self,bucket : &mut Vec<usize>,page : &mut Vec<u64>){
+    fn interact_with_ancient_query_bucket(&mut self,bucket : &mut Vec<usize>,page : &mut Vec<u64>,container : &mut Container){
         if bucket.len() >= 40{
-            bucket.sort();
+            self
             todo!()
         }
     }
