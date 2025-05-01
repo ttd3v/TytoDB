@@ -65,7 +65,7 @@ use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, lexer_functions::{AlbaTypes, Token}, parser::parse, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, parser::parse, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::{TcpListener, TcpStream}, sync::Mutex as tmutx};
@@ -345,16 +345,32 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 
 impl Database{
     
-    fn interact_with_ancient_query_bucket(&mut self,bucket : &mut Vec<usize>,page : &mut Vec<u64>,container : &mut Container){
+    async fn interact_with_ancient_query_bucket(bucket : &mut Vec<IndexSizes>,page : &mut Vec<u64>,container : &mut Container,query :&mut  Query,containername : &str,conditions: &QueryConditions) -> Result<(),Error>{
         if bucket.len() >= 40{
-            self
-            todo!()
+            let mut better_bucket : Vec<u64> = bucket.iter().map(|f| IndexSizes::to_usize(*f) as u64).collect();
+            let rows = container.get_spread_rows(&mut better_bucket).await?;
+            
+            let column_names = container.column_names();
+            for i in rows.iter().enumerate(){
+                if !condition_checker(i.1, &column_names, conditions)?{
+                    continue;
+                }
+                if let Some(ind) = better_bucket.get(i.0){
+                    page.push(*ind);
+                }
+                if page.len() >= PAGE_SIZE{
+                    query.pages.push((page.clone(),containername.to_string()));
+                    page.clear();
+                }
+            }
+            
         }
+        Ok(())
     }
     async fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
         
         if let AlbaContainer::Real(container_name) = &containers[0] {
-            let container = match self.container.get(container_name) {
+            let mut container = match self.container.get_mut(container_name) {
                 Some(a) => a,
                 None => return Err(gerr(&format!("No container named {}", container_name))),
             };
@@ -364,10 +380,14 @@ impl Database{
             
             let mut page : Vec<u64> = Vec::with_capacity(PAGE_SIZE); 
             let mut iterator = query_rows.iter();
-            let mut bucket : Vec<usize> = Vec::new();
+            let mut bucket : Vec<IndexSizes> = Vec::new();
+            
             while let Some(i) = iterator.next() {
                 bucket.push(i.clone());
+                Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, &container_name,&conditions).await?;
             }
+            Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, &container_name,&conditions).await?;
+
 
             return Ok(final_query);
             // let mut list : Vec<u64> = Vec::new();

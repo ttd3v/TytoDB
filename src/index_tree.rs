@@ -1,10 +1,101 @@
 use std::{collections::{btree_set::BTreeSet, HashMap}, error, io::Error, num};
-
+use std::cmp::Ordering;
 use crate::{gerr, lexer_functions::{AlbaTypes, Token}};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexSizes{
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    U64(u64),
+    Usize(usize),
+}
+impl IndexSizes{
+    pub fn to_usize(a : IndexSizes) -> usize{
+        match a{
+            IndexSizes::U8(a) => a as usize,
+            IndexSizes::U16(a) => a as usize,
+            IndexSizes::U32(a) => a as usize,
+            IndexSizes::U64(a) => a as usize,
+            IndexSizes::Usize(a) => a as usize,
+        }
+    }
+}
+impl PartialOrd for IndexSizes {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexSizes {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_val = match self {
+            IndexSizes::U8(val) => *val as u64,
+            IndexSizes::U16(val) => *val as u64,
+            IndexSizes::U32(val) => *val as u64,
+            IndexSizes::U64(val) => *val,
+            IndexSizes::Usize(val) => *val as u64, 
+        };
+        let other_val = match other {
+            IndexSizes::U8(val) => *val as u64,
+            IndexSizes::U16(val) => *val as u64,
+            IndexSizes::U32(val) => *val as u64,
+            IndexSizes::U64(val) => *val,
+            IndexSizes::Usize(val) => *val as u64,
+        };
+        if self_val == other_val {
+            let self_rank = match self {
+                IndexSizes::U8(_) => 0,
+                IndexSizes::U16(_) => 1,
+                IndexSizes::U32(_) => 2,
+                IndexSizes::U64(_) => 3,
+                IndexSizes::Usize(_) => 4,
+            };
+            let other_rank = match other {
+                IndexSizes::U8(_) => 0,
+                IndexSizes::U16(_) => 1,
+                IndexSizes::U32(_) => 2,
+                IndexSizes::U64(_) => 3,
+                IndexSizes::Usize(_) => 4,
+            };
+            self_rank.cmp(&other_rank)
+        } else {
+            self_val.cmp(&other_val)
+        }
+    }
+}
+
+impl IndexSizes {
+    fn proper(r: usize) -> IndexSizes {
+        // Use constants for clarity and correctness
+        if r <= u8::MAX as usize {
+            return IndexSizes::U8(r as u8);
+        }
+        if r <= u16::MAX as usize {
+            return IndexSizes::U16(r as u16);
+        }
+        if r <= u32::MAX as usize {
+            return IndexSizes::U32(r as u32);
+        }
+        if r <= u64::MAX as usize {
+            return IndexSizes::U64(r as u64);
+        }
+        IndexSizes::Usize(r)
+    }
+    fn as_usize(&self) -> usize {
+        match self {
+            IndexSizes::U8(val) => *val as usize,
+            IndexSizes::U16(val) => *val as usize,
+            IndexSizes::U32(val) => *val as usize,
+            IndexSizes::U64(val) => *val as usize,
+            IndexSizes::Usize(val) => *val,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct IndexTree{
-    pub data : HashMap<String,HashMap<usize,BTreeSet<usize>>>,
+    pub data : HashMap<String,HashMap<usize,BTreeSet<IndexSizes>>>,
 }
 
 trait New{
@@ -67,11 +158,11 @@ impl IndexTree{
                 column_map
                     .entry(group)
                     .or_insert_with(BTreeSet::new)
-                    .insert(row_id);
+                    .insert(IndexSizes::proper(row_id));
             }
         }
     }
-    pub fn get_all_in_group(&self, column : &String,t : Token) -> Result<Option<&BTreeSet<usize>>,Error>{
+    pub fn get_all_in_group(&self, column : &String,t : Token) -> Result<Option<&BTreeSet<IndexSizes>>,Error>{
         if let Some(list) = self.data.get(column){
             match t{
                 Token::String(str) => {
@@ -125,12 +216,12 @@ impl IndexTree{
         }
         Err(gerr("normalize"))
     }
-    pub fn get_most_in_group_raising(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<usize>>>,Error>{
+    pub fn get_most_in_group_raising(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<IndexSizes>>>,Error>{
         if let Some(list) = self.data.get(column){
             match t{
                 Token::String(str) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::MediumString(str));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 >= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -140,7 +231,7 @@ impl IndexTree{
                 },
                 Token::Int(num) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Bigint(num));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 >= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -150,7 +241,7 @@ impl IndexTree{
                 },
                 Token::Float(float) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Float(float));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 >= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -160,7 +251,7 @@ impl IndexTree{
                 },
                 Token::Bool(eirdrghpirjgamjgoiuejg) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Bool(eirdrghpirjgamjgoiuejg));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 >= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -175,12 +266,12 @@ impl IndexTree{
         }
         Err(gerr("normalize"))
     }
-    pub fn get_most_in_group_lowering(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<usize>>>,Error>{
+    pub fn get_most_in_group_lowering(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<IndexSizes>>>,Error>{
         if let Some(list) = self.data.get(column){
             match t{
                 Token::String(str) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::MediumString(str));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 <= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -190,7 +281,7 @@ impl IndexTree{
                 },
                 Token::Int(num) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Bigint(num));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 <= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -200,7 +291,7 @@ impl IndexTree{
                 },
                 Token::Float(float) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Float(float));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 <= bruhafjiahfasojf{
                             g.insert(i.1.clone());
@@ -210,7 +301,7 @@ impl IndexTree{
                 },
                 Token::Bool(eirdrghpirjgamjgoiuejg) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::Bool(eirdrghpirjgamjgoiuejg));
-                    let mut g : BTreeSet<BTreeSet<usize>> = BTreeSet::new();
+                    let mut g : BTreeSet<BTreeSet<IndexSizes>> = BTreeSet::new();
                     for i in list.iter(){
                         if *i.0 <= bruhafjiahfasojf{
                             g.insert(i.1.clone());

@@ -3,7 +3,7 @@ use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
 use tokio::fs::{File,self};
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions}, gerr, index_tree::IndexTree, lexer_functions::{AlbaTypes, Token}};
+use crate::{database::{write_data, QueryConditions}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}};
 
 type MvccType = Arc<tmutx<(HashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 pub struct Container{
@@ -22,7 +22,7 @@ pub struct Container{
 #[derive(Clone)]
 enum QueryCandidates {
     All,
-    Some(BTreeSet<usize>)
+    Some(BTreeSet<IndexSizes>)
 }
 fn bind_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
     if let QueryCandidates::Some(a) = n{
@@ -47,7 +47,7 @@ fn link_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandida
     }
     QueryCandidates::All 
 }
-fn weird_thing_to_QueryCandidates(m : BTreeSet<BTreeSet<usize>>) -> QueryCandidates{
+fn weird_thing_to_QueryCandidates(m : BTreeSet<BTreeSet<IndexSizes>>) -> QueryCandidates{
     let mut main = QueryCandidates::Some(BTreeSet::new());
     for i in m{
         main = bind_QueryCandidates(main, QueryCandidates::Some(i))
@@ -158,7 +158,7 @@ impl Container{
             }else{
                 cursor+INDEXING_CHUNK_SIZE
             };
-            let rows_not_formatted = self.get_rows((cursor..end_index)).await?;
+            let rows_not_formatted = self.get_rows((cursor,end_index)).await?;
             let mut rows = Vec::with_capacity(INDEXING_CHUNK_SIZE as usize);
 
             for i in rows_not_formatted.iter().enumerate(){
@@ -334,8 +334,8 @@ impl Container{
         })
     }
 
-    pub async fn get_query_candidates(&self,query_conditions : &QueryConditions) -> Result<BTreeSet<usize>,Error>{
-        let candidates_set : BTreeSet<usize> = BTreeSet::new();
+    pub async fn get_query_candidates(&self,query_conditions : &QueryConditions) -> Result<BTreeSet<IndexSizes>,Error>{
+        let candidates_set : BTreeSet<IndexSizes> = BTreeSet::new();
         let mut condition_groups : Vec<QueryCandidates> = Vec::new();
         for i in query_conditions.0.iter(){
             let wsoeufh = self.candidates_from_unit(i).await?;
