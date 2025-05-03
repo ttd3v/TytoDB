@@ -10,7 +10,7 @@ use database::connect;
 use lexer_functions::{
     lexer_boolean_match, lexer_group_match, lexer_ignore_comments_match, lexer_keyword_match, lexer_number_match, lexer_operator_match, lexer_string_match, lexer_subcommand_match, AlbaTypes, Token
 };
-
+pub mod better_logs;
 
 fn lexer(input: String) -> Result<Vec<Token>, Error> {
     if input.is_empty() {

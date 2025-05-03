@@ -65,7 +65,7 @@ use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex as tmutx, OnceCell}};
@@ -993,10 +993,10 @@ pub async fn connect() -> Result<Database, Error>{
 
     let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(tmutx::new(HashMap::new())),connections:Arc::new(tmutx::new(HashSet::new())),secret_keys:Arc::new(tmutx::new(HashMap::new()))};
     if let Err(e) = db.load_settings(){
-        eprintln!("err: load_settings");
+        logerr!("err: load_settings");
         return Err(e)
     };if let Err(e) = db.load_containers().await{
-        eprintln!("err: load_containers");
+        logerr!("err: load_containers");
         return Err(e)
     };
     println!("{:?}",db.settings);
@@ -1022,7 +1022,7 @@ async fn handle_connections_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<
             }
             let _ = socket.write_all(&content).await;
         }
-        Err(e) => eprintln!("Failed to read from socket: {}", e),
+        Err(e) => logerr!("Failed to read from socket: {}", e),
     };
 }
 
@@ -1093,9 +1093,36 @@ struct DataConnection{
     command : String,
     arguments : Vec<String>
 }
-fn interpolate(x: u32) -> u32 {
-    1 + 3 * x.max(0).min(1)
+
+
+#[derive(Serialize,Default)]
+struct TytoDBResponse{
+    #[serde(rename = "?")]
+    content : String,
+    #[serde(rename = "!")]
+    success : u8
 }
+
+const LZMA_COMPRESSION_LEVEL : u32 = 2;
+
+impl TytoDBResponse {
+    fn to_bytes(self,secret_key : &[u8]) -> Vec<u8>{
+        let bytes = serde_json::to_vec(&self).unwrap();
+        match lzma_compress(&bytes, LZMA_COMPRESSION_LEVEL) {
+            Ok(a) => {
+                return encrypt(&a, &secret_key);
+            }
+            Err(e) => {
+                logerr!("Failed to compress query result: {}", e);
+                return TytoDBResponse{
+                    content:format!("Failed to compress query result: {}", e),
+                    success:0
+                }.to_bytes(&secret_key)
+            }
+        }
+    }
+}
+
 
 async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Database>>){
     let mut buffer: Vec<u8> = Vec::with_capacity(64);
@@ -1103,7 +1130,7 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Databas
     match socket.read_to_end(&mut buffer).await {
         Ok(_) => {
             if buffer.len() < 32 {
-                eprintln!("Received data is too short: {} bytes", buffer.len());
+                logerr!("Received data is too short: {} bytes", buffer.len());
                 let _ = socket.write_all(&response).await;
                 return;
             }
@@ -1123,14 +1150,14 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Databas
                         payload = match lzma_decompress(&k) {
                             Ok(a) => a,
                             Err(e) => {
-                                eprintln!("Failed to decompress payload with session secret: {}", e);
+                                logerr!("Failed to decompress payload with session secret: {}", e);
                                 let _ = socket.write_all(&response).await;
                                 return;
                             }
                         };
                     }
                     Err(_) => {
-                        eprintln!("Decryption failed with session secret for session_id: {:?}", session_id);
+                        logerr!("Decryption failed with session secret for session_id: {:?}", session_id);
                         let mut b = false;
                         for (_, secret) in &secrets {
                             match decrypt(cipher_payload, secret) {
@@ -1139,7 +1166,7 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Databas
                                     payload = match lzma_decompress(&k) {
                                         Ok(a) => a,
                                         Err(e) => {
-                                            eprintln!("Failed to decompress payload with secret key: {}", e);
+                                            logerr!("Failed to decompress payload with secret key: {}", e);
                                             let _ = socket.write_all(&response).await;
                                             return;
                                         }
@@ -1151,14 +1178,14 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Databas
                             }
                         }
                         if !b {
-                            eprintln!("Decryption failed with all available secret keys");
+                            logerr!("Decryption failed with all available secret keys");
                             let _ = socket.write_all(&response).await;
                             return;
                         }
                     }
                 }
             } else {
-                eprintln!("No session secret found for session_id: {:?}", session_id);
+                logerr!("No session secret found for session_id: {:?}", session_id);
                 let _ = socket.write_all(&response).await;
                 return;
             }
@@ -1172,44 +1199,43 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Databas
                             drop(db);
                             match serde_json::to_string(&query_result) {
                                 Ok(q) => {
-                                    let bytes = q.as_bytes();
-                                    match lzma_compress(bytes, interpolate(bytes.len() as u32)) {
-                                        Ok(a) => {
-                                            response = encrypt(&a, &secret_from_client);
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to compress query result: {}", e);
-                                            let _ = socket.write_all(&response).await;
-                                            return;
-                                        }
-                                    }
+                                    response = TytoDBResponse{
+                                        content:q,
+                                        success:1
+                                    }.to_bytes(&secret_from_client)
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to serialize query result: {}", e);
-                                    let _ = socket.write_all(&response).await;
-                                    return;
+                                    logerr!("Failed to serialize query result: {}", e);
+                                    response = TytoDBResponse{
+                                        content:format!("Failed to serialize query result: {}", e),
+                                        success:0
+                                    }.to_bytes(&secret_from_client)
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to execute command '{}': {}", v.command, e);
-                            let _ = socket.write_all(&response).await;
-                            return;
+                            logerr!("Failed to execute command '{}': {}", v.command, e);
+                            response = TytoDBResponse{
+                                content:format!("Failed to execute command '{}': {}", v.command, e),
+                                success:0
+                            }.to_bytes(&secret_from_client)
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("Failed to deserialize payload: {}", e);
-                    let _ = socket.write_all(&response).await;
-                    return;
+                    logerr!("Failed to deserialize payload: {}", e);
+                    response = TytoDBResponse{
+                        content:format!("Failed to deserialize payload: {}", e),
+                        success:0
+                    }.to_bytes(&secret_from_client)
                 }
             }
 
             if let Err(e) = socket.write_all(&response).await {
-                eprintln!("Failed to write response to socket: {}", e);
+                logerr!("Failed to write response to socket: {}", e);
             }
         }
-        Err(e) => eprintln!("Failed to read from socket: {}", e),
+        Err(e) => logerr!("Failed to read from socket: {}", e),
     }
 }
 
@@ -1218,7 +1244,7 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>,par
         let (mut socket, addr) = match listener.accept().await {
             Ok((socket, addr)) => (socket, addr),
             Err(e) => {
-                eprintln!("Failed to accept connection: {}", e);
+                logerr!("Failed to accept connection: {}", e);
                 continue;
             }
         };
@@ -1284,7 +1310,7 @@ impl Database{
         let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone(),parallel));
         let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db,parallel));
         if let Err(e) = tokio::try_join!(connections_task, data_task){
-            eprintln!("Error: {}",e);
+            logerr!("Error: {}",e);
         }
     }
 }

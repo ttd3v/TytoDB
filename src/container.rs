@@ -4,7 +4,7 @@ use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}, strix::DataReference};
+use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
 
 
 type MvccType = Arc<tmutx<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -243,7 +243,7 @@ impl Container{
             let mvcc = match self.mvcc.try_lock() {
                 Ok(guard) => guard,
                 Err(e) => {
-                    eprintln!("Failed to acquire mvcc lock immediately: {:?}", e);
+                    logerr!("Failed to acquire mvcc lock immediately: {:?}", e);
                     return Err(gerr("Could not lock mvcc"));
                 }
             };
@@ -460,7 +460,7 @@ impl Container{
                     };
 
                     if result != 1 {
-                        eprintln!("C write_data failed")
+                        logerr!("C write_data failed")
                     }
             } else if std::fs::exists(&path)?{
                 fs::remove_file(&path).await?
