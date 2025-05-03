@@ -176,9 +176,6 @@ impl Container{
     }
 }
 
-async fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
-    file.sync_all()
-}
 async fn try_open_file(path: &str) -> io::Result<Option<File>> {
     match File::open(path).await {
         Ok(file) => Ok(Some(file)),
@@ -477,7 +474,6 @@ impl Container{
         println!("commit: COMMIT SUCCESSFUL!");
         println!("commit: Starting to sync...");
                 
-        sync_file(&self.file).await?;
         println!("commit: Sync!");
         if let Some(s) = STRIX.get(){
             let mut l = s.lock().await;
