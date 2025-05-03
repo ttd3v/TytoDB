@@ -65,10 +65,10 @@ use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use size_of;
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, parser::parse, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
-use tokio::{net::{TcpListener, TcpStream}, sync::Mutex as tmutx};
+use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex as tmutx, OnceCell}};
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
@@ -84,6 +84,7 @@ fn generate_secure_code(len: usize) -> String {
     code
 }
 
+pub const STRIX : OnceCell<Arc<tmutx<Strix>>> = OnceCell::const_new();
 
 #[derive(Default)]
 pub struct Database{
@@ -217,18 +218,19 @@ impl Query{
 }
 
 
+
 fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: &QueryConditions) -> Result<bool, Error> {
     if col_names.len() != row.len() {
         return Err(gerr(&format!("Row data does not match column names: expected {} columns, got {} values", col_names.len(), row.len())));
     }
     
     let mut indexes: HashMap<String, AlbaTypes> = HashMap::new();
-    for i in row.iter().enumerate() {
-        let string = match col_names.get(i.0) {
+    for (i, val) in row.iter().enumerate() {
+        let string = match col_names.get(i) {
             Some(a) => a,
-            None => return Ok(false)
+            None => return Err(gerr("Column name index out of bounds"))
         };
-        indexes.insert(string.clone(), i.1.clone());
+        indexes.insert(string.clone(), val.clone());
     }
 
     let and_or_indexes = &conditions.1;
@@ -255,16 +257,38 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
             return Err(gerr("Invalid type for operator"));
         };
 
-        let result = match (first,&b.2) {
-            (AlbaTypes::Bool(val1),Token::Bool(val2)) => {
+        let result = match (first, &b.2) {
+            (AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+             AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s), 
+             Token::String(val2)) => {
+                match operator.as_str() {
+                    "=" | "==" => s == *val2,
+                    "!=" | "<>" => s != *val2,
+                    "&>" => s.contains(val2),
+                    "&&>" => s.to_lowercase().contains(&val2.to_lowercase()),
+                    "&&&>" => {
+                        let reg = Regex::new(val2).map_err(|e| gerr(&e.to_string()))?;
+                        reg.is_match(&s)
+                    },
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for string comparison", operator)))
+                }
+            },
+            (AlbaTypes::Char(c), Token::String(val2)) => {
+                let char_str = c.to_string();
+                match operator.as_str() {
+                    "=" | "==" => char_str == *val2,
+                    "!=" | "<>" => char_str != *val2,
+                    _ => return Err(gerr(&format!("Operator '{}' not supported for char comparison", operator)))
+                }
+            },
+            (AlbaTypes::Bool(val1), Token::Bool(val2)) => {
                 match operator.as_str() {
                     "=" | "==" => val1 == *val2,
                     "!=" | "<>" => val1 != *val2,
                     _ => return Err(gerr(&format!("Invalid operator '{}' for boolean comparison", operator)))
                 }
-                    
             },
-            (AlbaTypes::Int(val1),Token::Int(val)) => {
+            (AlbaTypes::Int(val1), Token::Int(val)) => {
                 let val2 = *val as i32;
                 match operator.as_str() {
                     "=" | "==" => val1 == val2,
@@ -274,10 +298,9 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
                     ">=" => val1 >= val2,
                     "<=" => val1 <= val2,
                     _ => return Err(gerr(&format!("Invalid operator '{}' for integer comparison", operator)))
-                        
                 }
             },
-            (AlbaTypes::Bigint(val1),Token::Int(val2)) => {
+            (AlbaTypes::Bigint(val1), Token::Int(val2)) => {
                 let val2_i64 = *val2 as i64;
                 match operator.as_str() {
                     "=" | "==" => val1 == val2_i64,
@@ -288,9 +311,8 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
                     "<=" => val1 <= val2_i64,
                     _ => return Err(gerr(&format!("Invalid operator '{}' for bigint comparison", operator)))
                 }
-                    
             },
-            (AlbaTypes::Float(val1),Token::Float(val2)) => {
+            (AlbaTypes::Float(val1), Token::Float(val2)) => {
                 match operator.as_str() {
                     "=" | "==" => (val1 - val2).abs() < f64::EPSILON,
                     "!=" | "<>" => (val1 - val2).abs() >= f64::EPSILON,
@@ -301,27 +323,8 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
                     _ => return Err(gerr(&format!("Invalid operator '{}' for float comparison", operator)))
                 }
             },
-            (AlbaTypes::Text(val1),Token::String(val2)) => {
-                match operator.as_str() {
-                    "=" | "==" => val1 == *val2,
-                    "!=" | "<>" => val1 != *val2,
-                    "&>" => val1.contains(val2),
-                    "&&>" => val1.to_lowercase().contains(val2.to_lowercase().as_str()),
-                    "&&&>" => {
-                        let reg = match Regex::new(&val2){
-                            Ok(a) => a,
-                            Err(e) => return Err(gerr(&e.to_string()))
-                        };
-                        reg.is_match(&val1)
-                    },
-                    _ => return Err(gerr(&format!("Invalid operator '{}' for string comparison", operator)))
-                }
-                    
-            },
-            (AlbaTypes::NONE,_) => return Err(gerr("Cannot compare NULL values")),
-            _ => {
-                return Err(gerr("Failed"))
-            }
+            (AlbaTypes::NONE, _) => return Err(gerr("Cannot compare NULL values")),
+            _ => return Err(gerr("Type mismatch in condition")),
         };
 
         booleans.push(result);
@@ -342,9 +345,7 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 
     Ok(final_result)
 }
-
 impl Database{
-    
     async fn interact_with_ancient_query_bucket(bucket : &mut Vec<IndexSizes>,page : &mut Vec<u64>,container : &mut Container,query :&mut  Query,containername : &str,conditions: &QueryConditions) -> Result<(),Error>{
         if bucket.len() >= 40{
             let mut better_bucket : Vec<u64> = bucket.iter().map(|f| IndexSizes::to_usize(*f) as u64).collect();
@@ -359,7 +360,7 @@ impl Database{
                     page.push(*ind);
                 }
                 if page.len() >= PAGE_SIZE{
-                    query.pages.push((page.clone(),containername.to_string()));
+                    query.push((page.clone(),containername.to_string()));
                     page.clear();
                 }
             }
@@ -408,7 +409,6 @@ impl Database{
         }
         Err(gerr("No valid containers specified for query processing"))
     }
-
     async fn query_diver(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {  
         if containers.is_empty() {
             return Err(gerr("No valid containers specified for query processing"));
@@ -427,9 +427,6 @@ impl Database{
         println!("{:?}",query);
         return Ok(query)
     }
-
-
-
     fn set_default_settings(&self) -> Result<(), Error> {
         let path = format!("{}/{}", self.location,SETTINGS_FILE);
         if !match fs::metadata(&path) { Ok(_) => true, Err(_) => false } {
@@ -484,7 +481,6 @@ impl Database{
         println!("headers: {:?}",self.headers);
         Ok(())
     }
-
     fn save_containers(&self) -> Result<(), Error> {
         let path = std::path::PathBuf::from(&self.location).join("containers.yaml");
         let yaml = serde_yaml::to_string(&self.containers)
@@ -547,7 +543,6 @@ impl Database{
         self.settings = settings;
         Ok(())
     }
-
     fn get_container_headers(&self, container_name: &str) -> Result<(Vec<String>, Vec<AlbaTypes>), Error> {
         let path = format!("{}/{}",self.location,container_name);
         let max_columns : usize = self.settings.max_columns as usize;
@@ -619,7 +614,6 @@ impl Database{
         }
         Err(gerr("Container not found"))
     }
-    
     pub async fn run(&mut self, ast : AST) -> Result<Query,Error>{
 
         let min_column : usize = self.settings.min_columns as usize;
@@ -968,8 +962,7 @@ impl Database{
     pub async fn execute(&mut self,input : &str,arguments : Vec<String>) -> Result<Query, Error>{
         let ast = parse(input.to_owned(),arguments)?;
         Ok(self.run(ast).await?)
-    }
-    
+    }  
 }
 
 type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
@@ -992,6 +985,10 @@ pub async fn connect() -> Result<Database, Error>{
         }
     } else {
         fs::create_dir_all(&db_path)?;
+    }
+
+    if let Some(strix) = STRIX.get(){
+        start_strix(strix.clone()).await;
     }
 
     let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(tmutx::new(HashMap::new())),connections:Arc::new(tmutx::new(HashSet::new())),secret_keys:Arc::new(tmutx::new(HashMap::new()))};

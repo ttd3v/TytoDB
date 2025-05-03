@@ -1,11 +1,13 @@
-use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, IoSliceMut, Read, Write}, mem::discriminant, ops::Index, os::unix::fs::FileExt, str::CharIndices, sync::Arc};
+use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
 use tokio::fs::{File,self};
+use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}};
+use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}, strix::DataReference};
 
-type MvccType = Arc<tmutx<(HashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
+
+type MvccType = Arc<tmutx<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 pub struct Container{
     pub file : std::fs::File,
     pub element_size : usize,
@@ -15,16 +17,17 @@ pub struct Container{
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<tmutx<BTreeSet<u64>>>,
-    pub indexes : IndexTree
+    pub indexes : IndexTree,
+    file_path : String
 
 }
 
 #[derive(Clone)]
-enum QueryCandidates {
+pub enum QueryCandidates {
     All,
     Some(BTreeSet<IndexSizes>)
 }
-fn bind_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
+fn bind_query_candidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
     if let QueryCandidates::Some(a) = n{
         if let QueryCandidates::Some(mut b) = m{
             b.extend(a.iter());
@@ -33,7 +36,7 @@ fn bind_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandida
     }
     QueryCandidates::All
 }
-fn link_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
+fn link_query_candidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
     if let QueryCandidates::Some(a) = n{
         if let QueryCandidates::Some(b) = m{
             let mut c = BTreeSet::new();
@@ -47,10 +50,10 @@ fn link_QueryCandidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandida
     }
     QueryCandidates::All 
 }
-fn weird_thing_to_QueryCandidates(m : BTreeSet<BTreeSet<IndexSizes>>) -> QueryCandidates{
+fn weird_thing_to_query_candidates(m : BTreeSet<BTreeSet<IndexSizes>>) -> QueryCandidates{
     let mut main = QueryCandidates::Some(BTreeSet::new());
     for i in m{
-        main = bind_QueryCandidates(main, QueryCandidates::Some(i))
+        main = bind_query_candidates(main, QueryCandidates::Some(i))
     } 
     main
 }
@@ -119,17 +122,18 @@ impl New for Container {
             };
             headers.insert(name.to_owned(), value.to_owned());
         }
-
+        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         let mut container = Container{
-            file : std::fs::OpenOptions::new().read(true).write(true).open(&path)?,
+            file,
             element_size,
             str_size,
-            mvcc: Arc::new(tmutx::new((HashMap::new(),HashMap::new()))),
+            mvcc: Arc::new(tmutx::new((AHashMap::new(),HashMap::new()))),
             headers_offset ,
             headers,
             location,
             graveyard: Arc::new(tmutx::new(BTreeSet::new())),
-            indexes: IndexTree::default()
+            indexes: IndexTree::default(),
+            file_path: path.to_string()
         };
         container.load_indexing().await?;
         Ok(container)
@@ -311,7 +315,7 @@ impl Container{
             ">=" | ">" => {
                 match self.indexes.get_most_in_group_raising(&column_name, condition.2.clone())?{
                     Some(a) => {
-                        weird_thing_to_QueryCandidates(a.clone())
+                        weird_thing_to_query_candidates(a.clone())
                     },
                     None =>{
                         QueryCandidates::All
@@ -321,7 +325,7 @@ impl Container{
             "<=" | "<" => {
                 match self.indexes.get_most_in_group_lowering(&column_name, condition.2.clone())?{
                     Some(a) => {
-                        weird_thing_to_QueryCandidates(a.clone())
+                        weird_thing_to_query_candidates(a.clone())
                     },
                     None =>{
                         QueryCandidates::All
@@ -353,10 +357,10 @@ impl Container{
             }
             match comparision{
                 'o' => {
-                    the_main_thing_idk_how_to_name_this = link_QueryCandidates(the_main_thing_idk_how_to_name_this, i.1.clone())
+                    the_main_thing_idk_how_to_name_this = link_query_candidates(the_main_thing_idk_how_to_name_this, i.1.clone())
                 },
                 _ => {
-                    the_main_thing_idk_how_to_name_this = bind_QueryCandidates(the_main_thing_idk_how_to_name_this, i.1.clone())
+                    the_main_thing_idk_how_to_name_this = bind_query_candidates(the_main_thing_idk_how_to_name_this, i.1.clone())
                 }
             }
         }
@@ -396,6 +400,7 @@ impl Container{
     }
     pub async fn commit(&mut self) -> Result<(), Error> {
         let mut total = self.arrlen().await?;
+        let mut virtual_ward : AHashMap<usize, DataReference> = AHashMap::new();
         println!("commit: Locking MVCC...");
         let mut mvcc = self.mvcc.lock().await;
     
@@ -426,6 +431,7 @@ impl Container{
             let serialized = self.serialize_row(&row_data)?;
             let offset = hdr_off + row_index * row_sz;
             self.file.write_all_at(serialized.as_slice(), offset)?;
+            virtual_ward.insert(offset as usize, (const_xxh3::xxh3_64(serialized.as_slice()),serialized));
         }
         
         let mut graveyard = self.graveyard.lock().await;
@@ -433,6 +439,7 @@ impl Container{
             println!("{:?}",del);
             let from = hdr_off + del.0 * row_sz;
             self.file.write_all_at(&buf, from)?;
+            virtual_ward.insert(from as usize, (const_xxh3::xxh3_64(&buf),buf.clone()));
             total -= 1;
             graveyard.insert(del.0);
         }
@@ -472,7 +479,10 @@ impl Container{
                 
         sync_file(&self.file).await?;
         println!("commit: Sync!");
-    
+        if let Some(s) = STRIX.get(){
+            let mut l = s.lock().await;
+            l.wards.push(tmutx::new((std::fs::OpenOptions::new().read(true).write(true).open(&self.file_path)?,virtual_ward)));
+        }
         Ok(())
     }
     pub async fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {

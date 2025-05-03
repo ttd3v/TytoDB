@@ -3,6 +3,7 @@ mod database;
 mod container;
 mod parser;
 mod index_tree;
+mod strix;
 use std::io::{Error,ErrorKind};
 use tokio;
 use database::connect;

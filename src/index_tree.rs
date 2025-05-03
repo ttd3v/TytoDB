@@ -1,5 +1,7 @@
-use std::{collections::{btree_set::BTreeSet, HashMap}, error, io::Error, num};
+use std::{collections::{btree_set::BTreeSet, HashMap}, io::Error};
 use std::cmp::Ordering;
+use ahash::AHashMap;
+
 use crate::{gerr, lexer_functions::{AlbaTypes, Token}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,45 +84,34 @@ impl IndexSizes {
         }
         IndexSizes::Usize(r)
     }
-    fn as_usize(&self) -> usize {
-        match self {
-            IndexSizes::U8(val) => *val as usize,
-            IndexSizes::U16(val) => *val as usize,
-            IndexSizes::U32(val) => *val as usize,
-            IndexSizes::U64(val) => *val as usize,
-            IndexSizes::Usize(val) => *val,
-        }
-    }
+    // fn as_usize(&self) -> usize {
+    //     match self {
+    //         IndexSizes::U8(val) => *val as usize,
+    //         IndexSizes::U16(val) => *val as usize,
+    //         IndexSizes::U32(val) => *val as usize,
+    //         IndexSizes::U64(val) => *val as usize,
+    //         IndexSizes::Usize(val) => *val,
+    //     }
+    // }
 }
 
 #[derive(Default)]
 pub struct IndexTree{
-    pub data : HashMap<String,HashMap<usize,BTreeSet<IndexSizes>>>,
+    pub data : HashMap<String,AHashMap<usize,BTreeSet<IndexSizes>>>,
 }
 
-trait New{
-    fn new() -> IndexTree;
-}
-impl New for IndexTree{
-    fn new() -> IndexTree{
-        return IndexTree{
-            data: HashMap::default(),
-        }
-    }
-}
+// impl IndexTree{
+//     fn new() -> IndexTree{
+//         return IndexTree{
+//             data: HashMap::default(),
+//         }
+//     }
+// }
 
 fn text_magnitude(element : &char) -> usize {
-    match element.to_ascii_lowercase(){
-        'a' | 'b' | 'c' => 0,
-        'd' | 'e' | 'f' => 1,
-        'g' | 'h' | 'i' => 2,
-        'j' | 'k' | 'l' => 3,
-        'm' | 'n' | 'o' => 4,
-        'p' | 'q' | 'r' => 5,
-        's' | 't' | 'u' => 6,
-        'v' | 'w' | 'x' => 7,
-        'y' | 'z' => 8,
-        _ => 9,
+    match element.to_digit(10){
+        Some(a) => a as usize,
+        None => 0
     }
 }
 fn index_text(input : &String) -> usize{
@@ -131,7 +122,7 @@ fn index_text(input : &String) -> usize{
     return value
 }
 fn index_number(input : impl Into<f64>) -> usize{
-    return (input.into() / 128.0) as usize
+    return (input.into() as f64).log10() as usize
 }
 fn index_boolean(input : &bool) -> usize{
     return if *input{1}else{0}
@@ -144,7 +135,7 @@ fn index_bytes(input: &[u8]) -> usize {
 impl IndexTree{
     pub fn insert_gently(&mut self, column_names : Vec<String>, rows : Vec<(usize,Vec<AlbaTypes>)>){
         for name in column_names.iter(){
-            self.data.insert(name.clone(), HashMap::new());
+            self.data.insert(name.clone(), AHashMap::new());
         }
         for row in rows{
             let row_id = row.0;
