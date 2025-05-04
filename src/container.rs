@@ -8,6 +8,7 @@ use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{I
 
 
 type MvccType = Arc<tmutx<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
+#[derive(Debug)]
 pub struct Container{
     pub file : std::fs::File,
     pub element_size : usize,

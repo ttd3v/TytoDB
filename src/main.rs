@@ -164,6 +164,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(database) => database,
         Err(e) => panic!("{}",e.to_string())
     };
-    db.run_database().await;
+    if let Err(e) = db.run_database().await{
+        logerr!("{}",e);
+    };
     Ok(())
 }

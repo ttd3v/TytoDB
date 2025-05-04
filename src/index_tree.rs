@@ -96,6 +96,7 @@ impl IndexSizes {
 }
 
 #[derive(Default)]
+#[derive(Debug)]
 pub struct IndexTree{
     pub data : HashMap<String,AHashMap<usize,BTreeSet<IndexSizes>>>,
 }

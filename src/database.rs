@@ -9,8 +9,8 @@ min_columns: 1
 auto_commit: false            
 memory_limit: 1048576000
 ip: 127.0.0.1
-connections_port: 153971
-data_port: 893127
+connections_port: 1515
+data_port: 8989
 max_connections: 10
 max_connection_requests_per_minute: 10
 max_data_requests_per_minute: 10000000
@@ -22,14 +22,18 @@ secret_key_count: 10
 #[derive(Serialize, Deserialize, Debug, Default)]
 enum SafetyLevel {
     #[default]
+    #[serde(rename="strict")]
     Strict,
+    #[serde(rename="permissive")]
     Permissive,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 enum RequestHandling {
     #[default]
+    #[serde(rename="sync")]
     Sync,
+    #[serde(rename="asynchronous")]
     Asynchronous,
 }
 #[derive(Serialize,Deserialize, Default,Debug)]
@@ -50,9 +54,17 @@ struct Settings{
     secret_key_count: u64
 }
 
-const SECRET_KEY_PATH : &str = "~/.TytoDB.keys";
-const DATABASE_PATH : &str = "~/TytoDB";
+const SECRET_KEY_PATH : &str = "TytoDB/.tytodb-keys";
+const DATABASE_PATH : &str = "TytoDB";
 
+fn database_path() -> String{
+    let first = std::env::var("HOME").unwrap();
+    return format!("{}/{}",first,DATABASE_PATH)
+}
+fn secret_key_path() -> String{
+    let first = std::env::var("HOME").unwrap();
+    return format!("{}/{}",first,SECRET_KEY_PATH)
+}
 /////////////////////////////////////////////////
 /////////////////////////////////////////////////
 /////////////////////////////////////////////////
@@ -86,7 +98,7 @@ fn generate_secure_code(len: usize) -> String {
 
 pub const STRIX : OnceCell<Arc<tmutx<Strix>>> = OnceCell::const_new();
 
-#[derive(Default)]
+#[derive(Default,Debug)]
 pub struct Database{
     location : String,
     settings : Settings,
@@ -429,13 +441,10 @@ impl Database{
     }
     fn set_default_settings(&self) -> Result<(), Error> {
         let path = format!("{}/{}", self.location,SETTINGS_FILE);
-        if !match fs::metadata(&path) { Ok(_) => true, Err(_) => false } {
-            let mut file =fs::File::create_new(&path)?;
+        if fs::metadata(&path).is_err() {
+            let mut file = fs::File::create_new(&path)?;
             let content = DEFAULT_SETTINGS.to_string();
-            match file.write_all(content.as_bytes()) {
-                Ok(_) => {}
-                Err(e) => return Err(e),
-            }
+            file.write_all(content.as_bytes())?
         }
         Ok(())
     }
@@ -500,6 +509,13 @@ impl Database{
         }
         Ok(())
     }
+    pub async fn setup(&self) -> Result<(),Error>{
+        if !std::fs::exists(&database_path())?{
+            println!("database folder created");
+            std::fs::create_dir(&database_path())?;
+        }
+        return Ok(())
+    }
     fn load_settings(&mut self) -> Result<(), Error> {
         let dir = PathBuf::from(&self.location);
         let path = dir.join(SETTINGS_FILE);
@@ -512,6 +528,7 @@ impl Database{
             self.set_default_settings()?; 
         }
         let mut rewrite = true;
+        println!("settings-file-path: {}",path.display());
         let raw = fs::read_to_string(&path)
             .map_err(|e| Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e)))?;
         let mut settings: Settings = serde_yaml::from_str(&raw)
@@ -968,10 +985,11 @@ impl Database{
 type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
 pub async fn connect() -> Result<Database, Error>{
-    let path : &str = if DATABASE_PATH.ends_with('/') {
-        &DATABASE_PATH[..DATABASE_PATH.len()-1]
+    let dbp = database_path();
+    let path : &str = if dbp.ends_with('/') {
+        &dbp[..dbp.len()-1]
     }else{
-        DATABASE_PATH
+        &dbp
     };
 
     let db_path = PathBuf::from(path);
@@ -992,6 +1010,7 @@ pub async fn connect() -> Result<Database, Error>{
     }
 
     let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(tmutx::new(HashMap::new())),connections:Arc::new(tmutx::new(HashSet::new())),secret_keys:Arc::new(tmutx::new(HashMap::new()))};
+    db.setup().await?;
     if let Err(e) = db.load_settings(){
         logerr!("err: load_settings");
         return Err(e)
@@ -1261,24 +1280,41 @@ async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>,par
     }
 }
 impl Database{
-    pub async fn run_database(self){
+    pub async fn run_database(self) -> Result<(), Error>{
         let crazy_config = engine::GeneralPurposeConfig::new()
         .with_decode_allow_trailing_bits(true)
         .with_encode_padding(true)
-        .with_decode_padding_mode(engine::DecodePaddingMode::RequireNone);
+        .with_decode_padding_mode(engine::DecodePaddingMode::Indifferent);
         let eng = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").unwrap(), crazy_config);
 
-        if fs::exists(SECRET_KEY_PATH).unwrap(){
+        if fs::exists(secret_key_path()).unwrap(){
             let mut buffer : Vec<u8> = Vec::new();
-            fs::File::open(SECRET_KEY_PATH).unwrap().read_to_end(&mut buffer).unwrap();
-            let val = serde_yaml::from_slice::<Vec<String>>(&buffer).unwrap();
-            let bv : Vec<Vec<u8>> = val.iter().map(|s|{eng.decode(s).unwrap()}).collect();
+            fs::File::open(secret_key_path()).unwrap().read_to_end(&mut buffer)?;
+            let val = match serde_yaml::from_slice::<Vec<String>>(&buffer){Ok(a)=>a,Err(e)=>{return Err(gerr(&e.to_string()))}};
+            // let bv : Vec<Vec<u8>> = val.iter().map(|s|{
+            //     match eng.decode(s){
+            //         Ok(a)=>a,
+            //         Err(e)=>{
+            //             logerr!("{}",e);
+            //         }
+            //     }
+            // }).collect();
+            let mut bv : Vec<Vec<u8>> = Vec::new();
+            for i in val{
+                match eng.decode(i) {
+                    Ok(a)=>{bv.push(a);},
+                    Err(e)=>{
+                        return Err(gerr(&e.to_string()))
+                    }
+                };
+            }
+
             let mut sk = self.secret_keys.lock().await;
             for i in bv{
                 sk.insert(blake3::hash(&i).as_bytes().to_owned(), i);
             }
         }else{
-            let mut file = fs::File::create_new(SECRET_KEY_PATH).unwrap();
+            let mut file = fs::File::create_new(secret_key_path()).unwrap();
             let mut keys : Vec<Vec<u8>> = Vec::new();
             for _ in 0..self.settings.secret_key_count{
                 keys.push(Aes256Gcm::generate_key(OsRng).to_vec());
@@ -1292,9 +1328,12 @@ impl Database{
             for i in keys{
                 b64_list.push(eng.encode(i))
             }
-            serde_yaml::to_writer(&mut file, &b64_list).unwrap();
-            file.flush().unwrap();
-            file.sync_all().unwrap();
+            if let Err(e) = serde_yaml::to_writer(&mut file, &b64_list){
+                logerr!("{}",e);
+                return Err(gerr(&e.to_string()))
+            };
+            file.flush()?;
+            file.sync_all()?;
         }
         
         let parallel = if let RequestHandling::Asynchronous = self.settings.request_handling{
@@ -1304,13 +1343,18 @@ impl Database{
         } ;
 
         let settings = &self.settings;
-        let connections_tcp: TcpListener = TcpListener::bind(format!("{}:{}",settings.ip,settings.connections_port)).await.unwrap();
-        let data_tcp = TcpListener::bind(format!("{}:{}",settings.ip,settings.data_port)).await.unwrap();
+        let connection_tcp_url = format!("{}:{}",settings.ip,settings.connections_port);
+        let data_tcp_url = format!("{}:{}",settings.ip,settings.data_port);
+        println!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
+        println!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
+        let connections_tcp: TcpListener = TcpListener::bind(connection_tcp_url).await.unwrap();
+        let data_tcp = TcpListener::bind(data_tcp_url).await.unwrap();
         let mtx_db = Arc::new(tmutx::new(self));
         let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone(),parallel));
         let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db,parallel));
         if let Err(e) = tokio::try_join!(connections_task, data_task){
             logerr!("Error: {}",e);
         }
+        Ok(())
     }
 }
