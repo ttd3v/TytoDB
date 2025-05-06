@@ -261,9 +261,10 @@ const KEYWORDS: &[&str] = &[
     "BIG-BYTES",
     "LARGE-BYTES",
 
-    // weird looking because connection handlers that should use this
+    // weird looking because connection handlers that should use this, not users
     "QYCNPVS", // query control previous 
-    "QYCNNXT" // query control next
+    "QYCNNXT", // query control next
+    "QYCNEXT" // query control exit
 ];
 
 pub fn lexer_keyword_match(result: &mut Vec<Token>, dough: &mut String) -> bool {

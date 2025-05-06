@@ -1,3 +1,15 @@
+use std::{collections::{HashMap, HashSet}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc,Mutex}, time::Duration};
+use ahash::AHashMap;
+use base64::{alphabet, engine, Engine};
+use lazy_static::lazy_static;
+use serde::{Serialize,Deserialize};
+use size_of;
+use serde_yaml;
+use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
+use rand::{Rng, distributions::Alphanumeric};
+use regex::Regex;
+use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex as tmutx, OnceCell,RwLock}, time::timeout};
+
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
@@ -70,17 +82,6 @@ fn secret_key_path() -> String{
 /////////////////////////////////////////////////
 
 
-use std::{collections::{HashMap, HashSet}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc,Mutex}};
-
-use base64::{alphabet, engine, Engine};
-use lazy_static::lazy_static;
-use serde::{Serialize,Deserialize};
-use size_of;
-use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
-use rand::{Rng, distributions::Alphanumeric};
-use regex::Regex;
-use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex as tmutx, OnceCell}};
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
@@ -96,7 +97,7 @@ fn generate_secure_code(len: usize) -> String {
     code
 }
 
-pub const STRIX : OnceCell<Arc<tmutx<Strix>>> = OnceCell::const_new();
+pub const STRIX : OnceCell<Arc<RwLock<Strix>>> = OnceCell::const_new();
 
 #[derive(Default,Debug)]
 pub struct Database{
@@ -105,9 +106,9 @@ pub struct Database{
     containers : Vec<String>,
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
     container : HashMap<String,Container>,
-    connections : Arc<tmutx<HashSet<[u8;32]>>>,
-    queries : Arc<tmutx<HashMap<String,Query>>>,
-    secret_keys : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>>,
+    connections : Arc<RwLock<HashSet<[u8;32]>>>,
+    queries : Arc<RwLock<HashMap<String,Query>>>,
+    secret_keys : Arc<RwLock<HashMap<[u8;32],Vec<u8>>>>,
 }
 
 fn check_for_reference_folder(location : &String) -> Result<(), Error>{
@@ -151,8 +152,20 @@ pub struct Query{
     pub pages : Vec<QueryPage>,
     pub current_page : usize,
     pub column_names : Vec<String>,
-    column_types : Vec<AlbaTypes>,
-    id : String,
+    pub column_types : Vec<AlbaTypes>,
+    pub id : String,
+}
+impl Query {
+    pub fn duplicate(&self) -> Self {
+        Query {
+            rows: self.rows.clone(),
+            pages: self.pages.clone(),
+            current_page: self.current_page, // usize is Copy
+            column_names: self.column_names.clone(),
+            column_types: self.column_types.clone(),
+            id: self.id.clone(),
+        }
+    }
 }
 impl Query{
     fn new(column_types : Vec<AlbaTypes>) -> Self{
@@ -478,12 +491,16 @@ impl Database{
             self.container.insert(contain.to_string(),Container::new(&format!("{}/{}",self.location,contain),self.location.clone(), element_size, he.1, MAX_STR_LEN,calculate_header_size(self.settings.max_columns as usize) as u64,he.0.clone()).await?);
         }
         for (_,wedfygt) in self.container.iter(){
-            let count = wedfygt.len().await? - wedfygt.headers_offset / wedfygt.element_size as u64;
+            let count = (wedfygt.len().await? - wedfygt.headers_offset) / wedfygt.element_size as u64;
+            if count < 1{ continue;}
             for i in 0..count{
                 let mut wb = vec![0u8;wedfygt.element_size];
-                wedfygt.file.read_exact_at(&mut wb, wedfygt.headers_offset as u64 + (wedfygt.element_size as u64*i as u64) )?;
+                if let Err(e) = wedfygt.file.read_exact_at(&mut wb, wedfygt.headers_offset as u64 + (wedfygt.element_size as u64*i as u64) ){
+                    logerr!("{}",e);
+                    continue;
+                };
                 if wb == vec![0u8;wedfygt.element_size]{
-                    wedfygt.graveyard.lock().await.insert(i);
+                    wedfygt.graveyard.write().await.insert(i);
                 }
             }
         }
@@ -771,7 +788,7 @@ impl Database{
                                         code = code_full.chars().take(MAX_STR_LEN).collect::<String>();
                                     }
                                     val[ri] = AlbaTypes::Text(code.clone());
-                                    let mut mvcc = container.mvcc.lock().await;
+                                    let mut mvcc = container.mvcc.write().await;
                                     mvcc.1.insert(code, (false, s.to_string()));
                                 },
                                 (AlbaTypes::Bigint(_), AlbaTypes::Int(i)) => {
@@ -826,7 +843,7 @@ impl Database{
                 }
                 
                 let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = container.mvcc.lock().await;
+                let mut mvcc = container.mvcc.write().await;
                 if row_group < 1{
                     row_group = 1
                 }
@@ -864,7 +881,7 @@ impl Database{
                 };
                 
                 let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = container.mvcc.lock().await;
+                let mut mvcc = container.mvcc.write().await;
                 if row_group < 1{
                     row_group = 1
                 }
@@ -951,25 +968,37 @@ impl Database{
             },
             AST::QueryControlNext(cmd) => {
                 let mut q = {
-                    let mut guard = self.queries.lock().await;
+                    let mut guard = self.queries.write().await;
                     guard
                         .remove(&cmd.id)
                         .expect("query must exist")
                 };
                 q.next(self).await?;
-                self.queries.lock().await.insert(cmd.id, q);
+                let q1 = q.duplicate();
+                self.queries.write().await.insert(cmd.id, q);
+                return Ok(q1)
             },
             AST::QueryControlPrevious(cmd) => {
                 let mut q = {
-                    let mut guard = self.queries.lock().await;
+                    let mut guard = self.queries.write().await;
                     guard
                         .remove(&cmd.id)
                         .expect("query must exist")
                 };
             
                 q.previous(self).await?;
-            
-                self.queries.lock().await.insert(cmd.id, q);
+                let q2 = q.duplicate();
+                self.queries.write().await.insert(cmd.id, q);
+                return Ok(q2)
+            }
+            AST::QueryControlExit(cmd) => {
+                
+                let mut guard = self.queries.write().await;
+                guard
+                .remove(&cmd.id)
+                .expect("query must exist");
+                
+                
             }
             // _ =>{return Err(gerr("Failed to parse"));}
         }
@@ -1009,7 +1038,7 @@ pub async fn connect() -> Result<Database, Error>{
         start_strix(strix.clone()).await;
     }
 
-    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(tmutx::new(HashMap::new())),connections:Arc::new(tmutx::new(HashSet::new())),secret_keys:Arc::new(tmutx::new(HashMap::new()))};
+    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(RwLock::new(HashMap::new())),connections:Arc::new(RwLock::new(HashSet::new())),secret_keys:Arc::new(RwLock::new(HashMap::new()))};
     db.setup().await?;
     if let Err(e) = db.load_settings(){
         logerr!("err: load_settings");
@@ -1024,40 +1053,50 @@ pub async fn connect() -> Result<Database, Error>{
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const SESSION_ID_LENGTH : usize = 32;
+async fn handle_connections_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Database>>){
+    let mut secret_key_hash : [u8;32] = [0u8;32];
+    if let Err(e) = socket.read_exact(&mut secret_key_hash).await{
+        logerr!("{}",e);
+        return
+    }
 
-async fn handle_connections_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Database>>){
-    let mut buffer: [u8; 32] = [0; 32];
-    match socket.read(&mut buffer).await {
-        Ok(_) => {
-            let db: tokio::sync::MutexGuard<'_, Database> = arc_db.lock().await;
-            let mut content : Vec<u8> = Vec::new();
-            
-            if db.secret_keys.lock().await.get(&buffer).is_some(){
-                let id: [u8; 32] = blake3::hash(generate_secure_code(SESSION_ID_LENGTH).as_bytes()).as_bytes().to_owned();
-                if db.connections.lock().await.insert(id.clone()){
-                    content = id.to_vec();
-                }
-            }
-            let _ = socket.write_all(&content).await;
+    let secret_key = match dbref.read().await.secret_keys.read().await.get(&secret_key_hash){
+        Some(a) => a.clone(),
+        None => {
+            let buffer : [u8;1] = [false as u8];
+            let _ = socket.write_all(&buffer).await;
+            logerr!("the given secret key are not registred");
+            return
         }
-        Err(e) => logerr!("Failed to read from socket: {}", e),
     };
+
+    let mut buffer : Vec<u8> = Vec::new();
+    let session_id = secret_key.clone();
+    let hash = blake3::hash(&session_id).as_bytes().clone();
+    let _ = session_secret_rel.write().await.insert(hash.clone(), session_id.clone());
+    let key = Key::<Aes256Gcm>::from_slice(secret_key.as_slice());
+    cipher_map.write().await.insert(hash.clone(),Aes256Gcm::new(key));
+
+    if let Ok(a) = encrypt(&session_id, &secret_key_hash).await{
+        buffer.push(true as u8);
+        buffer.extend_from_slice(&a);
+    }else{
+        buffer.push(false as u8);
+    }
+    
+
+    println!("authenticated successfully\nlen:{}",buffer.len());
+    let _ = socket.write_all(&mut buffer).await;
+    let _ = socket.shutdown().await;
+
 }
 
-async fn handle_connections_tcp(listener : TcpListener,ardb : Arc<tmutx<Database>>,parallel : bool){
-    loop {
+async fn handle_connections_tcp(listener : &TcpListener,ardb : Arc<RwLock<Database>>){
+    
         let (mut socket, addr) = listener.accept().await.unwrap();
         println!("Accepted connection from: {}", addr);
-        let arc_db: Arc<tmutx<Database>> = ardb.clone(); 
-        if parallel{
-            tokio::spawn(async move {
-                handle_connections_tcp_inner(&mut socket, arc_db).await        
-            });
-        }else{
-            handle_connections_tcp_inner(&mut socket, arc_db).await
-        }
-    }
+        handle_connections_tcp_inner(&mut socket, ardb).await
+    
 }
 
 use aes_gcm::{aead::{Aead, KeyInit, OsRng}, aes::cipher::{self}, AeadCore, Key};
@@ -1065,44 +1104,41 @@ use aes_gcm::Aes256Gcm;
 use lzma::{compress as lzma_compress,decompress as lzma_decompress};
 
 lazy_static!{
-    static ref cipher_map : Arc<Mutex<HashMap<Vec<u8>,aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>>>>> = Arc::new(Mutex::new(HashMap::new()));
-    static ref session_secret_rel : Arc<tmutx<HashMap<[u8;32],Vec<u8>>>> = Arc::new(tmutx::new(HashMap::new()));
-    static ref session_id_curr_query : Arc<tmutx<HashMap<[u8;32],Query>>> = Arc::new(tmutx::new(HashMap::new()));
+    static ref cipher_map : Arc<RwLock<AHashMap<[u8;32],aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>>>>> = Arc::new(RwLock::new(AHashMap::new()));
+    static ref session_secret_rel : Arc<RwLock<AHashMap<[u8;32],Vec<u8>>>> = Arc::new(RwLock::new(AHashMap::new()));
 }
 
-fn encrypt(content : &[u8],secret_key : &[u8]) -> Vec<u8>{
-    let key = Key::<Aes256Gcm>::from_slice(secret_key);
-    let mut cm = cipher_map.lock().unwrap();
+async fn encrypt(content : &[u8],secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
+    let cm = cipher_map.write().await;
     let cipher: &aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>> = 
-    if let Some(a) = cm.get(&key.to_vec()){
+    if let Some(a) = cm.get(secret_key){
         a
     } else{
-        cm.insert(key.to_vec(), Aes256Gcm::new(key));
-        drop(cm);
-        return encrypt(content, secret_key)
+        return Err(())
     };
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng); 
     let mut result : Vec<u8> = Vec::new();
+    println!("nonce_len:{}",nonce.len());
     result.extend_from_slice(&nonce.to_vec());
     result.extend_from_slice(&cipher.encrypt(&nonce, content.as_ref()).unwrap());
-    result
+    Ok(result)
 }
-fn decrypt(cipher_text : &[u8],secret_key : &[u8]) -> Result<Vec<u8>,()>{
-    let key = Key::<Aes256Gcm>::from_slice(secret_key);
+async fn decrypt(cipher_text : &[u8],secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
     let nonce = &cipher_text[0..12];
     let cipher_b = &cipher_text[12..];
-    let mut cm = cipher_map.lock().unwrap();
+    let cm = cipher_map.read().await;
     let cipher: &aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>> = 
-    if let Some(a) = cm.get(&key.to_vec()){
+    if let Some(a) = cm.get(secret_key){
         a
     } else{
-        cm.insert(key.to_vec(), Aes256Gcm::new(key));
-        drop(cm);
-        return decrypt(cipher_text, secret_key)
+        return Err(())
     };
     match cipher.decrypt(nonce.into(), cipher_b.as_ref()){
         Ok(a) => Ok(a),
-        Err(_) => Err(())
+        Err(e) => {
+            logerr!("{}",e);
+            Err(())
+        }
     }
 }
 
@@ -1125,167 +1161,205 @@ struct TytoDBResponse{
 const LZMA_COMPRESSION_LEVEL : u32 = 2;
 
 impl TytoDBResponse {
-    fn to_bytes(self,secret_key : &[u8]) -> Vec<u8>{
+    async fn to_bytes(self,secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
         let bytes = serde_json::to_vec(&self).unwrap();
         match lzma_compress(&bytes, LZMA_COMPRESSION_LEVEL) {
             Ok(a) => {
-                return encrypt(&a, &secret_key);
+                return if let Ok(a) = encrypt(&a, secret_key).await{
+                    Ok(a)
+                }else{
+                    Err(())
+                };
             }
             Err(e) => {
                 logerr!("Failed to compress query result: {}", e);
-                return TytoDBResponse{
-                    content:format!("Failed to compress query result: {}", e),
-                    success:0
-                }.to_bytes(&secret_key)
+                return Err(())
             }
         }
     }
 }
 
 
-async fn handle_data_tcp_inner(socket : &mut TcpStream,arc_db: Arc<tmutx<Database>>){
-    let mut buffer: Vec<u8> = Vec::with_capacity(64);
+async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Database>>){
+    
     let mut response: Vec<u8> = Vec::new();
-    match socket.read_to_end(&mut buffer).await {
-        Ok(_) => {
-            if buffer.len() < 32 {
-                logerr!("Received data is too short: {} bytes", buffer.len());
-                let _ = socket.write_all(&response).await;
+    println!("reading data...");
+
+    let mut size_buff = [0u8;4];
+    if let Err(e) = socket.read_exact(&mut size_buff).await{
+        logerr!("{}",e);
+        return
+    };
+    let size =  u32::from_be_bytes(size_buff);
+    println!("size: {}",size);
+    let mut buffer = vec![0u8;32];
+    if let Err(e) = socket.read_exact(&mut buffer).await{
+        logerr!("{}",e);
+        return
+    };
+
+
+    if buffer.len() < 32 {
+        logerr!("Received data is too short: {} bytes", buffer.len());
+        let _ = socket.write_all(&response).await;
+        return;
+    }
+    println!("Locking database...");
+    let mut db = dbref.write().await;
+    println!("Database locked!");
+    println!("buffer: {:?}",buffer);
+    let mut session_id: [u8;32] = [0u8;32];
+    session_id.clone_from_slice(&buffer[..32]);
+    let ssr = session_secret_rel.read().await;
+
+
+    let mut payload: Vec<u8> = Vec::new();
+    if let Some(_) = ssr.get(&session_id) {
+        
+        if size <= 0{
+            logerr!("the payload is too short | size :{}",size);
+            let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+            return
+        }
+        let mut cipher_payload = vec![0u8;size as usize];
+        if let Err(e) = socket.read_exact(&mut cipher_payload).await{
+            logerr!("{}",e);
+            let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+            return
+        };
+        let res = decrypt(&cipher_payload, &session_id).await;
+       
+        match  res{
+            Ok(k) => {
+                
+                payload = match lzma_decompress(&k) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        logerr!("Failed to decompress payload with session secret: {}", e);
+                        let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+                        return;
+                    }
+                };
+            }
+            Err(_) => {
+                logerr!("Decryption failed with session secret for session_id: {:?}", session_id);
+                logerr!("Decryption failed with all available secret keys");
+                let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
                 return;
             }
-            let session_id: &[u8] = &buffer[..32];
-            let cipher_payload = &buffer[32..];
-            let mut db = arc_db.lock().await;
-            let secrets_lock = db.secret_keys.lock().await;
-            let ssr = session_secret_rel.lock().await;
-            let secrets: HashMap<[u8; 32], Vec<u8>> = secrets_lock.clone();
+        }
+    } else {
+        logerr!("No session secret found for session_id");
+        payload.clear();
+        let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+        return;
+    }
 
-            let mut payload: Vec<u8> = Vec::new();
-            let mut secret_from_client: Vec<u8> = Vec::with_capacity(32);
-            if let Some(sec) = ssr.get(session_id) {
-                match decrypt(cipher_payload, sec) {
-                    Ok(k) => {
-                        secret_from_client = sec.to_vec();
-                        payload = match lzma_decompress(&k) {
-                            Ok(a) => a,
-                            Err(e) => {
-                                logerr!("Failed to decompress payload with session secret: {}", e);
-                                let _ = socket.write_all(&response).await;
-                                return;
-                            }
-                        };
-                    }
-                    Err(_) => {
-                        logerr!("Decryption failed with session secret for session_id: {:?}", session_id);
-                        let mut b = false;
-                        for (_, secret) in &secrets {
-                            match decrypt(cipher_payload, secret) {
-                                Ok(k) => {
-                                    secret_from_client = secret.clone();
-                                    payload = match lzma_decompress(&k) {
-                                        Ok(a) => a,
-                                        Err(e) => {
-                                            logerr!("Failed to decompress payload with secret key: {}", e);
-                                            let _ = socket.write_all(&response).await;
-                                            return;
-                                        }
-                                    };
-                                    b = true;
-                                    break;
-                                }
-                                Err(_) => continue,
-                            }
-                        }
-                        if !b {
-                            logerr!("Decryption failed with all available secret keys");
-                            let _ = socket.write_all(&response).await;
-                            return;
-                        }
-                    }
-                }
-            } else {
-                logerr!("No session secret found for session_id: {:?}", session_id);
-                let _ = socket.write_all(&response).await;
-                return;
-            }
-
-            drop(secrets_lock);
-            match serde_json::from_slice::<DataConnection>(&payload) {
-                Ok(v) => {
-                    match db.execute(&v.command,v.arguments).await {
-                        Ok(query_result) => {
-                            db.queries.lock().await.insert(query_result.id.clone(), query_result.clone());
-                            drop(db);
-                            match serde_json::to_string(&query_result) {
-                                Ok(q) => {
-                                    response = TytoDBResponse{
-                                        content:q,
-                                        success:1
-                                    }.to_bytes(&secret_from_client)
-                                }
-                                Err(e) => {
-                                    logerr!("Failed to serialize query result: {}", e);
-                                    response = TytoDBResponse{
-                                        content:format!("Failed to serialize query result: {}", e),
-                                        success:0
-                                    }.to_bytes(&secret_from_client)
-                                }
-                            }
+    match serde_json::from_slice::<DataConnection>(&payload) {
+        Ok(v) => {
+            match db.execute(&v.command,v.arguments).await {
+                Ok(query_result) => {
+                    db.queries.write().await.insert(query_result.id.clone(), query_result.clone());
+                    drop(db);
+                    match serde_json::to_string(&query_result) {
+                        Ok(q) => {
+                            if let Ok(b) = (TytoDBResponse{
+                                content:q,
+                                success:1
+                            }).to_bytes(&session_id).await{
+                                let size = b.len() as u64;
+                                response.extend_from_slice(&size.to_be_bytes());
+                                response.extend_from_slice(&b);
+                            }else{
+                                let size = 0 as u64;
+                                response.extend_from_slice(&size.to_be_bytes());
+                            };
+                            
                         }
                         Err(e) => {
-                            logerr!("Failed to execute command '{}': {}", v.command, e);
-                            response = TytoDBResponse{
-                                content:format!("Failed to execute command '{}': {}", v.command, e),
+                            logerr!("Failed to serialize query result: {}", e);
+                            if let Ok(b) = (TytoDBResponse{
+                                content:format!("Failed to serialize query result: {}", e),
                                 success:0
-                            }.to_bytes(&secret_from_client)
+                            }.to_bytes(&session_id).await){
+                                let size = b.len() as u64;
+                                response.extend_from_slice(&size.to_be_bytes());
+                                response.extend_from_slice(&b);
+                            }else{
+                                let size = 0 as u64;
+                                response.extend_from_slice(&size.to_be_bytes());
+                            }
+                            
                         }
                     }
                 }
                 Err(e) => {
-                    logerr!("Failed to deserialize payload: {}", e);
-                    response = TytoDBResponse{
-                        content:format!("Failed to deserialize payload: {}", e),
+                    logerr!("Failed to execute command '{}': {}", v.command, e);
+                    if let Ok(b) = (TytoDBResponse{
+                        content:format!("Failed to execute command '{}': {}", v.command, e),
                         success:0
-                    }.to_bytes(&secret_from_client)
+                    }.to_bytes(&session_id).await){
+                        let size = b.len() as u64;
+                        response.extend_from_slice(&size.to_be_bytes());
+                        response.extend_from_slice(&b);
+                        println!("payload: {:?}",b);
+                    }else{
+                        let size = 0 as u64;
+                        response.extend_from_slice(&size.to_be_bytes());
+                    }
                 }
             }
-
-            if let Err(e) = socket.write_all(&response).await {
-                logerr!("Failed to write response to socket: {}", e);
+        }
+        Err(e) => {
+            if let Ok(b) = (TytoDBResponse{
+                content:format!("Failed to deserialize payload '{}'", e),
+                success:0
+            }.to_bytes(&session_id).await){
+                let size = b.len() as u64;
+                response.extend_from_slice(&size.to_be_bytes());
+                response.extend_from_slice(&b)
+            }else{
+                let size = 0 as u64;
+                response.extend_from_slice(&size.to_be_bytes());
             }
         }
-        Err(e) => logerr!("Failed to read from socket: {}", e),
+    }
+
+    if let Err(e) = socket.write_all(&response).await {
+        logerr!("Failed to write response to socket: {}", e);
     }
 }
 
-async fn handle_data_tcp(listener: TcpListener, arc_db: Arc<tmutx<Database>>,parallel : bool) {
-    loop {
+async fn handle_data_tcp(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) {
         let (mut socket, addr) = match listener.accept().await {
             Ok((socket, addr)) => (socket, addr),
             Err(e) => {
                 logerr!("Failed to accept connection: {}", e);
-                continue;
+                return;
             }
         };
         println!("Accepted connection from: {}", addr);
-        let arc_db: Arc<tmutx<Database>> = arc_db.clone();
-        if parallel{
-            tokio::spawn(async move {
-                handle_data_tcp_inner(&mut socket, arc_db).await
-            }); 
-        }else{
-            handle_data_tcp_inner(&mut socket, arc_db).await
-        }
+        // if parallel{
+        //     tokio::spawn(async move {
+        //         handle_data_tcp_inner(&mut socket, arc_db).await
+        //     }); 
+        // }else{
+        //     handle_data_tcp_inner(&mut socket, arc_db).await
+        // }
+        handle_data_tcp_inner(&mut socket, arc_db).await
         
-    }
+    
 }
+
+
+
 impl Database{
     pub async fn run_database(self) -> Result<(), Error>{
         let crazy_config = engine::GeneralPurposeConfig::new()
         .with_decode_allow_trailing_bits(true)
         .with_encode_padding(true)
         .with_decode_padding_mode(engine::DecodePaddingMode::Indifferent);
-        let eng = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").unwrap(), crazy_config);
+        let eng = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/").unwrap(), crazy_config);
 
         if fs::exists(secret_key_path()).unwrap(){
             let mut buffer : Vec<u8> = Vec::new();
@@ -1309,7 +1383,7 @@ impl Database{
                 };
             }
 
-            let mut sk = self.secret_keys.lock().await;
+            let mut sk = self.secret_keys.write().await;
             for i in bv{
                 sk.insert(blake3::hash(&i).as_bytes().to_owned(), i);
             }
@@ -1319,7 +1393,7 @@ impl Database{
             for _ in 0..self.settings.secret_key_count{
                 keys.push(Aes256Gcm::generate_key(OsRng).to_vec());
             }
-            let mut sk = self.secret_keys.lock().await;
+            let mut sk = self.secret_keys.write().await;
             for i in keys.iter(){
                 sk.insert(blake3::hash(&i).as_bytes().to_owned(), i.clone());
             }
@@ -1335,26 +1409,36 @@ impl Database{
             file.flush()?;
             file.sync_all()?;
         }
-        
-        let parallel = if let RequestHandling::Asynchronous = self.settings.request_handling{
-            true
-        }else{
-            false
-        } ;
-
         let settings = &self.settings;
+
+        let parallel = if let RequestHandling::Asynchronous = settings.request_handling{true}else{false};
         let connection_tcp_url = format!("{}:{}",settings.ip,settings.connections_port);
         let data_tcp_url = format!("{}:{}",settings.ip,settings.data_port);
         println!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
         println!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
-        let connections_tcp: TcpListener = TcpListener::bind(connection_tcp_url).await.unwrap();
-        let data_tcp = TcpListener::bind(data_tcp_url).await.unwrap();
-        let mtx_db = Arc::new(tmutx::new(self));
-        let connections_task = tokio::spawn(handle_connections_tcp(connections_tcp,mtx_db.clone(),parallel));
-        let data_task = tokio::spawn(handle_data_tcp(data_tcp,mtx_db,parallel));
-        if let Err(e) = tokio::try_join!(connections_task, data_task){
-            logerr!("Error: {}",e);
+        let connections_tcp: Arc<TcpListener> = Arc::new(TcpListener::bind(connection_tcp_url).await.unwrap());
+        let data_tcp: Arc<TcpListener> = Arc::new(TcpListener::bind(data_tcp_url).await.unwrap());
+        let mtx_db = Arc::new(RwLock::new(self));
+        
+        if parallel{
+            let c0 = mtx_db.clone();
+            let c1 = mtx_db.clone();
+            tokio::spawn(async move {            
+                loop{handle_connections_tcp(&connections_tcp,c0.clone()).await}
+            });
+            tokio::spawn(async move {
+                loop {
+                    handle_data_tcp(&data_tcp,c1.clone()).await;
+                }
+            });
+        }else{
+            loop {
+                
+                handle_connections_tcp(&connections_tcp,mtx_db.clone()).await;
+                handle_data_tcp(&data_tcp,mtx_db.clone()).await;
+            }
         }
         Ok(())
+        
     }
 }

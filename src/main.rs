@@ -91,6 +91,7 @@ enum AST{
     Rollback(AstRollback),
     QueryControlNext(AstQueryControlNext),
     QueryControlPrevious(AstQueryControlPrevious),
+    QueryControlExit(AstQueryControlExit),
 }
 
 
@@ -151,6 +152,10 @@ struct AstQueryControlNext{
 }
 #[derive(Debug, Clone, PartialEq)]
 struct AstQueryControlPrevious{
+    id : String,
+}
+#[derive(Debug, Clone, PartialEq)]
+struct AstQueryControlExit{
     id : String,
 }
 

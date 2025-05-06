@@ -1,13 +1,13 @@
 use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
-use tokio::{io::AsyncReadExt, sync::Mutex as tmutx};
+use tokio::{io::AsyncReadExt, sync::{Mutex as tmutx,RwLock}};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
 use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
 
 
-type MvccType = Arc<tmutx<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
+type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 #[derive(Debug)]
 pub struct Container{
     pub file : std::fs::File,
@@ -17,7 +17,7 @@ pub struct Container{
     pub mvcc : MvccType,
     pub headers_offset : u64,
     pub location : String,
-    pub graveyard : Arc<tmutx<BTreeSet<u64>>>,
+    pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
     pub indexes : IndexTree,
     file_path : String
 
@@ -128,11 +128,11 @@ impl New for Container {
             file,
             element_size,
             str_size,
-            mvcc: Arc::new(tmutx::new((AHashMap::new(),HashMap::new()))),
+            mvcc: Arc::new(RwLock::new((AHashMap::new(),HashMap::new()))),
             headers_offset ,
             headers,
             location,
-            graveyard: Arc::new(tmutx::new(BTreeSet::new())),
+            graveyard: Arc::new(RwLock::new(BTreeSet::new())),
             indexes: IndexTree::default(),
             file_path: path.to_string()
         };
@@ -241,13 +241,7 @@ impl Container{
             0
         };
         let mvcc_max = {
-            let mvcc = match self.mvcc.try_lock() {
-                Ok(guard) => guard,
-                Err(e) => {
-                    logerr!("Failed to acquire mvcc lock immediately: {:?}", e);
-                    return Err(gerr("Could not lock mvcc"));
-                }
-            };
+            let mvcc = self.mvcc.read().await;
             mvcc.0.keys().copied().max().map_or(0, |max_index| max_index + 1)
         };
         Ok(file_rows.max(mvcc_max))
@@ -368,14 +362,14 @@ impl Container{
         return Ok(candidates_set)
     }
     pub async fn get_next_addr(&self) -> Result<u64, Error> {
-        let mut graveyard = self.graveyard.lock().await;
+        let mut graveyard = self.graveyard.write().await;
         if graveyard.len() > 0{
             if let Some(id) = graveyard.pop_first(){
                 return Ok(id)
             }
         }
         let current_rows = self.arrlen().await?;
-        let mvcc = self.mvcc.lock().await;
+        let mvcc = self.mvcc.read().await;
         for (&key, (deleted, _)) in mvcc.0.iter() {
             if *deleted {
                 return Ok(key);
@@ -385,12 +379,12 @@ impl Container{
     } 
     pub async fn push_row(&mut self, data : &Vec<AlbaTypes>) -> Result<(),Error>{
         let ind = self.get_next_addr().await?;
-        let mut mvcc_guard = self.mvcc.lock().await;
+        let mut mvcc_guard = self.mvcc.write().await;
         mvcc_guard.0.insert(ind, (false,data.clone()));
         Ok(())
     }
     pub async fn rollback(&mut self) -> Result<(),Error> {
-        let mut mvcc_guard = self.mvcc.lock().await;
+        let mut mvcc_guard = self.mvcc.write().await;
         mvcc_guard.0.clear();
         mvcc_guard.1.clear();
         drop(mvcc_guard);
@@ -400,7 +394,7 @@ impl Container{
         let mut total = self.arrlen().await?;
         let mut virtual_ward : AHashMap<usize, DataReference> = AHashMap::new();
         println!("commit: Locking MVCC...");
-        let mut mvcc = self.mvcc.lock().await;
+        let mut mvcc = self.mvcc.write().await;
     
         println!("commit: Separating insertions and deletions...");
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
@@ -432,7 +426,7 @@ impl Container{
             virtual_ward.insert(offset as usize, (const_xxh3::xxh3_64(serialized.as_slice()),serialized));
         }
         
-        let mut graveyard = self.graveyard.lock().await;
+        let mut graveyard = self.graveyard.write().await;
         for del in &deletes {
             println!("{:?}",del);
             let from = hdr_off + del.0 * row_sz;
@@ -477,8 +471,8 @@ impl Container{
                 
         println!("commit: Sync!");
         if let Some(s) = STRIX.get(){
-            let mut l = s.lock().await;
-            l.wards.push(tmutx::new((std::fs::OpenOptions::new().read(true).write(true).open(&self.file_path)?,virtual_ward)));
+            let mut l = s.write().await;
+            l.wards.push(RwLock::new((std::fs::OpenOptions::new().read(true).write(true).open(&self.file_path)?,virtual_ward)));
         }
         Ok(())
     }
@@ -502,7 +496,7 @@ impl Container{
         let mut buff = vec![0u8; buff_size];
         self.file.read_exact_at(&mut buff, idxs.0)?;
     
-        let mvcc = self.mvcc.lock().await;
+        let mvcc = self.mvcc.read().await;
     
         let mut result: Vec<Vec<AlbaTypes>> = Vec::new(); 
         for i in index.0..lidx {
@@ -565,7 +559,7 @@ impl Container{
         index.sort();
         let mut buffers : BTreeMap<u64,Vec<u8>> = BTreeMap::new();
         let mut result : Vec<Vec<AlbaTypes>> = Vec::new();
-        let mvcc = self.mvcc.lock().await;
+        let mvcc = self.mvcc.read().await;
         for i in index{
             if let Some(g) = mvcc.0.get(&i){
                 if !g.0{

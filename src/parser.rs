@@ -1,6 +1,6 @@
 use std::io::Error;
 
-use crate::{gerr, lexer, lexer_functions::{AlbaTypes, Token}, AlbaContainer, AstCommit, AstCreateContainer, AstCreateRow, AstEditRow, AstQueryControlNext, AstQueryControlPrevious, AstRollback, AstSearch, AST};
+use crate::{gerr, lexer, lexer_functions::{AlbaTypes, Token}, AlbaContainer, AstCommit, AstCreateContainer, AstCreateRow, AstEditRow, AstQueryControlExit, AstQueryControlNext, AstQueryControlPrevious, AstRollback, AstSearch, AST};
 
 
 
@@ -259,6 +259,14 @@ fn debug_qycnnxt(tokens : &Vec<Token>) -> Result<AST, Error> {
     }
     Err(gerr("Missing container"))
 }
+fn debug_qycnext(tokens : &Vec<Token>) -> Result<AST, Error> {
+    if let Some(ii) = tokens.get(1) {
+        if let Token::String(a) = ii{
+            return Ok(AST::QueryControlExit(AstQueryControlExit{id:a.to_string()}))
+        }
+    }
+    Err(gerr("Missing container"))
+}
 
 fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
     let container: Vec<AlbaContainer> = match tokens.get(3) {
@@ -396,6 +404,7 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
             "COMMIT"|"ROLLBACK" => debug_finishers_command(tokens),
             "QYCNPVS" => debug_qycnpvs(tokens),
             "QYCNNXT" => debug_qycnnxt(tokens),
+            "QYCNEXT" => debug_qycnext(tokens),
             _ => Err(gerr("Invalid command keyword")),
         }
     } else {
