@@ -1,5 +1,5 @@
 use std::io::{Error, ErrorKind};
-
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use crate::{database::MAX_STR_LEN, lexer};
@@ -29,7 +29,6 @@ pub enum AlbaTypes{
     MediumString(String),
     BigString(String),
     LargeString(String),
-
     NanoBytes(Vec<u8>),
     SmallBytes(Vec<u8>),
     MediumBytes(Vec<u8>),
@@ -57,13 +56,18 @@ impl AlbaTypes {
         match self {
             AlbaTypes::Text(_) => {
                 let text = match i {
-                    AlbaTypes::Text(s) => s,
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => s,
                     AlbaTypes::Int(n) => n.to_string(),
                     AlbaTypes::Bigint(n) => n.to_string(),
                     AlbaTypes::Float(f) => f.to_string(),
                     AlbaTypes::Bool(b) => b.to_string(),
+                    AlbaTypes::Char(c) => c.to_string(),
+                    AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
+                    AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) => {
+                        general_purpose::STANDARD.encode(&b)
+                    }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Text")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Text")),
                 };
                 Ok(AlbaTypes::Text(text))
             }
@@ -74,7 +78,7 @@ impl AlbaTypes {
                         if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Bigint value out of range for i32"));
+                            return Err(Error::new(ErrorKind::InvalidData, "Bigint out of range for i32"));
                         }
                     }
                     AlbaTypes::Float(f) => {
@@ -84,11 +88,9 @@ impl AlbaTypes {
                         f as i32
                     }
                     AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::Text(s) => {
-                        match s.parse::<i32>() {
-                            Ok(n) => n,
-                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as i32", s))),
-                        }
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
+                        s.parse::<i32>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as i32"))?
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Int")),
                     _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Int")),
@@ -106,11 +108,9 @@ impl AlbaTypes {
                         f as i64
                     }
                     AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::Text(s) => {
-                        match s.parse::<i64>() {
-                            Ok(n) => n,
-                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as i64", s))),
-                        }
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
+                        s.parse::<i64>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as i64"))?
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bigint")),
                     _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Bigint")),
@@ -123,11 +123,9 @@ impl AlbaTypes {
                     AlbaTypes::Int(n) => n as f64,
                     AlbaTypes::Bigint(n) => n as f64,
                     AlbaTypes::Bool(b) => if b { 1.0 } else { 0.0 },
-                    AlbaTypes::Text(s) => {
-                        match s.parse::<f64>() {
-                            Ok(f) => f,
-                            Err(_) => return Err(Error::new(ErrorKind::InvalidData, format!("Failed to parse '{}' as f64", s))),
-                        }
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
+                        s.parse::<f64>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as f64"))?
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Float")),
                     _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Float")),
@@ -140,17 +138,13 @@ impl AlbaTypes {
                     AlbaTypes::Int(n) => n != 0,
                     AlbaTypes::Bigint(n) => n != 0,
                     AlbaTypes::Float(f) => f != 0.0,
-                    AlbaTypes::Text(s) => {
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
                         let trimmed = s.trim().to_lowercase();
                         match trimmed.as_str() {
-                            "0" => false,
-                            "1" => true,
-                            "f" => false,
-                            "t" => true,
-                            "false" => false,
-                            "true" => true,
-                            "" => return Err(Error::new(ErrorKind::InvalidData, "Empty string cannot be converted to boolean")),
-                            _ => return Err(Error::new(ErrorKind::InvalidData, format!("Invalid boolean string: '{}'", s))),
+                            "0" | "f" | "false" => false,
+                            "1" | "t" | "true" => true,
+                            _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid boolean string")),
                         }
                     }
                     AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bool")),
@@ -158,13 +152,66 @@ impl AlbaTypes {
                 };
                 Ok(AlbaTypes::Bool(bool_val))
             }
-            AlbaTypes::NONE => {
-                Ok(AlbaTypes::NONE)
+            AlbaTypes::Char(_) => {
+                let char_val = match i {
+                    AlbaTypes::Char(c) => c,
+                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
+                        if s.len() == 1 {
+                            s.chars().next().unwrap()
+                        } else {
+                            return Err(Error::new(ErrorKind::InvalidData, "String must be a single character for Char"));
+                        }
+                    }
+                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Char")),
+                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Char")),
+                };
+                Ok(AlbaTypes::Char(char_val))
             }
-            _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported target type for conversion")),
+            AlbaTypes::NanoString(_) => {
+                let s = get_string_from_alba_type(i)?;
+                Ok(AlbaTypes::NanoString(truncate_or_pad_string(s, 10)))
+            }
+            AlbaTypes::SmallString(_) => {
+                let s = get_string_from_alba_type(i)?;
+                Ok(AlbaTypes::SmallString(truncate_or_pad_string(s, 100)))
+            }
+            AlbaTypes::MediumString(_) => {
+                let s = get_string_from_alba_type(i)?;
+                Ok(AlbaTypes::MediumString(truncate_or_pad_string(s, 500)))
+            }
+            AlbaTypes::BigString(_) => {
+                let s = get_string_from_alba_type(i)?;
+                Ok(AlbaTypes::BigString(truncate_or_pad_string(s, 2000)))
+            }
+            AlbaTypes::LargeString(_) => {
+                let s = get_string_from_alba_type(i)?;
+                Ok(AlbaTypes::LargeString(truncate_or_pad_string(s, 3000)))
+            }
+            AlbaTypes::NanoBytes(_) => {
+                let bytes = get_bytes_from_alba_type(i)?;
+                Ok(AlbaTypes::NanoBytes(truncate_or_pad_bytes(bytes, 10)))
+            }
+            AlbaTypes::SmallBytes(_) => {
+                let bytes = get_bytes_from_alba_type(i)?;
+                Ok(AlbaTypes::SmallBytes(truncate_or_pad_bytes(bytes, 1000)))
+            }
+            AlbaTypes::MediumBytes(_) => {
+                let bytes = get_bytes_from_alba_type(i)?;
+                Ok(AlbaTypes::MediumBytes(truncate_or_pad_bytes(bytes, 10_000)))
+            }
+            AlbaTypes::BigSBytes(_) => {
+                let bytes = get_bytes_from_alba_type(i)?;
+                Ok(AlbaTypes::BigSBytes(truncate_or_pad_bytes(bytes, 100_000)))
+            }
+            AlbaTypes::LargeBytes(_) => {
+                let bytes = get_bytes_from_alba_type(i)?;
+                Ok(AlbaTypes::LargeBytes(truncate_or_pad_bytes(bytes, 1_000_000)))
+            }
+            AlbaTypes::NONE => Ok(AlbaTypes::NONE),
         }
     }
-    pub fn size(&self) -> usize{
+   pub fn size(&self) -> usize{
         match self {
             AlbaTypes::Bigint(_) => size_of::<i64>(),
             AlbaTypes::Int(_) => size_of::<i32>(),
@@ -185,6 +232,56 @@ impl AlbaTypes {
             AlbaTypes::LargeBytes(_) => 1_000_000 + size_of::<usize>(),
         }
     }
+}
+
+fn get_string_from_alba_type(i: AlbaTypes) -> Result<String, Error> {
+    match i {
+        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => Ok(s),
+        AlbaTypes::Int(n) => Ok(n.to_string()),
+        AlbaTypes::Bigint(n) => Ok(n.to_string()),
+        AlbaTypes::Float(f) => Ok(f.to_string()),
+        AlbaTypes::Bool(b) => Ok(b.to_string()),
+        AlbaTypes::Char(c) => Ok(c.to_string()),
+        AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
+        AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) => {
+            Ok(general_purpose::STANDARD.encode(&b))
+        }
+        AlbaTypes::NONE => Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to string")),
+    }
+}
+
+fn truncate_or_pad_string(s: String, max_len: usize) -> String {
+    if s.len() > max_len {
+        s[..max_len].to_string()
+    } else {
+        format!("{: <width$}", s, width = max_len)
+    }
+}
+
+fn get_bytes_from_alba_type(i: AlbaTypes) -> Result<Vec<u8>, Error> {
+    match i {
+        AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
+        AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) => Ok(b),
+        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
+        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
+            general_purpose::STANDARD
+                .decode(s.as_bytes())
+                .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid base64 string"))
+        }
+        AlbaTypes::NONE => Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to bytes")),
+        _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to bytes")),
+    }
+}
+
+fn truncate_or_pad_bytes(b: Vec<u8>, max_len: usize) -> Vec<u8> {
+    let mut bytes = b;
+    if bytes.len() > max_len {
+        bytes.truncate(max_len);
+    } else {
+        bytes.resize(max_len, 0);
+    }
+    bytes
 }
 
 impl TryFrom<Token> for AlbaTypes {
