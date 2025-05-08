@@ -52,6 +52,79 @@ bytes-l ~ 1,000,000
 */
 
 impl AlbaTypes {
+    pub fn from_id(code: u8) -> Result<AlbaTypes, Error> {
+        match code {
+            0  => Ok(AlbaTypes::NONE),
+            1  => Ok(AlbaTypes::Char('\0')),
+            2  => Ok(AlbaTypes::Int(0)),
+            3  => Ok(AlbaTypes::Bigint(0)),
+            4  => Ok(AlbaTypes::Bool(false)),
+            5  => Ok(AlbaTypes::Float(0.0)),
+            6  => Ok(AlbaTypes::Text(String::new())),
+            7  => Ok(AlbaTypes::NanoString(String::new())),
+            8  => Ok(AlbaTypes::SmallString(String::new())),
+            9  => Ok(AlbaTypes::MediumString(String::new())),
+            10 => Ok(AlbaTypes::BigString(String::new())),
+            11 => Ok(AlbaTypes::LargeString(String::new())),
+            12 => Ok(AlbaTypes::NanoBytes(Vec::new())),
+            13 => Ok(AlbaTypes::SmallBytes(Vec::new())),
+            14 => Ok(AlbaTypes::MediumBytes(Vec::new())),
+            15 => Ok(AlbaTypes::BigSBytes(Vec::new())),
+            16 => Ok(AlbaTypes::LargeBytes(Vec::new())),
+            x  => Err(Error::new(
+                      ErrorKind::InvalidData,
+                      format!("Unknown AlbaTypes code: {}", x)
+                  )),
+        }
+    }
+    pub fn get_id(&self) -> u8 {
+        match self {
+            AlbaTypes::NONE            =>  0,
+            AlbaTypes::Char(_)         =>  1,
+            AlbaTypes::Int(_)          =>  2,
+            AlbaTypes::Bigint(_)       =>  3,
+            AlbaTypes::Bool(_)         =>  4,
+            AlbaTypes::Float(_)        =>  5,
+            AlbaTypes::Text(_)         =>  6,
+            AlbaTypes::NanoString(_)   =>  7,
+            AlbaTypes::SmallString(_)  =>  8,
+            AlbaTypes::MediumString(_) =>  9,
+            AlbaTypes::BigString(_)    => 10,
+            AlbaTypes::LargeString(_)  => 11,
+            AlbaTypes::NanoBytes(_)    => 12,
+            AlbaTypes::SmallBytes(_)   => 13,
+            AlbaTypes::MediumBytes(_)  => 14,
+            AlbaTypes::BigSBytes(_)    => 15,
+            AlbaTypes::LargeBytes(_)   => 16,
+        }
+    }
+    pub fn get_id_from_text(keyword: &str) -> Result<u8, Error> {
+        match keyword.to_uppercase().as_str() {
+            "INT"             => Ok(2),
+            "BIGINT"          => Ok(3),
+            "BOOL"            => Ok(4),
+            "FLOAT"           => Ok(5),
+            "TEXT"            => Ok(6),
+            "NANO-STRING"     => Ok(7),
+            "SMALL-STRING"    => Ok(8),
+            "MEDIUM-STRING"   => Ok(9),
+            "BIG-STRING"      => Ok(10),
+            "LARGE-STRING"    => Ok(11),
+            "NANO-BYTES"      => Ok(12),
+            "SMALL-BYTES"     => Ok(13),
+            "MEDIUM-BYTES"    => Ok(14),
+            "BIG-BYTES"       => Ok(15),
+            "LARGE-BYTES"     => Ok(16),
+            other => Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("Unknown type keyword: {}", other)
+            )),
+        }
+    }
+
+}
+
+impl AlbaTypes {
     pub fn try_from_existing(&self, i: AlbaTypes) -> Result<AlbaTypes, Error> {
         match self {
             AlbaTypes::Text(_) => {

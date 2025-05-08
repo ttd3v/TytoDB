@@ -1,14 +1,13 @@
-use std::{collections::{HashMap, HashSet}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::{Arc,Mutex}, time::Duration};
+use std::{collections::HashMap, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::Arc};
 use ahash::AHashMap;
 use base64::{alphabet, engine, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
-use size_of;
 use serde_yaml;
 use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
-use tokio::{net::{TcpListener, TcpStream}, sync::{Mutex as tmutx, OnceCell,RwLock}, time::timeout};
+use tokio::{net::{TcpListener, TcpStream}, sync::{OnceCell,RwLock}};
 
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
@@ -106,7 +105,6 @@ pub struct Database{
     containers : Vec<String>,
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
     container : HashMap<String,Container>,
-    connections : Arc<RwLock<HashSet<[u8;32]>>>,
     queries : Arc<RwLock<HashMap<String,Query>>>,
     secret_keys : Arc<RwLock<HashMap<[u8;32],Vec<u8>>>>,
 }
@@ -124,16 +122,6 @@ fn check_for_reference_folder(location : &String) -> Result<(), Error>{
 
 
 
-fn text_type_identifier(max_str_length: usize) -> u8 {
-    if max_str_length > 255 {
-        255u8
-    } else {
-        max_str_length as u8
-    }
-}
-fn from_usize_to_u8(i:usize) -> u8{
-    return i as u8;
-}
 const SETTINGS_FILE : &str = "settings.yaml";
 fn calculate_header_size(max_columns: usize) -> usize {
     let column_names_size = MAX_STR_LEN * max_columns;
@@ -394,46 +382,37 @@ impl Database{
         Ok(())
     }
     async fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
-        
         if let AlbaContainer::Real(container_name) = &containers[0] {
             let mut container = match self.container.get_mut(container_name) {
                 Some(a) => a,
                 None => return Err(gerr(&format!("No container named {}", container_name))),
             };
             let query_rows = container.get_query_candidates(conditions).await?;
+
+            if query_rows.is_empty() {
+                let mut final_query = Query::new(container.columns_owned());
+                final_query.column_names = col_names.clone();
+                return Ok(final_query);
+            }
+    
             let mut final_query = Query::new(container.columns_owned());
             final_query.column_names = col_names.clone();
             
-            let mut page : Vec<u64> = Vec::with_capacity(PAGE_SIZE); 
+            let mut page: Vec<u64> = Vec::with_capacity(PAGE_SIZE); 
             let mut iterator = query_rows.iter();
-            let mut bucket : Vec<IndexSizes> = Vec::new();
+            let mut bucket: Vec<IndexSizes> = Vec::new();
             
             while let Some(i) = iterator.next() {
                 bucket.push(i.clone());
-                Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, &container_name,&conditions).await?;
+                Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, container_name, conditions).await?;
             }
-            Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, &container_name,&conditions).await?;
-
-
+            Database::interact_with_ancient_query_bucket(&mut bucket, &mut page, &mut container, &mut final_query, container_name, conditions).await?;
+    
             return Ok(final_query);
-            // let mut list : Vec<u64> = Vec::new();
-            // while cursor < length {
-            //     let rows = container.get_rows((cursor, cursor + page_size)).await?;
-    
-            //     for (number, row) in rows.iter().enumerate() {
-            //         let row_index = cursor + number as u64;
-            //         if condition_checker(row, &container.column_names, conditions)? {
-            //             list.push(row_index);
-            //         }
-            //     }
-            //     cursor += page_size as u64;
-            // }
-    
-            // final_query.pages = vec![(list,container_name.clone())];
-
         }
         Err(gerr("No valid containers specified for query processing"))
     }
+    
     async fn query_diver(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {  
         if containers.is_empty() {
             return Err(gerr("No valid containers specified for query processing"));
@@ -611,25 +590,18 @@ impl Database{
                 }
             }
             for i in 0..max_columns {
-                if i < types_headers_bytes.len() {
-                    let type_byte = types_headers_bytes[i];
-                    let alba_type = match type_byte {
-                        0 => AlbaTypes::NONE,
-                        size if size == from_usize_to_u8(size_of::<i32>()) => AlbaTypes::Int(0),
-                        size if size == from_usize_to_u8(size_of::<i64>()) => {
-                            AlbaTypes::Bigint(0)
-                        },
-                        size if size == text_type_identifier(MAX_STR_LEN) => AlbaTypes::Text(String::new()),
-                        size if size == from_usize_to_u8(size_of::<f64>()) => AlbaTypes::Float(0.0),
-                        size if size == from_usize_to_u8(size_of::<bool>()) => AlbaTypes::Bool(false),
-                        _ => return Err(gerr("Unknown type size in column value types"))
-                    };
-                    
-                    column_types.push(alba_type);
+                let alba_type = if i < types_headers_bytes.len() {
+                    let tb = types_headers_bytes[i];
+                    AlbaTypes::from_id(tb)?
+            
                 } else {
-                    column_types.push(AlbaTypes::NONE);
-                }
+                    // no header byte → NULL
+                    AlbaTypes::NONE
+                };
+            
+                column_types.push(alba_type);
             }
+            
             
             let mut valid_column_count = max_columns;
             for i in 0..max_columns {
@@ -697,31 +669,13 @@ impl Database{
                     column_name_bytes[i][..bytes.len()].copy_from_slice(bytes);
                 }
                 for (i, item) in column_val_headers.iter().enumerate(){
-                    column_val_bytes[i] = match item{
-                        AlbaTypes::Int(_) => from_usize_to_u8(size_of::<i32>()),
-                        AlbaTypes::Bigint(_) => from_usize_to_u8(size_of::<i64>()),
-                        AlbaTypes::Float(_) => from_usize_to_u8(size_of::<f64>()),
-                        AlbaTypes::Bool(_) => from_usize_to_u8(size_of::<bool>()),
-                        AlbaTypes::Text(_) => MAX_STR_LEN as u8,
-                        AlbaTypes::NONE => 0,
-                        AlbaTypes::Char(_) => from_usize_to_u8(size_of::<char>()),
-                        AlbaTypes::NanoString(_) => from_usize_to_u8(10),
-                        AlbaTypes::SmallString(_) => from_usize_to_u8(100),
-                        AlbaTypes::MediumString(_) => from_usize_to_u8(500),
-                        AlbaTypes::BigString(_) => from_usize_to_u8(2000),
-                        AlbaTypes::LargeString(_) => from_usize_to_u8(3000),
-                        AlbaTypes::NanoBytes(_) => from_usize_to_u8(10),
-                        AlbaTypes::SmallBytes(_) => from_usize_to_u8(1000),
-                        AlbaTypes::MediumBytes(_) => from_usize_to_u8(10_000),
-                        AlbaTypes::BigSBytes(_) => from_usize_to_u8(100_000),
-                        AlbaTypes::LargeBytes(_) => from_usize_to_u8(1_000_000),
-                    }
+                    column_val_bytes[i] = item.get_id()
                 }
 
                 if let Err(e) = check_for_reference_folder(&self.location){
                     return Err(e)
                 }
-                let mut file = match fs::File::create(format!("{}/{}",self.location,structure.name)){
+                let mut file = match tokio::fs::File::create(format!("{}/{}",self.location,structure.name)).await{
                     Ok(f)=>{f}
                     ,Err(e)=>{return Err(e)}
                 };
@@ -733,7 +687,7 @@ impl Database{
                 for arr in &column_val_bytes {
                     flattened.push(*arr);
                 }
-                match file.write_all(&flattened) {
+                match file.write_all(&flattened).await {
                     Ok(_) => {},
                     Err(e) => {
                         return Err(e)
@@ -923,7 +877,7 @@ impl Database{
                         }
                     }
                     self.container.remove(&structure.container);
-                    fs::remove_file(format!("{}/{}",self.location,structure.container))?;
+                    tokio::fs::remove_file(format!("{}/{}",self.location,structure.container)).await?;
                     self.save_containers()?;
 
                 }else{
@@ -1038,7 +992,7 @@ pub async fn connect() -> Result<Database, Error>{
         start_strix(strix.clone()).await;
     }
 
-    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(RwLock::new(HashMap::new())),connections:Arc::new(RwLock::new(HashSet::new())),secret_keys:Arc::new(RwLock::new(HashMap::new()))};
+    let mut db = Database{location:path.to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new(),queries:Arc::new(RwLock::new(HashMap::new())),secret_keys:Arc::new(RwLock::new(HashMap::new()))};
     db.setup().await?;
     if let Err(e) = db.load_settings(){
         logerr!("err: load_settings");
@@ -1092,11 +1046,12 @@ async fn handle_connections_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<
 }
 
 async fn handle_connections_tcp(listener : &TcpListener,ardb : Arc<RwLock<Database>>){
-    
-        let (mut socket, addr) = listener.accept().await.unwrap();
-        println!("Accepted connection from: {}", addr);
-        handle_connections_tcp_inner(&mut socket, ardb).await
-    
+    let (mut socket, addr) = listener.accept().await.unwrap();
+    println!("Accepted connection from: {}", addr);
+    handle_connections_tcp_inner(&mut socket, ardb).await;
+    if let Err(e) = socket.shutdown().await{
+        logerr!("{}",e);
+    }
 }
 
 use aes_gcm::{aead::{Aead, KeyInit, OsRng}, aes::cipher::{self}, AeadCore, Key};
@@ -1182,7 +1137,6 @@ impl TytoDBResponse {
 
 async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Database>>){
     
-    let mut response: Vec<u8> = Vec::new();
     println!("reading data...");
 
     let mut size_buff = [0u8;4];
@@ -1201,7 +1155,7 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
 
     if buffer.len() < 32 {
         logerr!("Received data is too short: {} bytes", buffer.len());
-        let _ = socket.write_all(&response).await;
+        let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
         return;
     }
     println!("Locking database...");
@@ -1218,13 +1172,13 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
         
         if size <= 0{
             logerr!("the payload is too short | size :{}",size);
-            let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+            let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
             return
         }
         let mut cipher_payload = vec![0u8;size as usize];
         if let Err(e) = socket.read_exact(&mut cipher_payload).await{
             logerr!("{}",e);
-            let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+            let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
             return
         };
         let res = decrypt(&cipher_payload, &session_id).await;
@@ -1254,15 +1208,17 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
         let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
         return;
     }
-
+    let mut query_result_st : Option<Query> = None;
+    let mut response: Vec<u8> = Vec::new();
     match serde_json::from_slice::<DataConnection>(&payload) {
         Ok(v) => {
             match db.execute(&v.command,v.arguments).await {
                 Ok(query_result) => {
                     db.queries.write().await.insert(query_result.id.clone(), query_result.clone());
-                    drop(db);
                     match serde_json::to_string(&query_result) {
+                        
                         Ok(q) => {
+                            query_result_st = Some(query_result);
                             if let Ok(b) = (TytoDBResponse{
                                 content:q,
                                 success:1
@@ -1304,8 +1260,17 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
                         response.extend_from_slice(&b);
                         println!("payload: {:?}",b);
                     }else{
-                        let size = 0 as u64;
-                        response.extend_from_slice(&size.to_be_bytes());
+                        if let Ok(b) = (TytoDBResponse{
+                            content:e.to_string(),
+                            success:1
+                        }).to_bytes(&session_id).await{
+                            let size = b.len() as u64;
+                            response.extend_from_slice(&size.to_be_bytes());
+                            response.extend_from_slice(&b);
+                        }else{
+                            let size = 0 as u64;
+                            response.extend_from_slice(&size.to_be_bytes());
+                        };
                     }
                 }
             }
@@ -1324,9 +1289,19 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
             }
         }
     }
-
+    if response.len() < 1{
+        logerr!("empty response");
+        let _  = socket.write_all(&(0 as u64).to_be_bytes()).await;
+    }
     if let Err(e) = socket.write_all(&response).await {
         logerr!("Failed to write response to socket: {}", e);
+        if let Some(q) = query_result_st{
+            let a = db.execute(&format!("QYCNEXT {}",q.id),Vec::new()).await;
+            if let Err(e) = a{
+                logerr!("{}",e);
+            }
+        }
+        return;
     }
 }
 
@@ -1346,7 +1321,10 @@ async fn handle_data_tcp(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) 
         // }else{
         //     handle_data_tcp_inner(&mut socket, arc_db).await
         // }
-        handle_data_tcp_inner(&mut socket, arc_db).await
+        handle_data_tcp_inner(&mut socket, arc_db).await;
+        if let Err(e) = socket.shutdown().await{
+            logerr!("{}",e);
+        };
         
     
 }

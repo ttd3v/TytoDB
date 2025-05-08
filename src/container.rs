@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
-use tokio::{io::AsyncReadExt, sync::{Mutex as tmutx,RwLock}};
+use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
@@ -246,15 +246,12 @@ impl Container{
         };
         Ok(file_rows.max(mvcc_max))
     }
-
     pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<&AlbaTypes>{
         if  let Some(g) = self.headers.get(column_name){
             return Some(g)
         }
         None
     }
-    
-
     pub async fn candidates_from_unit(&self,condition : &(Token,Token,Token)) -> Result<QueryCandidates,Error>{
         let column_name_token = &condition.0;
 
@@ -329,7 +326,6 @@ impl Container{
             }
         })
     }
-
     pub async fn get_query_candidates(&self,query_conditions : &QueryConditions) -> Result<BTreeSet<IndexSizes>,Error>{
         let candidates_set : BTreeSet<IndexSizes> = BTreeSet::new();
         let mut condition_groups : Vec<QueryCandidates> = Vec::new();
