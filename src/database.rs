@@ -1,10 +1,10 @@
-use std::{collections::HashMap, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::Arc};
-use ahash::AHashMap;
+use std::{collections::{BTreeSet,BTreeMap, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, sync::Arc};
+use ahash::{AHashMap, AHashSet};
 use base64::{alphabet, engine, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_tree::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::{TcpListener, TcpStream}, sync::{OnceCell,RwLock}};
@@ -129,11 +129,13 @@ fn calculate_header_size(max_columns: usize) -> usize {
     column_names_size + column_types_size
 }
 
-
+pub type WrittingQuery = BTreeMap<IndexSizes,Vec<AlbaTypes>>;
 
 const PAGE_SIZE : usize = 100;
 type QueryPage = (Vec<u64>,String);
 pub type QueryConditions = (Vec<(Token, Token, Token)>, Vec<(usize, char)>);
+
+type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Query{
     pub rows: Rows,
@@ -148,7 +150,7 @@ impl Query {
         Query {
             rows: self.rows.clone(),
             pages: self.pages.clone(),
-            current_page: self.current_page, // usize is Copy
+            current_page: self.current_page, 
             column_names: self.column_names.clone(),
             column_types: self.column_types.clone(),
             id: self.id.clone(),
@@ -158,6 +160,9 @@ impl Query {
 impl Query{
     fn new(column_types : Vec<AlbaTypes>) -> Self{
         Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: 0, column_names: Vec::new(), column_types: column_types,id:generate_secure_code(100)}
+    }
+    fn new_none(column_types : Vec<AlbaTypes>) -> Self{
+        Query { rows: (Vec::new(),Vec::new()), pages: Vec::new(), current_page: 0, column_names: Vec::new(), column_types: column_types,id:"".to_string()}
     }
     pub fn join(&mut self, foreign: Query) {
         if foreign.column_types != self.column_types {
@@ -358,6 +363,7 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
 
     Ok(final_result)
 }
+
 impl Database{
     async fn interact_with_ancient_query_bucket(bucket : &mut Vec<IndexSizes>,page : &mut Vec<u64>,container : &mut Container,query :&mut  Query,containername : &str,conditions: &QueryConditions) -> Result<(),Error>{
         if bucket.len() >= 40{
@@ -381,6 +387,7 @@ impl Database{
         }
         Ok(())
     }
+
     async fn ancient_query(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {
         if let AlbaContainer::Real(container_name) = &containers[0] {
             let mut container = match self.container.get_mut(container_name) {
@@ -412,7 +419,7 @@ impl Database{
         }
         Err(gerr("No valid containers specified for query processing"))
     }
-    
+
     async fn query_diver(&mut self, col_names: &Vec<String>, containers: &[AlbaContainer], conditions: &QueryConditions) -> Result<Query, Error> {  
         if containers.is_empty() {
             return Err(gerr("No valid containers specified for query processing"));
@@ -626,9 +633,11 @@ impl Database{
         let max_columns : usize = self.settings.max_columns as usize;
         match ast{
             AST::CreateContainer(structure) => {
+            println!("Started to create container!");
               if !match fs::exists(format!("{}/{}",self.location,structure.name)) {Ok(a)=>a,Err(bruh)=>{return Err(bruh)}}{
                 let cn_len = structure.col_nam.len();
                 let cv_len = structure.col_val.len();
+                println!("No container with the entered name");
 
                 if cn_len != cv_len{
                     return Err(gerr(&format!("Mismatch in CREATE CONTAINER: provided {} column names but {} column types", cn_len, cv_len)))
@@ -657,6 +666,7 @@ impl Database{
                 for (num, v) in structure.col_val.iter().enumerate().take(max_columns) {
                     column_val_headers[num] = v.clone();
                 }
+                println!("Finished processing container headers!");
                 
                 let mut column_name_bytes: Vec<Vec<u8>> = vec![vec![0u8; MAX_STR_LEN]; max_columns];
                 let mut column_val_bytes: Vec<u8> = vec![0u8; max_columns];
@@ -671,12 +681,15 @@ impl Database{
                 for (i, item) in column_val_headers.iter().enumerate(){
                     column_val_bytes[i] = item.get_id()
                 }
+                println!("Finished computing the container header bytes!");
 
                 if let Err(e) = check_for_reference_folder(&self.location){
                     return Err(e)
                 }
+                println!("Creating container file");
                 let mut file = match tokio::fs::File::create(format!("{}/{}",self.location,structure.name)).await{
-                    Ok(f)=>{f}
+                    Ok(f)=>{
+                        println!("Container file created!");f}
                     ,Err(e)=>{return Err(e)}
                 };
 
@@ -687,12 +700,16 @@ impl Database{
                 for arr in &column_val_bytes {
                     flattened.push(*arr);
                 }
+
+                println!("Writting container headers...");
                 match file.write_all(&flattened).await {
                     Ok(_) => {},
                     Err(e) => {
                         return Err(e)
                     }
                 };
+                println!("Container data written!");
+                println!("Creating container reference...");
                 self.containers.push(structure.name.clone());
                 let mut element_size : usize = 0;
                 for el in column_val_headers.iter(){
@@ -703,8 +720,8 @@ impl Database{
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
                 self.headers.shrink_to_fit();
-
-                
+                println!("Container reference has been created!");
+                return Ok(Query::new_none(Vec::new()))
             }else{
                 return Err(gerr("A container with the specified name already exists"))
             }
@@ -774,57 +791,35 @@ impl Database{
                 return Ok(self.query(structure.col_nam, structure.container, structure.conditions).await?)
             },
             AST::EditRow(structure) => {
-                let container = match self.container.get(&structure.container){
+                let container = match self.container.get_mut(&structure.container){
                     Some(i) => i,
                     None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
                 };
-                let mut values = container.columns_owned().clone();
-                let mut hashmap : HashMap<String,usize> = HashMap::new(); 
-                for (index,value) in container.column_names().iter().enumerate(){
-                    hashmap.insert(value.to_string(), index);
-                }
-                for i in structure.col_nam.iter().enumerate(){
-                    if i.0 >= structure.col_val.len(){
-                        continue;
-                    }
-                    let value: &AlbaTypes = &structure.col_val[i.0];
-                    match hashmap.get(i.1){
-                        Some(a) => {
-                            values[*a] = values[*a].try_from_existing(value.clone())?;
-                        },
-                        None => continue
-                    }
-                }
-                
-                let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = container.mvcc.write().await;
-                if row_group < 1{
-                    row_group = 1
-                }
-                let arrl = container.arrlen().await?;
-                if row_group > arrl{
-                    row_group = arrl
-                }
-                for i in 0..(arrl/row_group){
-                    let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
-                    for j in li.iter().enumerate(){
-                        let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
-                        match mvcc.0.get(&id){
-                            Some(a) => {
-                                if !a.0 && condition_checker(&a.1, &container.column_names(), &structure.conditions)?{
-                                    mvcc.0.insert(id,(false,values.clone()));
-                                }
-                            },
-                            None => {
-                                if condition_checker(&j.1, &container.column_names(), &structure.conditions)?{
-                                    mvcc.0.insert(id,(false,values.clone()));
-                                } 
+                let mut wquery: BTreeMap<IndexSizes, Vec<AlbaTypes>> = container.heavy_get_spread_rows(&mut container.get_query_candidates(&structure.conditions).await?).await?;
+
+                let mut col_val_rel : AHashMap<usize,&AlbaTypes> = AHashMap::new();
+                for (index,column_name) in structure.col_nam.iter().enumerate(){
+                    for i in container.column_names().iter().enumerate(){
+                        if *column_name == *i.1{
+                            if let Some(s) = structure.col_val.get(index){
+                                let _ = col_val_rel.insert(i.0,s);
                             }
+                        } 
+                    }
+                }
+                for i in wquery.iter_mut(){
+                    for j in i.1.iter_mut().enumerate(){
+                        if let Some(a) = col_val_rel.get(&j.0){
+                            let b = (**a).clone();
+                            *j.1 = b;
                         }
                     }
                 }
+                let data: Vec<(usize, Vec<AlbaTypes>)> = wquery.into_iter().map(|(k, v)| (k.as_usize(), v)).collect();
+
+                container.indexes.edit((container.column_names(),data))?;
+
                 if self.settings.auto_commit{
-                    drop(mvcc);
                     self.commit().await?;
                 }
             },
@@ -833,35 +828,40 @@ impl Database{
                     Some(i) => i,
                     None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
                 };
-                
-                let mut row_group =  self.settings.memory_limit / container.element_size as u64;
-                let mut mvcc = container.mvcc.write().await;
-                if row_group < 1{
-                    row_group = 1
-                }
-                let arrl = container.arrlen().await?;
-                if row_group > arrl{
-                    row_group = arrl
-                }
-                for i in 0..(arrl/row_group){
-                    let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
-                    for j in li.iter().enumerate(){
-                        let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
-                        match &structure.conditions{
-                            Some(conditions) => {
-                                if condition_checker(&j.1, &container.column_names(), &conditions)?{
-                                    mvcc.0.insert(id,(true,j.1.clone()));
-                                } 
-                            },
-                            None => {
-                                mvcc.0.insert(id,(true,j.1.clone()));
-                            }
+                if let Some(conditions) = structure.conditions{
+                    let container = match self.container.get_mut(&structure.container){
+                        Some(i) => i,
+                        None => {return Err(gerr(&format!("There is no container named {}",structure.container)))}
+                    };
+                    let wquery: BTreeMap<IndexSizes, Vec<AlbaTypes>> = container.heavy_get_spread_rows(&mut container.get_query_candidates(&conditions).await?).await?;
+                    let mut indexes = AHashSet::new();
+                    let mut mvcc = container.mvcc.write().await;
+                    for i in wquery{
+                        indexes.insert(i.0.as_usize());
+                        mvcc.0.insert(i.0.as_u64(),(true,i.1.clone()));
+                    }
+                    container.indexes.kaboom_indexes_out(indexes)?;
+
+                }else{
+                    let mut row_group =  self.settings.memory_limit / container.element_size as u64;
+                    let mut mvcc = container.mvcc.write().await;
+                    if row_group < 1{
+                        row_group = 1
+                    }
+                    let arrl = container.arrlen().await?;
+                    if row_group > arrl{
+                        row_group = arrl
+                    }
+                    for i in 0..(arrl/row_group){
+                        let li = container.get_rows(((i-1)*row_group,i*row_group)).await?;
+                        for j in li.iter().enumerate(){
+                            let id = (j.0 as u64*i as u64 * row_group as u64) as u64;
+                            mvcc.0.insert(id,(true,j.1.clone()));
+                            
                         }
-                        
                     }
                 }
                 if self.settings.auto_commit{
-                    drop(mvcc);
                     self.commit().await?;
                 }
             },
@@ -957,7 +957,7 @@ impl Database{
             // _ =>{return Err(gerr("Failed to parse"));}
         }
     
-        Ok(Query::new(Vec::new()))
+        Ok(Query::new_none(Vec::new()))
     }
     pub async fn execute(&mut self,input : &str,arguments : Vec<String>) -> Result<Query, Error>{
         let ast = parse(input.to_owned(),arguments)?;
@@ -965,7 +965,6 @@ impl Database{
     }  
 }
 
-type Rows = (Vec<String>,Vec<Vec<AlbaTypes>>);
 
 pub async fn connect() -> Result<Database, Error>{
     let dbp = database_path();

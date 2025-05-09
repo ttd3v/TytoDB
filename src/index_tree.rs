@@ -1,104 +1,13 @@
-use std::{collections::{btree_set::BTreeSet, HashMap}, io::Error};
+use std::{collections::{btree_set::BTreeSet, HashMap}, io::Error, sync::{Arc, RwLock}};
 use std::cmp::Ordering;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 
-use crate::{gerr, lexer_functions::{AlbaTypes, Token}};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexSizes{
-    U8(u8),
-    U16(u16),
-    U32(u32),
-    U64(u64),
-    Usize(usize),
-}
-impl IndexSizes{
-    pub fn to_usize(a : IndexSizes) -> usize{
-        match a{
-            IndexSizes::U8(a) => a as usize,
-            IndexSizes::U16(a) => a as usize,
-            IndexSizes::U32(a) => a as usize,
-            IndexSizes::U64(a) => a as usize,
-            IndexSizes::Usize(a) => a as usize,
-        }
-    }
-}
-impl PartialOrd for IndexSizes {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for IndexSizes {
-    fn cmp(&self, other: &Self) -> Ordering {
-        let self_val = match self {
-            IndexSizes::U8(val) => *val as u64,
-            IndexSizes::U16(val) => *val as u64,
-            IndexSizes::U32(val) => *val as u64,
-            IndexSizes::U64(val) => *val,
-            IndexSizes::Usize(val) => *val as u64, 
-        };
-        let other_val = match other {
-            IndexSizes::U8(val) => *val as u64,
-            IndexSizes::U16(val) => *val as u64,
-            IndexSizes::U32(val) => *val as u64,
-            IndexSizes::U64(val) => *val,
-            IndexSizes::Usize(val) => *val as u64,
-        };
-        if self_val == other_val {
-            let self_rank = match self {
-                IndexSizes::U8(_) => 0,
-                IndexSizes::U16(_) => 1,
-                IndexSizes::U32(_) => 2,
-                IndexSizes::U64(_) => 3,
-                IndexSizes::Usize(_) => 4,
-            };
-            let other_rank = match other {
-                IndexSizes::U8(_) => 0,
-                IndexSizes::U16(_) => 1,
-                IndexSizes::U32(_) => 2,
-                IndexSizes::U64(_) => 3,
-                IndexSizes::Usize(_) => 4,
-            };
-            self_rank.cmp(&other_rank)
-        } else {
-            self_val.cmp(&other_val)
-        }
-    }
-}
-
-impl IndexSizes {
-    fn proper(r: usize) -> IndexSizes {
-        // Use constants for clarity and correctness
-        if r <= u8::MAX as usize {
-            return IndexSizes::U8(r as u8);
-        }
-        if r <= u16::MAX as usize {
-            return IndexSizes::U16(r as u16);
-        }
-        if r <= u32::MAX as usize {
-            return IndexSizes::U32(r as u32);
-        }
-        if r <= u64::MAX as usize {
-            return IndexSizes::U64(r as u64);
-        }
-        IndexSizes::Usize(r)
-    }
-    // fn as_usize(&self) -> usize {
-    //     match self {
-    //         IndexSizes::U8(val) => *val as usize,
-    //         IndexSizes::U16(val) => *val as usize,
-    //         IndexSizes::U32(val) => *val as usize,
-    //         IndexSizes::U64(val) => *val as usize,
-    //         IndexSizes::Usize(val) => *val,
-    //     }
-    // }
-}
+use crate::{gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}};
 
 #[derive(Default)]
 #[derive(Debug)]
 pub struct IndexTree{
-    pub data : HashMap<String,AHashMap<usize,BTreeSet<IndexSizes>>>,
+    pub data : Arc<RwLock<HashMap<String,AHashMap<usize,BTreeSet<IndexSizes>>>>> ,
 }
 
 // impl IndexTree{
@@ -122,8 +31,8 @@ fn index_text(input : &String) -> usize{
     }
     return value
 }
-fn index_number(input : impl Into<f64>) -> usize{
-    return (input.into() as f64).log10() as usize
+fn index_number(input : usize) -> usize{
+    return input / 1000
 }
 fn index_boolean(input : &bool) -> usize{
     return if *input{1}else{0}
@@ -134,9 +43,12 @@ fn index_bytes(input: &[u8]) -> usize {
 
 
 impl IndexTree{
-    pub fn insert_gently(&mut self, column_names : Vec<String>, rows : Vec<(usize,Vec<AlbaTypes>)>){
+    pub fn insert_gently(&mut self, column_names : Vec<String>, rows : Vec<(usize,Vec<AlbaTypes>)>)-> Result<(), Error>{
+        let mut data = if let Ok(a) = self.data.write(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
         for name in column_names.iter(){
-            self.data.insert(name.clone(), AHashMap::new());
+            data.insert(name.clone(), AHashMap::new());
         }
         for row in rows{
             let row_id = row.0;
@@ -146,22 +58,26 @@ impl IndexTree{
                     None => {continue}
                 };
                 let group = self.get_group(cell);
-                let column_map = self.data.get_mut(column).unwrap();
+                let column_map = data.get_mut(column).unwrap();
                 column_map
                     .entry(group)
                     .or_insert_with(BTreeSet::new)
                     .insert(IndexSizes::proper(row_id));
             }
         }
+        Ok(())
     }
-    pub fn get_all_in_group(&self, column : &String,t : Token) -> Result<Option<&BTreeSet<IndexSizes>>,Error>{
-        if let Some(list) = self.data.get(column){
+    pub fn get_all_in_group(&self, column : &String,t : Token) -> Result<Option<BTreeSet<IndexSizes>>,Error>{
+        let data = if let Ok(a) = self.data.read(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
+        if let Some(list) = data.get(column){
             match t{
                 Token::String(str) => {
                     let g = self.get_group(&AlbaTypes::MediumString(str));
                     match list.get(&g){
                         Some(a) => {
-                            return Ok(Some(a))
+                            return Ok(Some(a.clone()))
                         },
                         None => {
                             return Ok(None)
@@ -172,7 +88,7 @@ impl IndexTree{
                     let g = self.get_group(&&AlbaTypes::Bigint(num));
                     match list.get(&g){
                         Some(a) => {
-                            return Ok(Some(a))
+                            return Ok(Some(a.clone()))
                         },
                         None => {
                             return Ok(None)
@@ -183,7 +99,7 @@ impl IndexTree{
                     let g = self.get_group(&&AlbaTypes::Float(float));
                     match list.get(&g){
                         Some(a) => {
-                            return Ok(Some(a))
+                            return Ok(Some(a.clone()))
                         },
                         None => {
                             return Ok(None)
@@ -194,7 +110,7 @@ impl IndexTree{
                     let g = self.get_group(&&AlbaTypes::Bool(eirdrghpirjgamjgoiuejg));
                     match list.get(&g){
                         Some(a) => {
-                            return Ok(Some(a))
+                            return Ok(Some(a.clone()))
                         },
                         None => {
                             return Ok(None)
@@ -209,7 +125,10 @@ impl IndexTree{
         Err(gerr("normalize"))
     }
     pub fn get_most_in_group_raising(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<IndexSizes>>>,Error>{
-        if let Some(list) = self.data.get(column){
+        let data = if let Ok(a) = self.data.read(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
+        if let Some(list) = data.get(column){
             match t{
                 Token::String(str) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::MediumString(str));
@@ -259,7 +178,10 @@ impl IndexTree{
         Err(gerr("normalize"))
     }
     pub fn get_most_in_group_lowering(&self, column : &String,t : Token) -> Result<Option<BTreeSet<BTreeSet<IndexSizes>>>,Error>{
-        if let Some(list) = self.data.get(column){
+        let data = if let Ok(a) = self.data.read(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
+        if let Some(list) = data.get(column){
             match t{
                 Token::String(str) => {
                     let bruhafjiahfasojf: usize = self.get_group(&AlbaTypes::MediumString(str));
@@ -310,9 +232,9 @@ impl IndexTree{
     }
     pub fn get_group(&self,cell : &AlbaTypes) -> usize{
         match cell{
-            AlbaTypes::Int(n)  => index_number(*n as f64),
-            AlbaTypes::Bigint(n) => index_number(*n as f64),
-            AlbaTypes::Float(n) => index_number(*n as f64),
+            AlbaTypes::Int(n)  => index_number(*n as usize),
+            AlbaTypes::Bigint(n) => index_number(*n as usize),
+            AlbaTypes::Float(n) => index_number(*n as usize),
             AlbaTypes::Bool(b) => index_boolean(b),
             AlbaTypes::Char(c) => text_magnitude(c),
             AlbaTypes::NanoString(s)|AlbaTypes::SmallString(s)|AlbaTypes::MediumString(s)|AlbaTypes::BigString(s)
@@ -324,5 +246,34 @@ impl IndexTree{
             AlbaTypes::LargeBytes(blob) => index_bytes(blob),
             AlbaTypes::NONE => 0,
         }
+    }
+    pub fn kaboom_indexes_out(&mut self,indexes : AHashSet<usize>) -> Result<(), Error>{
+        let mut data = if let Ok(a) = self.data.write(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
+        for j in data.iter_mut(){
+            for i in j.1{
+                for a in &indexes{
+                    i.1.remove(&IndexSizes::proper(*a));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn clear(&mut self) -> Result<(),Error>{
+        let mut data = if let Ok(a) = self.data.write(){a}else{
+            return Err(gerr("failed to get index tree"))
+        };
+        data.clear();
+        Ok(())
+    }
+    pub fn edit(&mut self,data : (Vec<String>,Vec<(usize,Vec<AlbaTypes>)>)) -> Result<(), Error>{
+        let mut ind = AHashSet::new();
+        for i in data.1.iter(){
+            ind.insert(i.0);
+        }
+        self.kaboom_indexes_out(ind)?;
+        self.insert_gently(data.0, data.1);
+        Ok(())
     }
 }

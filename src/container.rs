@@ -4,7 +4,7 @@ use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions, STRIX}, gerr, index_tree::{IndexSizes, IndexTree}, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
+use crate::{database::{write_data, QueryConditions, WrittingQuery, STRIX}, gerr, index_sizes::{self, IndexSizes}, index_tree::{self, IndexTree}, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -151,7 +151,7 @@ impl Container{
         self.headers.keys().cloned().collect()
     }
     async fn load_indexing(&mut self) -> Result<(),Error>{
-        self.indexes.data.clear();
+        self.indexes.clear()?;
         let row_length = self.arrlen().await?;
         if row_length == 0{
             return Ok(())
@@ -597,6 +597,55 @@ impl Container{
         Ok(result)
     }
     
+    pub async fn heavy_get_spread_rows(&mut self, index: &mut BTreeSet<IndexSizes>) -> Result<WrittingQuery, Error> {
+        let maxl = if self.len().await? > self.headers_offset {
+            (self.len().await? - self.headers_offset) / self.element_size as u64
+        } else {
+            0
+        };
+        let mut buffers : BTreeMap<IndexSizes,Vec<u8>> = BTreeMap::new();
+        let mut result : WrittingQuery = BTreeMap::new();
+        let mvcc = self.mvcc.read().await;
+        for i in index.iter(){
+            if let Some(g) = mvcc.0.get(&(IndexSizes::to_usize(*i) as u64)){
+                if !g.0||*i > IndexSizes::U64(maxl){
+                    result.insert(*i,g.1.clone());
+                    continue;
+                }
+            }
+            buffers.insert(*i ,vec![0u8;self.element_size]);
+        }
+        drop(mvcc);
+        let element_size = IndexSizes::Usize(self.element_size);
+        let header_offset = IndexSizes::Usize(self.headers_offset as usize);
+        let mut it = buffers.iter_mut();
+        while let Some(b) = it.next(){
+            
+            if let Some(c) = it.next(){
+                if (*c.0-*b.0) < IndexSizes::U64(10){
+                    let buff_size = (*c.0 - *b.0 + IndexSizes::U64(1)) * element_size ;
+                    let mut buff = vec![0u8;buff_size.as_usize()];
+                    self.file.read_exact_at(&mut buff, (b.0.as_u64()*element_size.as_u64())+self.headers_offset)?;
+                    *b.1 = buff[0..self.element_size].to_vec();
+                    let c_off = ((*c.0-*b.0)*element_size).as_usize() ;
+                    *c.1 = buff[c_off..(c_off+self.element_size)].to_vec();
+                    result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
+                    result.insert(c.0.to_owned(),self.deserialize_row(c.1.to_vec()).await?);
+                    continue;
+                }else{
+                    self.file.read_exact_at(b.1, (b.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
+                    self.file.read_exact_at(c.1, (c.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
+                    result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
+                    result.insert(c.0.to_owned(),self.deserialize_row(c.1.to_vec()).await?);
+
+                    continue;
+                }
+            }
+            self.file.read_exact_at(b.1, (b.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
+            result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
+        }
+        Ok(result)
+    }
     
     pub fn columns(&self) -> Vec<&AlbaTypes>{
         self.headers.values().by_ref().collect()

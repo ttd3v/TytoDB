@@ -3,6 +3,7 @@ mod database;
 mod container;
 mod parser;
 mod index_tree;
+mod index_sizes;
 mod strix;
 use std::io::{Error,ErrorKind};
 use tokio;
@@ -13,6 +14,7 @@ use lexer_functions::{
 pub mod better_logs;
 
 fn lexer(input: String) -> Result<Vec<Token>, Error> {
+    println!("lex: {}",input);
     if input.is_empty() {
         return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()));
     }
