@@ -1,14 +1,13 @@
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc, thread};
+use std::{collections::{BTreeMap, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc};
 use ahash::{AHashMap, AHashSet};
 use base64::{alphabet, engine, Engine};
-use futures::{StreamExt, TryStreamExt};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
 use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
-use tokio::{net::{TcpListener, TcpStream}, sync::{OnceCell,RwLock}};
+use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
 use std::time::Instant;
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
@@ -275,6 +274,11 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
         } else {
             return Err(gerr("Invalid type for operator"));
         };
+        let crazy_config = engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_encode_padding(true)
+        .with_decode_padding_mode(engine::DecodePaddingMode::Indifferent);
+        let eng = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/").unwrap(), crazy_config);
 
         let result = match (first, &b.2) {
             (AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
@@ -342,6 +346,21 @@ fn condition_checker(row: &Vec<AlbaTypes>, col_names: &Vec<String>, conditions: 
                     _ => return Err(gerr(&format!("Invalid operator '{}' for float comparison", operator)))
                 }
             },
+            (AlbaTypes::NanoBytes(b)|AlbaTypes::SmallBytes(b)|AlbaTypes::MediumBytes(b)|AlbaTypes::BigSBytes(b)|AlbaTypes::LargeBytes(b),Token::String(s)) => {
+                let b1 = match eng.decode(s){
+                    Ok(a) => a,
+                    Err(e) => {
+                        logerr!("{}",e);
+                        continue;
+                    }
+                };
+                match operator.as_str() {
+                    "=" | "==" => b == b1,
+                    "!=" | "<>" => b != b1,
+                    _ => return Err(gerr(&format!("Invalid operator '{}' for string comparison", operator)))
+                }
+
+            }
             (AlbaTypes::NONE, _) => return Err(gerr("Cannot compare NULL values")),
             _ => return Err(gerr("Type mismatch in condition")),
         };
@@ -1011,7 +1030,7 @@ pub async fn connect() -> Result<Database, Error>{
     return Ok(db)
 }
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 async fn handle_connections_tcp_inner(payload : Vec<u8>,dbref: Arc<RwLock<Database>>) -> Vec<u8>{
     let mut secret_key_hash : [u8;32] = [0u8;32];

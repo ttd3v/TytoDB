@@ -141,9 +141,7 @@ impl New for Container {
     }
     
 }
-/*
-    TODO: INDEX LOADING
-*/
+
 
 const INDEXING_CHUNK_SIZE : u64 = 50;
 impl Container{

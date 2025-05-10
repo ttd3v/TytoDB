@@ -610,28 +610,46 @@ const RADIX : u32= 10;
 pub fn lexer_number_match<T:Iterator<Item = char>>(result : &mut Vec<Token>,dough : &mut String, itr : &mut std::iter::Peekable<T>) -> bool{
     if let Some(d) = dough.chars().nth(0){
         let mut had_dot = false;
-        if d.is_digit(RADIX){
+        let mut negative = false;
+        if d.is_digit(RADIX) || d == '-'{
+            if d == '-'{
+                negative = true;
+            }
+            let mut cn : u8 = 0;
             while let Some(n) = itr.next(){
                 if n.is_digit(RADIX){
                     dough.push(n.clone());
                 }else{
                     if n == '.' && !had_dot{
                         dough.push(n.clone());
-                        had_dot = true
-                    }else{
-                        break;
+                        had_dot = true;
+                        continue;
                     }
+                    if n == 'e' && cn == 0{
+                        cn = 1;
+                        dough.push(n.clone());
+                        continue
+                    }
+                    if (n == '-' || n == '+') && cn == 1{
+                        cn = 2;
+                        dough.push(n.clone());
+                        continue;
+                    }
+                    break;
                 }
+            }
+            if cn == 2 && (dough.ends_with("e+")||dough.ends_with("e-")){
+                return false
             }
             if had_dot{
                 if let Ok(float) = dough.parse::<f64>(){
-                    result.push(Token::Float(float));
+                    result.push(Token::Float(if negative {float*-1.0}else{float}));
                     dough.clear();
                     return true
                 }
             }else{
                 if let Ok(int) = dough.parse::<i64>(){
-                    result.push(Token::Int(int));
+                    result.push(Token::Int(if negative {int*-1}else{int}));
                     dough.clear();
                     return true
                 }

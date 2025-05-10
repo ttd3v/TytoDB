@@ -394,6 +394,142 @@ fn debug_search(tokens: &Vec<Token>) -> Result<AST, Error> {
     }))
 }
 
+fn debug_delete(tokens : &Vec<Token>) -> Result<AST,Error>{
+    if let Some(t) = tokens.get(0){
+        if let Token::Keyword(s) = t{
+            if s.to_lowercase() != "delete".to_string(){
+                return Err(gerr("Invalid keyword, expected \"DELETE\"."))
+            }
+        }else{
+            return Err(gerr("Invalid token, expected Keyword(\"DELETE\")."))
+        }
+    }else{
+        return Err(gerr("Missing tokens"))
+    }
+    let mut path = false;
+    if let Some(t) = tokens.get(1){
+        if let Token::Keyword(s) = t{
+            match s.to_lowercase().as_str(){
+                "row" => {path = true;},
+                "container" => {path = false;},
+                _ => {return Err(gerr("Invalid keyword, expected \"ROW\" or \"CONTAINER\""))}
+            };
+        }
+    }else{
+        return Err(gerr("Missing tokens"))
+    }
+    if !path{
+        if let Some(t) = tokens.get(2){
+            if let Token::String(s) = t{
+                return Ok(AST::DeleteContainer(crate::AstDeleteContainer { container: s.to_string() }))
+            }else{
+                return Err(gerr("Missing container name"))
+            }
+        }else{
+            return Err(gerr("Missing container name"))
+        }
+    }else{
+        if let Some(t) = tokens.get(2){
+            if let Token::Keyword(s) = t{
+                if s.to_lowercase() != "on".to_string(){
+                    return Err(gerr("Invalid keyword, expected \"ON\"."))
+                }
+            }else{
+                return Err(gerr("Missing token, expected Keyword(\"ON\")."))
+            }
+        }else{
+            return Err(gerr("Missing tokens"))
+        }
+        let mut container : String = String::new();
+        let mut conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>) =
+        (Vec::with_capacity(10), Vec::with_capacity(10));
+        if let Some(t) = tokens.get(3){
+            if let Token::String(s) = t{
+                container = s.to_string();
+            }else{
+                drop(container);
+                return Err(gerr("Missing container name"))
+            }
+        }else{
+            return Err(gerr("Missing container name"))
+        }
+
+        if let Some(tok) = tokens.get(4) {
+            if match tok {
+                Token::Keyword(a) if a.to_uppercase() == "WHERE" => false,
+                _ => true,
+            } {
+                return Err(gerr(r#"Expected keyword "WHERE" at position 4"#));
+            }
+
+            if let Some(iterator_of_tokens) = tokens.get(5..) {
+                let mut bushes: Vec<Token> = Vec::new();
+
+                for i in iterator_of_tokens {
+                    if bushes.len() == 3 {
+                        conditions.0.push((
+                            get_from_bushes_with_safety(&bushes, 0)?,
+                            get_from_bushes_with_safety(&bushes, 1)?,
+                            get_from_bushes_with_safety(&bushes, 2)?,
+                        ));
+                        bushes.clear();
+
+                        conditions.1.push((
+                            conditions.0.len() - 1,
+                            match i {
+                                Token::Keyword(a) => match a.to_uppercase().as_str() {
+                                    "OR" => 'o',
+                                    "AND" => 'a',
+                                    _ => {
+                                        return Err(gerr(
+                                            "Expected logical operator 'AND' or 'OR' after a condition",
+                                        ))
+                                    }
+                                },
+                                _ => return Err(gerr("Expected logical operator after condition")),
+                            },
+                        ));
+                        continue;
+                    }
+
+                    match i {
+                        Token::String(_) => match bushes.len() {
+                            0 | 2 => bushes.push(i.clone()),
+                            _ => return Err(gerr("Unexpected string: operator might be missing")),
+                        },
+                        Token::Bool(_) | Token::Int(_) | Token::Float(_) => {
+                            if bushes.len() == 2 {
+                                bushes.push(i.clone())
+                            } else {
+                                return Err(gerr("Unexpected value: condition must follow 'column OP value' pattern"));
+                            }
+                        }
+                        Token::Operator(_) => {
+                            if bushes.len() == 1 {
+                                bushes.push(i.clone());
+                            } else {
+                                return Err(gerr("Unexpected operator: check condition structure"));
+                            }
+                        }
+                        _ => return Err(gerr("Unexpected token in WHERE clause")),
+                    }
+                }
+
+                if bushes.len() == 3 {
+                    conditions.0.push((
+                        get_from_bushes_with_safety(&bushes, 0)?,
+                        get_from_bushes_with_safety(&bushes, 1)?,
+                        get_from_bushes_with_safety(&bushes, 2)?,
+                    ));
+                }
+            }
+        }
+
+        return Ok(AST::DeleteRow(crate::AstDeleteRow { container, conditions: Some(conditions) }))
+    }
+    
+}
+
 fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
     let first = tokens.first().ok_or_else(|| gerr("Token list is empty"))?;
     if let Token::Keyword(command) = first {
@@ -402,6 +538,7 @@ fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
             "EDIT" => debug_edit_command(tokens),
             "SEARCH" => debug_search(tokens),
             "COMMIT"|"ROLLBACK" => debug_finishers_command(tokens),
+            "DELETE" => debug_delete(tokens),
             "QYCNPVS" => debug_qycnpvs(tokens),
             "QYCNNXT" => debug_qycnnxt(tokens),
             "QYCNEXT" => debug_qycnext(tokens),

@@ -33,8 +33,8 @@ fn lexer(input: String) -> Result<Vec<Token>, Error> {
         lexer_subcommand_match(&mut result, &mut dough, &mut characters)?;
         lexer_group_match(&mut result, &mut dough, &mut characters);
         lexer_boolean_match(&mut result, &mut dough, &mut characters);
-        lexer_operator_match(&mut result, &mut dough, &mut characters);
         lexer_number_match(&mut result, &mut dough, &mut characters);
+        lexer_operator_match(&mut result, &mut dough, &mut characters);
         lexer_string_match(&mut result, &mut dough, &mut characters);
     }
 
