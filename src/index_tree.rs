@@ -273,7 +273,7 @@ impl IndexTree{
             ind.insert(i.0);
         }
         self.kaboom_indexes_out(ind)?;
-        self.insert_gently(data.0, data.1);
+        let _ = self.insert_gently(data.0, data.1)?;
         Ok(())
     }
 }

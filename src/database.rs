@@ -4,11 +4,11 @@ use base64::{alphabet, engine, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::{TcpListener, TcpStream}, sync::{OnceCell,RwLock}};
-
+use std::time::Instant;
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
@@ -435,7 +435,7 @@ impl Database{
     pub async fn query(&mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
         let mut query: Query = self.query_diver(&col_names, &containers, &conditions).await?;
         query.load_rows(self).await?;
-        println!("{:?}",query);
+        loginfo!("{:?}",query);
         return Ok(query)
     }
     fn set_default_settings(&self) -> Result<(), Error> {
@@ -490,7 +490,7 @@ impl Database{
                 }
             }
         }
-        println!("headers: {:?}",self.headers);
+        loginfo!("headers: {:?}",self.headers);
         Ok(())
     }
     fn save_containers(&self) -> Result<(), Error> {
@@ -514,7 +514,7 @@ impl Database{
     }
     pub async fn setup(&self) -> Result<(),Error>{
         if !std::fs::exists(&database_path())?{
-            println!("database folder created");
+            loginfo!("database folder created");
             std::fs::create_dir(&database_path())?;
         }
         return Ok(())
@@ -527,11 +527,11 @@ impl Database{
             fs::remove_dir(&path)?;
         }
         if !path.is_file() {
-            println!("not file");
+            loginfo!("not file");
             self.set_default_settings()?; 
         }
         let mut rewrite = true;
-        println!("settings-file-path: {}",path.display());
+        loginfo!("settings-file-path: {}",path.display());
         let raw = fs::read_to_string(&path)
             .map_err(|e| Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e)))?;
         let mut settings: Settings = serde_yaml::from_str(&raw)
@@ -633,11 +633,11 @@ impl Database{
         let max_columns : usize = self.settings.max_columns as usize;
         match ast{
             AST::CreateContainer(structure) => {
-            println!("Started to create container!");
+            loginfo!("Started to create container!");
               if !match fs::exists(format!("{}/{}",self.location,structure.name)) {Ok(a)=>a,Err(bruh)=>{return Err(bruh)}}{
                 let cn_len = structure.col_nam.len();
                 let cv_len = structure.col_val.len();
-                println!("No container with the entered name");
+                loginfo!("No container with the entered name");
 
                 if cn_len != cv_len{
                     return Err(gerr(&format!("Mismatch in CREATE CONTAINER: provided {} column names but {} column types", cn_len, cv_len)))
@@ -666,7 +666,7 @@ impl Database{
                 for (num, v) in structure.col_val.iter().enumerate().take(max_columns) {
                     column_val_headers[num] = v.clone();
                 }
-                println!("Finished processing container headers!");
+                loginfo!("Finished processing container headers!");
                 
                 let mut column_name_bytes: Vec<Vec<u8>> = vec![vec![0u8; MAX_STR_LEN]; max_columns];
                 let mut column_val_bytes: Vec<u8> = vec![0u8; max_columns];
@@ -681,15 +681,15 @@ impl Database{
                 for (i, item) in column_val_headers.iter().enumerate(){
                     column_val_bytes[i] = item.get_id()
                 }
-                println!("Finished computing the container header bytes!");
+                loginfo!("Finished computing the container header bytes!");
 
                 if let Err(e) = check_for_reference_folder(&self.location){
                     return Err(e)
                 }
-                println!("Creating container file");
+                loginfo!("Creating container file");
                 let mut file = match tokio::fs::File::create(format!("{}/{}",self.location,structure.name)).await{
                     Ok(f)=>{
-                        println!("Container file created!");f}
+                        loginfo!("Container file created!");f}
                     ,Err(e)=>{return Err(e)}
                 };
 
@@ -701,15 +701,15 @@ impl Database{
                     flattened.push(*arr);
                 }
 
-                println!("Writting container headers...");
+                loginfo!("Writting container headers...");
                 match file.write_all(&flattened).await {
                     Ok(_) => {},
                     Err(e) => {
                         return Err(e)
                     }
                 };
-                println!("Container data written!");
-                println!("Creating container reference...");
+                loginfo!("Container data written!");
+                loginfo!("Creating container reference...");
                 self.containers.push(structure.name.clone());
                 let mut element_size : usize = 0;
                 for el in column_val_headers.iter(){
@@ -720,7 +720,7 @@ impl Database{
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
                 self.headers.shrink_to_fit();
-                println!("Container reference has been created!");
+                loginfo!("Container reference has been created!");
                 return Ok(Query::new_none(Vec::new()))
             }else{
                 return Err(gerr("A container with the specified name already exists"))
@@ -960,8 +960,12 @@ impl Database{
         Ok(Query::new_none(Vec::new()))
     }
     pub async fn execute(&mut self,input : &str,arguments : Vec<String>) -> Result<Query, Error>{
+        
+        let start = Instant::now();
         let ast = parse(input.to_owned(),arguments)?;
-        Ok(self.run(ast).await?)
+        let result = self.run(ast).await?;
+        loginfo!("Performance: {}",start.elapsed().as_millis());
+        Ok(result)
     }  
 }
 
@@ -975,7 +979,7 @@ pub async fn connect() -> Result<Database, Error>{
     };
 
     let db_path = PathBuf::from(path);
-    println!("{}",path);
+    loginfo!("{}",path);
     if db_path.exists() {
         if !db_path.is_dir() {
             return Err(Error::new(
@@ -1000,7 +1004,7 @@ pub async fn connect() -> Result<Database, Error>{
         logerr!("err: load_containers");
         return Err(e)
     };
-    println!("{:?}",db.settings);
+    loginfo!("{:?}",db.settings);
     return Ok(db)
 }
 
@@ -1026,8 +1030,8 @@ async fn handle_connections_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<
     let mut buffer : Vec<u8> = Vec::new();
     let session_id = secret_key.clone();
     let hash = blake3::hash(&session_id).as_bytes().clone();
-    let _ = session_secret_rel.write().await.insert(hash.clone(), session_id.clone());
     let key = Key::<Aes256Gcm>::from_slice(secret_key.as_slice());
+    let _ = session_secret_rel.write().await.insert(hash.clone(), session_id.clone());
     cipher_map.write().await.insert(hash.clone(),Aes256Gcm::new(key));
 
     if let Ok(a) = encrypt(&session_id, &secret_key_hash).await{
@@ -1038,20 +1042,44 @@ async fn handle_connections_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<
     }
     
 
-    println!("authenticated successfully\nlen:{}",buffer.len());
+    loginfo!("authenticated successfully\nlen:{}",buffer.len());
     let _ = socket.write_all(&mut buffer).await;
-    let _ = socket.shutdown().await;
+    // let _ = socket.shutdown().await;
 
 }
 
-async fn handle_connections_tcp(listener : &TcpListener,ardb : Arc<RwLock<Database>>){
-    let (mut socket, addr) = listener.accept().await.unwrap();
-    println!("Accepted connection from: {}", addr);
+async fn handle_connections_tcp_sync(listener : &TcpListener,ardb : Arc<RwLock<Database>>){
+    let (mut socket, addr) = match listener.accept().await{
+        Ok(a) => a,
+        Err(e) => {
+            logerr!("{}",e);
+            return
+        }
+    };
+    loginfo!("Accepted connection from: {}", addr);
     handle_connections_tcp_inner(&mut socket, ardb).await;
-    if let Err(e) = socket.shutdown().await{
-        logerr!("{}",e);
-    }
+    // if let Err(e) = socket.shutdown().await{
+    //     logerr!("{}",e);
+    // }
 }
+async fn handle_connections_tcp_parallel(listener : &TcpListener,ardb : Arc<RwLock<Database>>){
+    let (mut socket, addr) = match listener.accept().await{
+        Ok(a) => a,
+        Err(e) => {
+            logerr!("{}",e);
+            return
+        }
+    };
+    loginfo!("Accepted connection from: {}", addr);
+    tokio::task::spawn(async move {
+        handle_connections_tcp_inner(&mut socket, ardb).await;
+    });
+    
+    // if let Err(e) = socket.shutdown().await{
+    //     logerr!("{}",e);
+    // }
+}
+
 
 use aes_gcm::{aead::{Aead, KeyInit, OsRng}, aes::cipher::{self}, AeadCore, Key};
 use aes_gcm::Aes256Gcm;
@@ -1059,11 +1087,11 @@ use lzma::{compress as lzma_compress,decompress as lzma_decompress};
 
 lazy_static!{
     static ref cipher_map : Arc<RwLock<AHashMap<[u8;32],aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>>>>> = Arc::new(RwLock::new(AHashMap::new()));
-    static ref session_secret_rel : Arc<RwLock<AHashMap<[u8;32],Vec<u8>>>> = Arc::new(RwLock::new(AHashMap::new()));
+    static ref session_secret_rel : Arc<RwLock<AHashMap<[u8;32],Vec<u8>>>> = Arc::new(RwLock::new(AHashMap::new())); 
 }
 
 async fn encrypt(content : &[u8],secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
-    let cm = cipher_map.write().await;
+    let cm = cipher_map.read().await;
     let cipher: &aes_gcm::AesGcm<aes_gcm::aes::Aes256, cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UInt<cipher::typenum::UTerm, cipher::consts::B1>, cipher::consts::B1>, cipher::consts::B0>, cipher::consts::B0>> = 
     if let Some(a) = cm.get(secret_key){
         a
@@ -1072,7 +1100,7 @@ async fn encrypt(content : &[u8],secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
     };
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng); 
     let mut result : Vec<u8> = Vec::new();
-    println!("nonce_len:{}",nonce.len());
+    loginfo!("nonce_len:{}",nonce.len());
     result.extend_from_slice(&nonce.to_vec());
     result.extend_from_slice(&cipher.encrypt(&nonce, content.as_ref()).unwrap());
     Ok(result)
@@ -1136,51 +1164,39 @@ impl TytoDBResponse {
 
 async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Database>>){
     
-    println!("reading data...");
-
+    loginfo!("reading data...");
     let mut size_buff = [0u8;4];
     if let Err(e) = socket.read_exact(&mut size_buff).await{
         logerr!("{}",e);
         return
     };
     let size =  u32::from_be_bytes(size_buff);
-    println!("size: {}",size);
-    let mut buffer = vec![0u8;32];
-    if let Err(e) = socket.read_exact(&mut buffer).await{
+    loginfo!("size: {}",size);
+    let mut raw_buffer  = vec![0u8;size as usize];
+    if let Err(e) = socket.read_exact(&mut raw_buffer).await{
         logerr!("{}",e);
+        let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
+        
         return
     };
+    let mut session_id : [u8;32] = [0u8;32];
+    session_id.clone_from_slice(&raw_buffer[..32]);
 
 
-    if buffer.len() < 32 {
-        logerr!("Received data is too short: {} bytes", buffer.len());
-        let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
-        return;
-    }
-    println!("Locking database...");
-    let mut db = dbref.write().await;
-    println!("Database locked!");
-    println!("buffer: {:?}",buffer);
-    let mut session_id: [u8;32] = [0u8;32];
-    session_id.clone_from_slice(&buffer[..32]);
     let ssr = session_secret_rel.read().await;
-
-
+    let mut db = dbref.write().await;
     let mut payload: Vec<u8> = Vec::new();
+    payload.extend_from_slice(&raw_buffer[32..]);
     if let Some(_) = ssr.get(&session_id) {
         
         if size <= 0{
             logerr!("the payload is too short | size :{}",size);
             let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
+            
             return
         }
-        let mut cipher_payload = vec![0u8;size as usize];
-        if let Err(e) = socket.read_exact(&mut cipher_payload).await{
-            logerr!("{}",e);
-            let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
-            return
-        };
-        let res = decrypt(&cipher_payload, &session_id).await;
+        
+        let res = decrypt(&payload, &session_id).await;
        
         match  res{
             Ok(k) => {
@@ -1189,7 +1205,8 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
                     Ok(a) => a,
                     Err(e) => {
                         logerr!("Failed to decompress payload with session secret: {}", e);
-                        let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+                        let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
+                        
                         return;
                     }
                 };
@@ -1197,7 +1214,8 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
             Err(_) => {
                 logerr!("Decryption failed with session secret for session_id: {:?}", session_id);
                 logerr!("Decryption failed with all available secret keys");
-                let _ = socket.write_all(&(0 as usize).to_be_bytes()).await;
+                let _ = socket.write_all(&(0 as u64).to_be_bytes()).await;
+                
                 return;
             }
         }
@@ -1257,7 +1275,7 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
                         let size = b.len() as u64;
                         response.extend_from_slice(&size.to_be_bytes());
                         response.extend_from_slice(&b);
-                        println!("payload: {:?}",b);
+                        loginfo!("payload: {:?}",b);
                     }else{
                         if let Ok(b) = (TytoDBResponse{
                             content:e.to_string(),
@@ -1304,7 +1322,7 @@ async fn handle_data_tcp_inner(socket : &mut TcpStream,dbref: Arc<RwLock<Databas
     }
 }
 
-async fn handle_data_tcp(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) {
+async fn handle_data_tcp_parallel(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) {
         let (mut socket, addr) = match listener.accept().await {
             Ok((socket, addr)) => (socket, addr),
             Err(e) => {
@@ -1312,7 +1330,7 @@ async fn handle_data_tcp(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) 
                 return;
             }
         };
-        println!("Accepted connection from: {}", addr);
+        loginfo!("Accepted connection from: {}", addr);
         // if parallel{
         //     tokio::spawn(async move {
         //         handle_data_tcp_inner(&mut socket, arc_db).await
@@ -1320,14 +1338,39 @@ async fn handle_data_tcp(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) 
         // }else{
         //     handle_data_tcp_inner(&mut socket, arc_db).await
         // }
-        handle_data_tcp_inner(&mut socket, arc_db).await;
-        if let Err(e) = socket.shutdown().await{
-            logerr!("{}",e);
-        };
+        tokio::task::spawn(async move {
+            handle_data_tcp_inner(&mut socket, arc_db).await;
+        });
+        // if let Err(e) = socket.shutdown().await{
+        //     logerr!("{}",e);
+        // };
         
     
 }
 
+async fn handle_data_tcp_sync(listener: &TcpListener, arc_db: Arc<RwLock<Database>>) {
+    let (mut socket, addr) = match listener.accept().await {
+        Ok((socket, addr)) => (socket, addr),
+        Err(e) => {
+            logerr!("Failed to accept connection: {}", e);
+            return;
+        }
+    };
+    loginfo!("Accepted connection from: {}", addr);
+    // if parallel{
+    //     tokio::spawn(async move {
+    //         handle_data_tcp_inner(&mut socket, arc_db).await
+    //     }); 
+    // }else{
+    //     handle_data_tcp_inner(&mut socket, arc_db).await
+    // }
+    handle_data_tcp_inner(&mut socket, arc_db).await;
+    // if let Err(e) = socket.shutdown().await{
+    //     logerr!("{}",e);
+    // };
+    
+
+}
 
 
 impl Database{
@@ -1391,31 +1434,24 @@ impl Database{
         let parallel = if let RequestHandling::Asynchronous = settings.request_handling{true}else{false};
         let connection_tcp_url = format!("{}:{}",settings.ip,settings.connections_port);
         let data_tcp_url = format!("{}:{}",settings.ip,settings.data_port);
-        println!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
-        println!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
+        loginfo!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
+        loginfo!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
         let connections_tcp: Arc<TcpListener> = Arc::new(TcpListener::bind(connection_tcp_url).await.unwrap());
         let data_tcp: Arc<TcpListener> = Arc::new(TcpListener::bind(data_tcp_url).await.unwrap());
         let mtx_db = Arc::new(RwLock::new(self));
         
         if parallel{
-            let c0 = mtx_db.clone();
-            let c1 = mtx_db.clone();
-            tokio::spawn(async move {            
-                loop{handle_connections_tcp(&connections_tcp,c0.clone()).await}
-            });
-            tokio::spawn(async move {
-                loop {
-                    handle_data_tcp(&data_tcp,c1.clone()).await;
-                }
-            });
+            loop {
+                handle_connections_tcp_parallel(&connections_tcp,mtx_db.clone()).await;
+                handle_data_tcp_parallel(&data_tcp,mtx_db.clone()).await;
+            }
         }else{
             loop {
                 
-                handle_connections_tcp(&connections_tcp,mtx_db.clone()).await;
-                handle_data_tcp(&data_tcp,mtx_db.clone()).await;
+                handle_connections_tcp_sync(&connections_tcp,mtx_db.clone()).await;
+                handle_data_tcp_sync(&data_tcp,mtx_db.clone()).await;
             }
         }
-        Ok(())
         
     }
 }

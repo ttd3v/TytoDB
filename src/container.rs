@@ -170,7 +170,7 @@ impl Container{
                 rows.push((i.0*self.element_size,i.1.to_owned()));
             }
             
-            self.indexes.insert_gently(self.column_names(), rows);
+            let _ = self.indexes.insert_gently(self.column_names(), rows)?;
             cursor = end_index;
         }
         Ok(())
@@ -617,7 +617,6 @@ impl Container{
         }
         drop(mvcc);
         let element_size = IndexSizes::Usize(self.element_size);
-        let header_offset = IndexSizes::Usize(self.headers_offset as usize);
         let mut it = buffers.iter_mut();
         while let Some(b) = it.next(){
             
