@@ -14,7 +14,6 @@ use lexer_functions::{
 pub mod better_logs;
 
 fn lexer(input: String) -> Result<Vec<Token>, Error> {
-    println!("lex: {}",input);
     if input.is_empty() {
         return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()));
     }

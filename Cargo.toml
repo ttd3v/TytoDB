@@ -7,6 +7,8 @@ license = "MIT"
 [build-dependencies]
 cc = "1.0"
 
+[profile.release]
+debug = true
 
 [dependencies]
 rand = "0.8" # Use the latest compatible version
@@ -25,3 +27,11 @@ base64 = "0.22.1"
 ahash = "0.8.11"
 xxhash-rust = {version="0.8.15",features=["const_xxh3"]}
 chrono = "0.4.41"
+zmq = "0.10.0"
+num_cpus = "1.16.0"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+tracing-flame = "0.2.0"
+hyper = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }

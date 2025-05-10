@@ -541,7 +541,7 @@ pub fn lexer_group_match<T: Iterator<Item = char>>(
                 }
             }
         }
-        println!("{}",dough);
+        ////println!("{}",dough);
 
         if dough.ends_with(']') {
             let inner = &dough[1..dough.len() - 1];
@@ -593,7 +593,7 @@ pub fn lexer_subcommand_match<T: Iterator<Item = char>>(
                 break;
             }
         }
-        println!("{}",dough);
+        ////println!("{}",dough);
 
         if dough.ends_with(')') {
             let inner = &dough.clone()[1..dough.len() - 1];

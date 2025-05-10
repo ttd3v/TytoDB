@@ -150,7 +150,7 @@ impl Container{
     pub fn column_names(&self) -> Vec<String>{
         self.headers.keys().cloned().collect()
     }
-    async fn load_indexing(&mut self) -> Result<(),Error>{
+    pub async fn load_indexing(&mut self) -> Result<(),Error>{
         self.indexes.clear()?;
         let row_length = self.arrlen().await?;
         if row_length == 0{
