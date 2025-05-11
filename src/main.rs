@@ -49,7 +49,7 @@ fn lexer(input: String) -> Result<Vec<Token>, Error> {
     }
 
     if !dough.trim().is_empty() {
-        return Err(Error::new(ErrorKind::InvalidInput, format!("Unexpected token '{}' at end of input. Expected a valid keyword, string, number, boolean, group, or operator.", dough)));
+        result.push(Token::String(dough))
     }
 
     if result.is_empty() {

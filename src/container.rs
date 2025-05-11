@@ -387,10 +387,7 @@ impl Container{
     pub async fn commit(&mut self) -> Result<(), Error> {
         let mut total = self.arrlen().await?;
         let mut virtual_ward : AHashMap<usize, DataReference> = AHashMap::new();
-        println!("commit: Locking MVCC...");
         let mut mvcc = self.mvcc.write().await;
-    
-        println!("commit: Separating insertions and deletions...");
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         let mut deletes: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         for (index, value) in mvcc.0.iter() {
@@ -402,17 +399,11 @@ impl Container{
             }
         }
         mvcc.0.clear();
-    
-        println!("commit: Sorting insertions and deletions...");
         insertions.sort_by_key(|(index, _)| *index);
         deletes.sort_by_key(|(index, _)| *index);
-    
-        println!("commit: Preparing for disk write...");
         let hdr_off = self.headers_offset;
         let row_sz = self.element_size as u64;
         let buf = vec![0u8; self.element_size];
-    
-        println!("commit: Writing insertions...");
         for (row_index, row_data) in insertions {
             let serialized = self.serialize_row(&row_data)?;
             let offset = hdr_off + row_index * row_sz;
@@ -422,7 +413,6 @@ impl Container{
         
         let mut graveyard = self.graveyard.write().await;
         for del in &deletes {
-            println!("{:?}",del);
             let from = hdr_off + del.0 * row_sz;
             self.file.write_all_at(&buf, from)?;
             virtual_ward.insert(from as usize, (const_xxh3::xxh3_64(&buf),buf.clone()));
@@ -459,11 +449,6 @@ impl Container{
 
         mvcc.1.clear();
         mvcc.1.shrink_to_fit();
-    
-        println!("commit: COMMIT SUCCESSFUL!");
-        println!("commit: Starting to sync...");
-                
-        println!("commit: Sync!");
         if let Some(s) = STRIX.get(){
             let mut l = s.write().await;
             l.wards.push(RwLock::new((std::fs::OpenOptions::new().read(true).write(true).open(&self.file_path)?,virtual_ward)));

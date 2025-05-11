@@ -1166,7 +1166,6 @@ struct TytoDBResponse{
 
 impl TytoDBResponse {
     async fn to_bytes(self,secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
-        println!("{}",self.content);
         let bytes = serde_json::to_vec(&self).unwrap();
         return if let Ok(a) = encrypt(&bytes, secret_key).await{
             Ok(a)

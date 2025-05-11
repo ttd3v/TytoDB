@@ -588,43 +588,63 @@ fn debug_finishers_command(tokens : &Vec<Token>) -> Result<AST,Error> {
 }
 
 
-pub fn parse(input : String,arguments_input : Vec<String>) -> Result<AST, Error>{
-    let mut arguments : Vec<Token> = Vec::with_capacity(arguments_input.len());
-    for i in arguments_input{
-        let toks = lexer(i)?;
-        if toks.len() > 1{
-            return Err(gerr("Invalid argument"))
+fn replace_arguments(token: Token, arg_iter: &mut impl Iterator<Item = Token>) -> Result<Token, Error> {
+    match token {
+        Token::Argument => {
+            arg_iter.next().ok_or_else(|| gerr("Not enough arguments"))
         }
-        if let Some(tttoks) = toks.first(){
-            match tttoks{
-                Token::Bool(a) => arguments.push(Token::Bool(*a)),
-                Token::Int(a) => arguments.push(Token::Int(*a)),
-                Token::Float(a) => arguments.push(Token::Float(*a)),
-                Token::String(a) => arguments.push(Token::String(a.to_string())),
-                _ => return Err(gerr("Invalid argument"))
-            }
+        Token::Group(tokens) => {
+            let new_tokens = tokens.into_iter()
+                .map(|t| replace_arguments(t, arg_iter))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Token::Group(new_tokens))
         }
+        Token::SubCommand(tokens) => {
+            let new_tokens = tokens.into_iter()
+                .map(|t| replace_arguments(t, arg_iter))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Token::SubCommand(new_tokens))
+        }
+        other => Ok(other),
     }
+}
 
-    let mut tokens: Vec<Token> = match lexer(input){
-        Ok(a) => {a},
-        Err(e) => {return Err(e)}
-    };
-    let mut arg_iter = arguments.iter();
-    for token in tokens.iter_mut() {
-        if *token == Token::Argument {
-            *token = match arg_iter.next(){
-                Some(arg) => arg.to_owned(),
-                None => {
-                    return Err(gerr("Not enough arguments"))
-                }
-            }
-        }
+// Replace arguments across the entire token list
+fn replace_arguments_in_tokens(tokens: Vec<Token>, arguments: &[Token]) -> Result<Vec<Token>, Error> {
+    let mut arg_iter = arguments.iter().cloned();
+    let mut new_tokens = Vec::with_capacity(tokens.len());
+
+    for token in tokens {
+        new_tokens.push(replace_arguments(token, &mut arg_iter)?);
     }
 
     if arg_iter.next().is_some() {
         return Err(gerr("Too many arguments"));
     }
-    drop(arguments);
-    return debug_tokens(&tokens)
+
+    Ok(new_tokens)
+}
+
+pub fn parse(input: String, arguments_input: Vec<String>) -> Result<AST, Error> {
+    let mut arguments: Vec<Token> = Vec::with_capacity(arguments_input.len());
+    for arg_str in arguments_input {
+        let toks = lexer(arg_str)?;
+        if toks.len() != 1 {
+            return Err(gerr("Each argument must lex into exactly one token"));
+        }
+        match &toks[0] {
+            Token::Bool(a) => arguments.push(Token::Bool(*a)),
+            Token::Int(a) => arguments.push(Token::Int(*a)),
+            Token::Float(a) => arguments.push(Token::Float(*a)),
+            Token::String(a) => arguments.push(Token::String(a.to_string())),
+            Token::Keyword(s) => arguments.push(Token::String(s.to_string())),
+            _ => return Err(gerr("Invalid argument type; expected Bool, Int, Float, or String")),
+        }
+    }
+
+    let tokens: Vec<Token> = lexer(input)?;
+
+    let tokens_with_args = replace_arguments_in_tokens(tokens, &arguments)?;
+
+    debug_tokens(&tokens_with_args)
 }
