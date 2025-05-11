@@ -429,7 +429,7 @@ fn debug_delete(tokens : &Vec<Token>) -> Result<AST,Error>{
             return Err(gerr("Missing container name"))
         }
     }else{
-        if let Some(t) = tokens.get(2){
+        if let Some(t) = tokens.get(3){
             if let Token::Keyword(s) = t{
                 if s.to_lowercase() != "on".to_string(){
                     return Err(gerr("Invalid keyword, expected \"ON\"."))
@@ -443,7 +443,7 @@ fn debug_delete(tokens : &Vec<Token>) -> Result<AST,Error>{
         let mut container : String = String::new();
         let mut conditions: (Vec<(Token, Token, Token)>, Vec<(usize, char)>) =
         (Vec::with_capacity(10), Vec::with_capacity(10));
-        if let Some(t) = tokens.get(3){
+        if let Some(t) = tokens.get(4){
             if let Token::String(s) = t{
                 container = s.to_string();
             }else{
@@ -454,15 +454,15 @@ fn debug_delete(tokens : &Vec<Token>) -> Result<AST,Error>{
             return Err(gerr("Missing container name"))
         }
 
-        if let Some(tok) = tokens.get(4) {
+        if let Some(tok) = tokens.get(5) {
             if match tok {
                 Token::Keyword(a) if a.to_uppercase() == "WHERE" => false,
                 _ => true,
             } {
-                return Err(gerr(r#"Expected keyword "WHERE" at position 4"#));
+                return Err(gerr(r#"Expected keyword "WHERE" at position 5"#));
             }
 
-            if let Some(iterator_of_tokens) = tokens.get(5..) {
+            if let Some(iterator_of_tokens) = tokens.get(6..) {
                 let mut bushes: Vec<Token> = Vec::new();
 
                 for i in iterator_of_tokens {

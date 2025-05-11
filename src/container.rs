@@ -4,7 +4,7 @@ use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
 use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions, WrittingQuery, STRIX}, gerr, index_sizes::{self, IndexSizes}, index_tree::{self, IndexTree}, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
+use crate::{database::{write_data, QueryConditions, WrittingQuery, STRIX}, gerr, index_sizes::IndexSizes, index_tree::IndexTree, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;

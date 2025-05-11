@@ -1,14 +1,13 @@
-use std::{collections::{BTreeMap, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc};
+use std::{collections::{BTreeMap, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc};
 use ahash::{AHashMap, AHashSet};
 use base64::{alphabet, engine, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::{Container, New}, gerr, index_sizes::IndexSizes, lexer_functions::{AlbaTypes, Token}, logerr, parser::parse, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
-use std::time::Instant;
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
@@ -455,7 +454,7 @@ impl Database{
     pub async fn query(&mut self,col_names: Vec<String>,containers: Vec<AlbaContainer>,conditions:QueryConditions ) -> Result<Query, Error>{
         let mut query: Query = self.query_diver(&col_names, &containers, &conditions).await?;
         query.load_rows(self).await?;
-        loginfo!("{:?}",query);
+        //loginfo!("{:?}",query);
         return Ok(query)
     }
     fn set_default_settings(&self) -> Result<(), Error> {
@@ -510,7 +509,7 @@ impl Database{
                 }
             }
         }
-        loginfo!("headers: {:?}",self.headers);
+        //loginfo!("headers: {:?}",self.headers);
         Ok(())
     }
     fn save_containers(&self) -> Result<(), Error> {
@@ -536,7 +535,7 @@ impl Database{
     }
     pub async fn setup(&self) -> Result<(),Error>{
         if !std::fs::exists(&database_path())?{
-            loginfo!("database folder created");
+            //loginfo!("database folder created");
             std::fs::create_dir(&database_path())?;
         }
         return Ok(())
@@ -549,11 +548,11 @@ impl Database{
             fs::remove_dir(&path)?;
         }
         if !path.is_file() {
-            loginfo!("not file");
+            //loginfo!("not file");
             self.set_default_settings()?; 
         }
         let mut rewrite = true;
-        loginfo!("settings-file-path: {}",path.display());
+        //loginfo!("settings-file-path: {}",path.display());
         let raw = fs::read_to_string(&path)
             .map_err(|e| Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e)))?;
         let mut settings: Settings = serde_yaml::from_str(&raw)
@@ -655,11 +654,11 @@ impl Database{
         let max_columns : usize = self.settings.max_columns as usize;
         match ast{
             AST::CreateContainer(structure) => {
-            loginfo!("Started to create container!");
+            //loginfo!("Started to create container!");
               if !match fs::exists(format!("{}/{}",self.location,structure.name)) {Ok(a)=>a,Err(bruh)=>{return Err(bruh)}}{
                 let cn_len = structure.col_nam.len();
                 let cv_len = structure.col_val.len();
-                loginfo!("No container with the entered name");
+                //loginfo!("No container with the entered name");
 
                 if cn_len != cv_len{
                     return Err(gerr(&format!("Mismatch in CREATE CONTAINER: provided {} column names but {} column types", cn_len, cv_len)))
@@ -688,7 +687,7 @@ impl Database{
                 for (num, v) in structure.col_val.iter().enumerate().take(max_columns) {
                     column_val_headers[num] = v.clone();
                 }
-                loginfo!("Finished processing container headers!");
+                //loginfo!("Finished processing container headers!");
                 
                 let mut column_name_bytes: Vec<Vec<u8>> = vec![vec![0u8; MAX_STR_LEN]; max_columns];
                 let mut column_val_bytes: Vec<u8> = vec![0u8; max_columns];
@@ -703,12 +702,12 @@ impl Database{
                 for (i, item) in column_val_headers.iter().enumerate(){
                     column_val_bytes[i] = item.get_id()
                 }
-                loginfo!("Finished computing the container header bytes!");
+                //loginfo!("Finished computing the container header bytes!");
 
                 if let Err(e) = check_for_reference_folder(&self.location){
                     return Err(e)
                 }
-                loginfo!("Creating container file");
+                //loginfo!("Creating container file");
                 let mut file = match tokio::fs::File::create(format!("{}/{}",self.location,structure.name)).await{
                     Ok(f)=>{
                         f}
@@ -723,15 +722,15 @@ impl Database{
                     flattened.push(*arr);
                 }
 
-                loginfo!("Writting container headers...");
+                //loginfo!("Writting container headers...");
                 match file.write_all(&flattened).await {
                     Ok(_) => {},
                     Err(e) => {
                         return Err(e)
                     }
                 };
-                loginfo!("Container data written!");
-                loginfo!("Creating container reference...");
+                //loginfo!("Container data written!");
+                //loginfo!("Creating container reference...");
                 self.containers.push(structure.name.clone());
                 let mut element_size : usize = 0;
                 for el in column_val_headers.iter(){
@@ -742,7 +741,7 @@ impl Database{
                 let headers = self.get_container_headers(&structure.name)?;
                 self.headers.push(headers);
                 self.headers.shrink_to_fit();
-                loginfo!("Container reference has been created!");
+                //loginfo!("Container reference has been created!");
                 return Ok(Query::new_none(Vec::new()))
             }else{
                 return Err(gerr("A container with the specified name already exists"))
@@ -771,9 +770,11 @@ impl Database{
                     match container.column_names().iter().position(|c| c == col_name) {
                         Some(ri) => {
                             let input_val = structure.col_val.get(index).cloned().unwrap();
-                            let expected_val = container.columns()[ri].clone();
-                            match (&expected_val, &input_val) {
-                                (AlbaTypes::Text(_), AlbaTypes::Text(s)) => {
+                            let expected_val = &container.columns()[ri];
+                            if let AlbaTypes::NONE = &input_val {
+                                val[ri] = AlbaTypes::NONE;
+                            } else if let AlbaTypes::Text(_) = expected_val {
+                                if let AlbaTypes::Text(s) = &input_val {
                                     let mut code = generate_secure_code(MAX_STR_LEN);
                                     let txt_path = format!("{}/rf/{}", self.location, code);
                                     while fs::exists(&txt_path)? {
@@ -783,18 +784,25 @@ impl Database{
                                     val[ri] = AlbaTypes::Text(code.clone());
                                     let mut mvcc = container.mvcc.write().await;
                                     mvcc.1.insert(code, (false, s.to_string()));
-                                },
-                                (AlbaTypes::Bigint(_), AlbaTypes::Int(i)) => {
-                                    val[ri] = AlbaTypes::Bigint(*i as i64);
-                                },
-                                _ if discriminant(&input_val) == discriminant(&expected_val) => {
-                                    val[ri] = input_val;
-                                },
-                                _ => {
+                                } else {
                                     return Err(gerr(&format!(
-                                        "Type mismatch for column '{}': expected {:?}, got {:?}.",
-                                        col_name, expected_val, input_val
+                                        "For column '{}', expected Text, but got {:?}.",
+                                        col_name, input_val
                                     )));
+                                }
+                            } else if std::mem::discriminant(&input_val) == std::mem::discriminant(expected_val) {
+                                val[ri] = input_val;
+                            } else {
+                                match expected_val.try_from_existing(input_val.clone()) {
+                                    Ok(converted_val) => {
+                                        val[ri] = converted_val;
+                                    },
+                                    Err(e) => {
+                                        return Err(gerr(&format!(
+                                            "Type conversion error for column '{}': expected {:?}, got {:?}. Error: {}",
+                                            col_name, expected_val, input_val, e
+                                        )));
+                                    }
                                 }
                             }
                         },
@@ -983,10 +991,9 @@ impl Database{
     }
     pub async fn execute(&mut self,input : &str,arguments : Vec<String>) -> Result<Query, Error>{
         
-        let start = Instant::now();
         let ast = parse(input.to_owned(),arguments)?;
         let result = self.run(ast).await?;
-        loginfo!("Performance: {}",start.elapsed().as_millis());
+        //loginfo!("Performance: {}",start.elapsed().as_millis());
         Ok(result)
     }  
 }
@@ -1001,7 +1008,7 @@ pub async fn connect() -> Result<Database, Error>{
     };
 
     let db_path = PathBuf::from(path);
-    loginfo!("{}",path);
+    //loginfo!("{}",path);
     if db_path.exists() {
         if !db_path.is_dir() {
             return Err(Error::new(
@@ -1026,7 +1033,7 @@ pub async fn connect() -> Result<Database, Error>{
         logerr!("err: load_containers");
         return Err(e)
     };
-    loginfo!("{:?}",db.settings);
+    //loginfo!("{:?}",db.settings);
     return Ok(db)
 }
 
@@ -1060,7 +1067,7 @@ async fn handle_connections_tcp_inner(payload : Vec<u8>,dbref: Arc<RwLock<Databa
     }
     
 
-    loginfo!("authenticated successfully\nlen:{}",buffer.len());
+    //loginfo!("authenticated successfully\nlen:{}",buffer.len());
     buffer
     // let _ = socket.shutdown().await;
 
@@ -1074,7 +1081,7 @@ async fn handle_connections_tcp_inner(payload : Vec<u8>,dbref: Arc<RwLock<Databa
 //             return
 //         }
 //     };
-//     loginfo!("Accepted connection from: {}", addr);
+//     //loginfo!("Accepted connection from: {}", addr);
 //     //handle_connections_tcp_inner(&mut socket, ardb).await;
 //     // if let Err(e) = socket.shutdown().await{
 //     //     logerr!("{}",e);
@@ -1088,7 +1095,7 @@ async fn handle_connections_tcp_inner(payload : Vec<u8>,dbref: Arc<RwLock<Databa
 //             return
 //         }
 //     };
-//     loginfo!("Accepted connection from: {}", addr);
+//     //loginfo!("Accepted connection from: {}", addr);
 //     tokio::task::spawn(async move {
 //         handle_connections_tcp_inner(&mut socket, ardb).await;
 //     });
@@ -1117,7 +1124,7 @@ async fn encrypt(content : &[u8],secret_key : &[u8;32]) -> Result<Vec<u8>,()>{
     };
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng); 
     let mut result : Vec<u8> = Vec::new();
-    loginfo!("nonce_len:{}",nonce.len());
+    //loginfo!("nonce_len:{}",nonce.len());
     result.extend_from_slice(&nonce.to_vec());
     result.extend_from_slice(&cipher.encrypt(&nonce, content.as_ref()).unwrap());
     Ok(result)
@@ -1176,10 +1183,10 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
         logerr!("the payload is too short | size :{}",size);
         return (0 as u64).to_be_bytes().as_slice().to_vec()
     }
-    loginfo!("hdti step 1");
+    //loginfo!("hdti step 1");
     let mut session_id : [u8;32] = [0u8;32];
     session_id.clone_from_slice(&rc_payload[..32]);
-    loginfo!("hdti step 2");
+    //loginfo!("hdti step 2");
 
 
     let ssr = session_secret_rel.read().await;
@@ -1187,7 +1194,7 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
     let mut payload: Vec<u8> = Vec::with_capacity(512);
     payload.extend_from_slice(&rc_payload[32..]);
     if let Some(_) = ssr.get(&session_id) {
-        loginfo!("hdti step 3");
+        //loginfo!("hdti step 3");
         
         
         payload = match decrypt(&payload, &session_id).await{
@@ -1196,7 +1203,7 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
                 return (0 as u64).to_be_bytes().as_slice().to_vec()
             }
         };
-        loginfo!("hdti step 4");
+        //loginfo!("hdti step 4");
         
                  
     } else {
@@ -1204,20 +1211,20 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
         payload.clear();
         return (0 as u64).to_be_bytes().as_slice().to_vec();
     }
-    loginfo!("hdti step 5");
+    //loginfo!("hdti step 5");
     let mut response: Vec<u8> = Vec::with_capacity(510);
     match serde_json::from_slice::<DataConnection>(&payload) {
         Ok(v) => {
-            loginfo!("hdti step 6");
+            //loginfo!("hdti step 6");
             match db.execute(&v.command,v.arguments).await {
                 Ok(query_result) => {
-                    loginfo!("hdti step 7");
+                    //loginfo!("hdti step 7");
                     db.queries.write().await.insert(query_result.id.clone(), query_result.clone());
-                    loginfo!("hdti step 8");
+                    //loginfo!("hdti step 8");
                     match serde_json::to_string(&query_result) {
                         
                         Ok(q) => {
-                            loginfo!("hdti step 9");
+                            //loginfo!("hdti step 9");
                             if let Ok(b) = (TytoDBResponse{
                                 content:q,
                                 success:1
@@ -1229,7 +1236,7 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
                                 let size = 0 as u64;
                                 response.extend_from_slice(&size.to_be_bytes());
                             };
-                            loginfo!("hdti step 10");
+                            //loginfo!("hdti step 10");
                             
                         }
                         Err(e) => {
@@ -1258,7 +1265,7 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
                         let size = b.len() as u64;
                         response.extend_from_slice(&size.to_be_bytes());
                         response.extend_from_slice(&b);
-                        loginfo!("payload: {:?}",b);
+                        //loginfo!("payload: {:?}",b);
                     }else{
                         if let Ok(b) = (TytoDBResponse{
                             content:e.to_string(),
@@ -1289,12 +1296,12 @@ async fn handle_data_tcp_inner(dbref: Arc<RwLock<Database>>,rc_payload:Vec<u8>) 
             }
         }
     }
-    loginfo!("hdti step 10");
+    //loginfo!("hdti step 10");
     if response.len() < 1{
         logerr!("empty response");
         return (0 as u64).to_be_bytes().as_slice().to_vec()
     }
-    loginfo!("hdti step 11");
+    //loginfo!("hdti step 11");
     return response;
 }
 
@@ -1383,10 +1390,10 @@ impl Database{
             file.sync_all()?;
         }
         let settings = &self.settings;
-        let connection_tcp_url = format!("{}:{}",settings.ip,settings.connections_port);
+        //let connection_tcp_url = format!("{}:{}",settings.ip,settings.connections_port);
         let data_tcp_url = format!("{}:{}",settings.ip,settings.data_port);
-        loginfo!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
-        loginfo!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
+        //loginfo!("connections:\ndata:{}\nconn:{}",data_tcp_url,connection_tcp_url);
+        //loginfo!("\n\n\n\n\n\n\tTytoDB is now running!\n\n\n\n\n\n");
         
         let mtx_db = Arc::new(RwLock::new(self));
         // loop {

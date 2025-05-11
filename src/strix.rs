@@ -5,7 +5,6 @@ use tokio::time::sleep;
 use xxhash_rust::const_xxh3;
 use tokio::sync::RwLock;
 
-use crate::logerr;
 type Checksum = u64;
 type BinaryData = Vec<u8>;
 pub type DataReference = (Checksum,BinaryData);

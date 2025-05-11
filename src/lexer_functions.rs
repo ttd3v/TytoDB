@@ -98,29 +98,29 @@ impl AlbaTypes {
             AlbaTypes::LargeBytes(_)   => 16,
         }
     }
-    pub fn get_id_from_text(keyword: &str) -> Result<u8, Error> {
-        match keyword.to_uppercase().as_str() {
-            "INT"             => Ok(2),
-            "BIGINT"          => Ok(3),
-            "BOOL"            => Ok(4),
-            "FLOAT"           => Ok(5),
-            "TEXT"            => Ok(6),
-            "NANO-STRING"     => Ok(7),
-            "SMALL-STRING"    => Ok(8),
-            "MEDIUM-STRING"   => Ok(9),
-            "BIG-STRING"      => Ok(10),
-            "LARGE-STRING"    => Ok(11),
-            "NANO-BYTES"      => Ok(12),
-            "SMALL-BYTES"     => Ok(13),
-            "MEDIUM-BYTES"    => Ok(14),
-            "BIG-BYTES"       => Ok(15),
-            "LARGE-BYTES"     => Ok(16),
-            other => Err(Error::new(
-                ErrorKind::InvalidInput,
-                format!("Unknown type keyword: {}", other)
-            )),
-        }
-    }
+    // pub fn get_id_from_text(keyword: &str) -> Result<u8, Error> {
+    //     match keyword.to_uppercase().as_str() {
+    //         "INT"             => Ok(2),
+    //         "BIGINT"          => Ok(3),
+    //         "BOOL"            => Ok(4),
+    //         "FLOAT"           => Ok(5),
+    //         "TEXT"            => Ok(6),
+    //         "NANO-STRING"     => Ok(7),
+    //         "SMALL-STRING"    => Ok(8),
+    //         "MEDIUM-STRING"   => Ok(9),
+    //         "BIG-STRING"      => Ok(10),
+    //         "LARGE-STRING"    => Ok(11),
+    //         "NANO-BYTES"      => Ok(12),
+    //         "SMALL-BYTES"     => Ok(13),
+    //         "MEDIUM-BYTES"    => Ok(14),
+    //         "BIG-BYTES"       => Ok(15),
+    //         "LARGE-BYTES"     => Ok(16),
+    //         other => Err(Error::new(
+    //             ErrorKind::InvalidInput,
+    //             format!("Unknown type keyword: {}", other)
+    //         )),
+    //     }
+    // }
 
 }
 
