@@ -2,7 +2,7 @@
 name = "tyto-db"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "SPDX-License-Identifier: TytoDB-1.0"
 
 [build-dependencies]
 cc = "1.0"
@@ -11,7 +11,7 @@ cc = "1.0"
 debug = true
 
 [dependencies]
-rand = "0.8" # Use the latest compatible version
+rand = "0.8" 
 rand_chacha = "0.3"
 serde = {version="1.0.219", features=["derive"]}
 serde_yaml = "0.9"
