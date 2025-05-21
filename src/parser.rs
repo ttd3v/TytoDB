@@ -1,6 +1,6 @@
-use std::io::Error;
+use std::io::{Error, ErrorKind};
 
-use crate::{gerr, lexer, lexer_functions::{AlbaTypes, Token}, AlbaContainer, AstCommit, AstCreateContainer, AstCreateRow, AstEditRow, AstQueryControlExit, AstQueryControlNext, AstQueryControlPrevious, AstRollback, AstSearch, AST};
+use crate::{gerr, lexer, lexer_functions::{lexer_boolean_match, lexer_bytes_match, lexer_number_match, AlbaTypes, Token}, AlbaContainer, AstCommit, AstCreateContainer, AstCreateRow, AstEditRow, AstQueryControlExit, AstQueryControlNext, AstQueryControlPrevious, AstRollback, AstSearch, AST};
 
 
 
@@ -530,7 +530,7 @@ fn debug_delete(tokens : &Vec<Token>) -> Result<AST,Error>{
     
 }
 
-fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
+pub fn debug_tokens(tokens: &Vec<Token>) -> Result<AST, Error> {
     let first = tokens.first().ok_or_else(|| gerr("Token list is empty"))?;
     if let Token::Keyword(command) = first {
         return match command.to_uppercase().as_str() {
@@ -625,11 +625,39 @@ fn replace_arguments_in_tokens(tokens: Vec<Token>, arguments: &[Token]) -> Resul
     Ok(new_tokens)
 }
 
+fn argument_lexer(input: String) -> Result<Vec<Token>, Error> {
+    if input.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "Input cannot be blank".to_string()));
+    }
+
+    let mut characters = input.trim().chars().peekable();
+    let mut result = Vec::with_capacity(20);
+    let mut dough = String::new();
+
+    while let Some(c) = characters.next() {
+        dough.push(c);
+        lexer_boolean_match(&mut result, &mut dough, &mut characters);
+        lexer_number_match(&mut result, &mut dough, &mut characters);
+    }
+    lexer_bytes_match(&mut result, &mut dough, &mut characters);
+    if !dough.trim().is_empty() {
+        result.push(Token::String(dough))
+    }
+
+    if result.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "The given input did not produced tokens".to_string()));
+    }
+
+    Ok(result)
+}
+
+
 pub fn parse(input: String, arguments_input: Vec<String>) -> Result<AST, Error> {
     let mut arguments: Vec<Token> = Vec::with_capacity(arguments_input.len());
     for arg_str in arguments_input {
-        let toks = lexer(arg_str)?;
+        let toks = argument_lexer(arg_str)?;
         if toks.len() != 1 {
+            println!("{:?}",toks);
             return Err(gerr("Each argument must lex into exactly one token"));
         }
         match &toks[0] {
@@ -638,7 +666,8 @@ pub fn parse(input: String, arguments_input: Vec<String>) -> Result<AST, Error> 
             Token::Float(a) => arguments.push(Token::Float(*a)),
             Token::String(a) => arguments.push(Token::String(a.to_string())),
             Token::Keyword(s) => arguments.push(Token::String(s.to_string())),
-            _ => return Err(gerr("Invalid argument type; expected Bool, Int, Float, or String")),
+            Token::Bytes(s) => arguments.push(Token::Bytes(s.to_owned())),
+            _ => return Err(gerr("Invalid argument type; expected Bool, Int, Float, Bytes or String")),
         }
     }
 
@@ -646,5 +675,7 @@ pub fn parse(input: String, arguments_input: Vec<String>) -> Result<AST, Error> 
 
     let tokens_with_args = replace_arguments_in_tokens(tokens, &arguments)?;
 
-    debug_tokens(&tokens_with_args)
+    let a = debug_tokens(&tokens_with_args);
+    println!("{:?}",a);
+    a
 }

@@ -1,5 +1,6 @@
+use lazy_static::lazy_static;
 use std::io::{Error, ErrorKind};
-use base64::{engine::general_purpose, Engine as _};
+use base64::{alphabet, engine::{self, general_purpose}, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use crate::{database::MAX_STR_LEN, lexer};
@@ -8,6 +9,7 @@ use crate::{database::MAX_STR_LEN, lexer};
 pub enum Token{
     Keyword(String),
     String(String),
+    Bytes(Vec<u8>),
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -284,7 +286,7 @@ impl AlbaTypes {
             AlbaTypes::NONE => Ok(AlbaTypes::NONE),
         }
     }
-   pub fn size(&self) -> usize{
+    pub fn size(&self) -> usize{
         match self {
             AlbaTypes::Bigint(_) => size_of::<i64>(),
             AlbaTypes::Int(_) => size_of::<i32>(),
@@ -362,6 +364,28 @@ impl TryFrom<Token> for AlbaTypes {
 
     fn try_from(token: Token) -> Result<Self, Self::Error> {
         match token {
+            Token::Bytes(b) => {
+                // match size {
+                //     10 => values.push(AlbaTypes::NanoBytes(blob)),
+                //     1000 => values.push(AlbaTypes::SmallBytes(blob)),
+                //     10_000 => values.push(AlbaTypes::MediumBytes(blob)),
+                //     100_000 => values.push(AlbaTypes::BigSBytes(blob)),
+                //     1_000_000 => values.push(AlbaTypes::LargeBytes(blob)),
+                //     _ => unreachable!(),
+                // }
+                let l = b.len();
+                Ok(if l <= 10{
+                    AlbaTypes::NanoBytes(b)
+                }else if l > 10 && l <= 1000{
+                    AlbaTypes::SmallBytes(b)
+                }else if l > 1000 && l <= 10000{
+                    AlbaTypes::MediumBytes(b)
+                }else if l > 10000 && l <= 100000{
+                    AlbaTypes::BigSBytes(b)
+                }else {
+                    AlbaTypes::LargeBytes(b)
+                })
+            },
             Token::String(s) =>
                 Ok(AlbaTypes::Text(s)), // moved, no clone
 
@@ -791,6 +815,49 @@ pub fn lexer_boolean_match<T: Iterator<Item = char>>(
         result.push(Token::Bool(false));
         dough.clear();
         return true
+    }
+    false
+}
+
+
+fn geteng() -> general_purpose::GeneralPurpose{
+    let crazy_config = engine::GeneralPurposeConfig::new()
+        .with_decode_allow_trailing_bits(true)
+        .with_encode_padding(true)
+        .with_decode_padding_mode(engine::DecodePaddingMode::Indifferent);
+    let eng: general_purpose::GeneralPurpose = base64::engine::GeneralPurpose::new(&alphabet::Alphabet::new("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/").unwrap(), crazy_config);
+    eng
+}
+
+lazy_static!{
+    pub static ref B64ENGINE : general_purpose::GeneralPurpose = geteng();
+}
+
+pub fn lexer_bytes_match<T: Iterator<Item = char>>(
+    result: &mut Vec<Token>,
+    dough: &mut String,
+    _itr: &mut std::iter::Peekable<T>
+) -> bool{
+    // let trimmed = dough.trim();
+    // if trimmed.eq_ignore_ascii_case("true") {
+    //     result.push(Token::Bool(true));
+    //     dough.clear();
+    //     return true
+    // } else if trimmed.eq_ignore_ascii_case("false") {
+    //     result.push(Token::Bool(false));
+    //     dough.clear();
+    //     return true
+    // }
+    // false
+    if !dough.starts_with("§"){
+        return false
+    }
+    if let Some(rest) = dough.strip_prefix("§") {
+        if let Ok(b) = B64ENGINE.decode(rest) {
+            result.push(Token::Bytes(b));
+            dough.clear();
+            return true;
+        }
     }
     false
 }

@@ -39,7 +39,7 @@ pub fn __loginfo_with_loc(
     let now       = Local::now();
     let timestamp = now.format("%Y/%m/%d %H:%M:%S");
     let _ = writeln!(
-        io::stderr(),
+        io::stdout(),
         "</INFO/> {} [{}:{}] {}",
         timestamp,
         file,

@@ -1,10 +1,10 @@
-use std::{collections::HashMap, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
+
+use std::{collections::{BTreeSet, HashMap}, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use std::collections::{btree_set::BTreeSet,btree_map::BTreeMap};
-use crate::{database::{write_data, QueryConditions, WrittingQuery, STRIX}, gerr, index_sizes::IndexSizes, index_tree::IndexTree, lexer_functions::{AlbaTypes, Token}, logerr, strix::DataReference};
+use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -12,73 +12,14 @@ type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(
 pub struct Container{
     pub file : std::fs::File,
     pub element_size : usize,
-    pub headers : HashMap<String,AlbaTypes>,
+    pub headers : Vec<(String,AlbaTypes)>,
     pub str_size : usize,
     pub mvcc : MvccType,
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
-    pub indexes : IndexTree,
     file_path : String
 
-}
-
-#[derive(Clone)]
-pub enum QueryCandidates {
-    All,
-    Some(BTreeSet<IndexSizes>)
-}
-fn bind_query_candidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
-    if let QueryCandidates::Some(a) = n{
-        if let QueryCandidates::Some(mut b) = m{
-            b.extend(a.iter());
-            return QueryCandidates::Some(b)
-        }
-    }
-    QueryCandidates::All
-}
-fn link_query_candidates(m : QueryCandidates,n : QueryCandidates) -> QueryCandidates{
-    if let QueryCandidates::Some(a) = n{
-        if let QueryCandidates::Some(b) = m{
-            let mut c = BTreeSet::new();
-            for i in b.iter(){
-                if a.contains(i){
-                    c.insert(i.clone());
-                }
-            }
-            return QueryCandidates::Some(c)
-        }
-    }
-    QueryCandidates::All 
-}
-fn weird_thing_to_query_candidates(m : BTreeSet<BTreeSet<IndexSizes>>) -> QueryCandidates{
-    let mut main = QueryCandidates::Some(BTreeSet::new());
-    for i in m{
-        main = bind_query_candidates(main, QueryCandidates::Some(i))
-    } 
-    main
-}
-
-
-pub fn is_coherent(input1: &Token, input2: &AlbaTypes) -> bool {
-    matches!(
-        (input1, input2),
-        (Token::String(_), AlbaTypes::Text(_)
-            | AlbaTypes::Char(_)
-            | AlbaTypes::NanoString(_)
-            | AlbaTypes::SmallString(_)
-            | AlbaTypes::MediumString(_)
-            | AlbaTypes::BigString(_)
-            | AlbaTypes::LargeString(_)
-            | AlbaTypes::NanoBytes(_)
-            | AlbaTypes::SmallBytes(_)
-            | AlbaTypes::MediumBytes(_)
-            | AlbaTypes::BigSBytes(_)
-            | AlbaTypes::LargeBytes(_))
-        | (Token::Int(_), AlbaTypes::Int(_) | AlbaTypes::Bigint(_))
-        | (Token::Float(_), AlbaTypes::Float(_))
-        | (Token::Bool(_), AlbaTypes::Bool(_))
-    )
 }
 fn serialize_closed_string(item : &AlbaTypes,s : &String,buffer : &mut Vec<u8>){
     let mut bytes = Vec::with_capacity(item.size());
@@ -107,7 +48,7 @@ pub trait New {
 
 impl New for Container {
     async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
-        let mut  headers = HashMap::new();
+        let mut  headers = Vec::new();
         for index in 0..((columns.len()+column_names.len())/2){
             let name = match column_names.get(index){
                 Some(nm) => nm,
@@ -121,7 +62,13 @@ impl New for Container {
                     return Err(gerr("Failed to create container, the size of column types and names must be equal. And this error is a consequence of that property not being respected."))
                 }
             };
-            headers.insert(name.to_owned(), value.to_owned());
+            if name.is_empty(){
+                continue;
+            }
+            if let AlbaTypes::NONE = value{
+                continue
+            }
+            headers.push((name.to_owned(), value.to_owned()));
         }
         let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
         let mut container = Container{
@@ -133,45 +80,18 @@ impl New for Container {
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
-            indexes: IndexTree::default(),
             file_path: path.to_string()
         };
-        container.load_indexing().await?;
         Ok(container)
     }
     
 }
 
 
-const INDEXING_CHUNK_SIZE : u64 = 50;
+const INDEXING_CHUNK_SIZE : u64 = 100;
 impl Container{
     pub fn column_names(&self) -> Vec<String>{
-        self.headers.keys().cloned().collect()
-    }
-    pub async fn load_indexing(&mut self) -> Result<(),Error>{
-        self.indexes.clear()?;
-        let row_length = self.arrlen().await?;
-        if row_length == 0{
-            return Ok(())
-        }
-        let mut cursor : u64 = 0;
-        while cursor < row_length{
-            let end_index = if cursor+INDEXING_CHUNK_SIZE > row_length{
-                cursor+INDEXING_CHUNK_SIZE - row_length
-            }else{
-                cursor+INDEXING_CHUNK_SIZE
-            };
-            let rows_not_formatted = self.get_rows((cursor,end_index)).await?;
-            let mut rows = Vec::with_capacity(INDEXING_CHUNK_SIZE as usize);
-
-            for i in rows_not_formatted.iter().enumerate(){
-                rows.push((i.0*self.element_size,i.1.to_owned()));
-            }
-            
-            let _ = self.indexes.insert_gently(self.column_names(), rows)?;
-            cursor = end_index;
-        }
-        Ok(())
+        self.headers.iter().map(|v|v.0.to_string()).collect()
     }
 }
 
@@ -185,9 +105,30 @@ async fn try_open_file(path: &str) -> io::Result<Option<File>> {
 fn handle_fixed_string(buf: &[u8],index: &mut usize,instance_size: usize,values: &mut Vec<AlbaTypes>) -> Result<(), Error> {
     let bytes = &buf[*index..*index+instance_size];
     let mut size : [u8;8] = [0u8;8];
-    size.clone_from_slice(bytes); 
+    size.clone_from_slice(&bytes[..8]); 
     let string_length = usize::from_le_bytes(size);
-    let string_bytes = &bytes[8..string_length];
+    let string_bytes = if string_length > 0 {
+        let end = 8 + string_length;
+        let l = bytes.len()-8;
+        if end >= l {
+            &bytes[8..(l-8)]
+        }else{
+           &bytes[8..(8+string_length)] 
+        }
+        
+    }else{
+        
+        let s = String::new();
+        match instance_size {
+            10 => values.push(AlbaTypes::NanoString(s)),
+            100 => values.push(AlbaTypes::SmallString(s)),
+            500 => values.push(AlbaTypes::MediumString(s)),
+            2_000 => values.push(AlbaTypes::BigString(s)),
+            3_000 => values.push(AlbaTypes::LargeString(s)),
+            _ => unreachable!(),
+        }
+        return Ok(())
+    };
     
     *index += instance_size;
     let trimmed: Vec<u8> = string_bytes.iter()
@@ -211,9 +152,31 @@ fn handle_fixed_string(buf: &[u8],index: &mut usize,instance_size: usize,values:
 fn handle_bytes(buf: &[u8],index: &mut usize,size: usize,values: &mut Vec<AlbaTypes>) -> Result<(), Error> {
     let bytes = buf[*index..*index+size].to_vec();
     let mut blob_size : [u8;8] = [0u8;8];
-    blob_size.clone_from_slice(&bytes); 
+    blob_size.clone_from_slice(&bytes[..8]); 
     let blob_length = usize::from_le_bytes(blob_size);
-    let blob = bytes[8..blob_length].to_vec();
+    let blob : Vec<u8> = if blob_length > 0 {
+        let end = 8 + blob_length;
+        let l = bytes.len();
+        if end > l {
+            bytes[8..(l-8)].to_vec()
+        }else{
+           bytes[8..(8+blob_length)].to_vec() 
+        }
+        
+    }else{
+        
+        let blob = Vec::new();
+        match size {
+            10 => values.push(AlbaTypes::NanoBytes(blob)),
+            1000 => values.push(AlbaTypes::SmallBytes(blob)),
+            10_000 => values.push(AlbaTypes::MediumBytes(blob)),
+            100_000 => values.push(AlbaTypes::BigSBytes(blob)),
+            1_000_000 => values.push(AlbaTypes::LargeBytes(blob)),
+            _ => unreachable!(),
+        }
+        return Ok(())
+    };
+
     *index += size;
     
     match size {
@@ -244,117 +207,16 @@ impl Container{
         };
         Ok(file_rows.max(mvcc_max))
     }
-    pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<&AlbaTypes>{
-        if  let Some(g) = self.headers.get(column_name){
-            return Some(g)
+    pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<AlbaTypes>{
+        for i in self.headers.iter(){
+            if *i.0 == *column_name{
+                let v = i.1.clone();
+                return Some(v)
+            }
         }
         None
     }
-    pub async fn candidates_from_unit(&self,condition : &(Token,Token,Token)) -> Result<QueryCandidates,Error>{
-        let column_name_token = &condition.0;
 
-        let column_name : &String = if let Token::String(cn) = column_name_token{
-            cn
-        }else{
-            return Err(gerr("Invalid column name type, expected \"Token::String\"."))
-        };
-        
-
-        let operator = if let Token::Operator(oprt) = &condition.1{
-            oprt
-        }else{
-            return Err(gerr("Invalid operator type, expected \"Token::Operator\"."))
-        };
-
-        let column_alba_type = match self.get_alba_type_from_column_name(column_name){
-            Some(at) => at,
-            None => return Err(
-                gerr(
-                    &format!("There is no column named \"{}\", even while you try to use it. Verify if that is or isn\'t your fault, if isn\'t then the error may belong to the database system.",column_name)
-                )
-            )
-        };
-
-        if !is_coherent(&condition.2, column_alba_type) {
-            return Err(gerr(
-                &format!(
-                    r#"Type mismatch: Got {:?} with {:?}. Valid pairs:\n\
-                     - Token::String: Text, Char, *String, *Bytes\n\
-                     - Token::Int: Int, Bigint\n\
-                     - Token::Float: Float\n\
-                     - Token::Bool: Bool"#,
-                    condition.2, column_alba_type
-                )
-            ));
-        }
-
-        Ok(match operator.as_str(){
-            "==" | "=" => {
-                match self.indexes.get_all_in_group(&column_name, condition.2.clone())?{
-                    Some(a) => {
-                        QueryCandidates::Some(a.clone())
-                    },
-                    None =>{
-                        QueryCandidates::All
-                    }
-                }
-            },
-            ">=" | ">" => {
-                match self.indexes.get_most_in_group_raising(&column_name, condition.2.clone())?{
-                    Some(a) => {
-                        weird_thing_to_query_candidates(a.clone())
-                    },
-                    None =>{
-                        QueryCandidates::All
-                    }
-                }
-            },
-            "<=" | "<" => {
-                match self.indexes.get_most_in_group_lowering(&column_name, condition.2.clone())?{
-                    Some(a) => {
-                        weird_thing_to_query_candidates(a.clone())
-                    },
-                    None =>{
-                        QueryCandidates::All
-                    }
-                }
-            },
-            _ => {
-                QueryCandidates::All
-            }
-        })
-    }
-    pub async fn get_query_candidates(&self,query_conditions : &QueryConditions) -> Result<BTreeSet<IndexSizes>,Error>{
-        let candidates_set : BTreeSet<IndexSizes> = BTreeSet::new();
-        let mut condition_groups : Vec<QueryCandidates> = Vec::new();
-        for i in query_conditions.0.iter(){
-            let wsoeufh = self.candidates_from_unit(i).await?;
-            condition_groups.push(wsoeufh);
-        }
-        let mut the_main_thing_idk_how_to_name_this = QueryCandidates::Some(BTreeSet::new());
-        let mut conditons_hmap : AHashMap<usize, char> = AHashMap::new();
-        for i in &query_conditions.1{
-            conditons_hmap.insert(i.0.clone(), i.1.clone());
-        }
-        let mut comparision : char = 'o';
-        for i in condition_groups.iter().enumerate(){
-            if let Some(a) = conditons_hmap.get(&i.0){
-                comparision = *a;
-            }
-            match comparision{
-                'o' => {
-                    the_main_thing_idk_how_to_name_this = link_query_candidates(the_main_thing_idk_how_to_name_this, i.1.clone())
-                },
-                _ => {
-                    the_main_thing_idk_how_to_name_this = bind_query_candidates(the_main_thing_idk_how_to_name_this, i.1.clone())
-                }
-            }
-        }
-        if let QueryCandidates::Some(tmtihtnt) = the_main_thing_idk_how_to_name_this{
-            return Ok(tmtihtnt)
-        }
-        return Ok(candidates_set)
-    }
     pub async fn get_next_addr(&self) -> Result<u64, Error> {
         let mut graveyard = self.graveyard.write().await;
         if graveyard.len() > 0{
@@ -391,6 +253,7 @@ impl Container{
         let mut insertions: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         let mut deletes: Vec<(u64, Vec<AlbaTypes>)> = Vec::new();
         for (index, value) in mvcc.0.iter() {
+            loginfo!("{}",index);
             let v = (*index, value.1.clone());
             if value.0 {
                 deletes.push(v);
@@ -453,77 +316,42 @@ impl Container{
             let mut l = s.write().await;
             l.wards.push(RwLock::new((std::fs::OpenOptions::new().read(true).write(true).open(&self.file_path)?,virtual_ward)));
         }
+        drop(mvcc);
         Ok(())
     }
     pub async fn get_rows(&self, index: (u64, u64)) -> Result<Vec<Vec<AlbaTypes>>, Error> {
-        let mut lidx = index.1;
-        let maxl = if self.len().await? > self.headers_offset {
-            (self.len().await? - self.headers_offset) / self.element_size as u64
-        } else {
-            0
-        };
-        if lidx > maxl {
-            lidx = maxl;
+        // INDEXES WILL BE TREATED AS RELATIVE, EACH BEING A REFERENCE TO (X*ELEMENT_SIZE) + header_size
+        let arrlen = self.arrlen().await?;
+        let max = index.1.min(arrlen);
+        if index.0 > max{
+            return Err(gerr(&format!("Failed to get rows, the first index should be lower than the second. Review the arguments: (index0:{},index1:{})",index.0,index.1)))
         }
-    
-        let idxs: (u64, u64) = (
-            index.0 * self.element_size as u64 + self.headers_offset,
-            lidx * self.element_size as u64 + self.headers_offset,
-        );
+        let mut buffer = vec![0u8;(max-index.0).max(1) as usize * self.element_size];
+        self.file.read_exact_at(&mut buffer, (index.0 * self.element_size as u64)+self.headers_offset)?;
+        println!("{}//{}",buffer.len(),self.len().await?);
         
-        let buff_size: usize = (idxs.1 - idxs.0) as usize;
-        let mut buff = vec![0u8; buff_size];
-        self.file.read_exact_at(&mut buff, idxs.0)?;
-    
         let mvcc = self.mvcc.read().await;
-    
-        let mut result: Vec<Vec<AlbaTypes>> = Vec::new(); 
-        for i in index.0..lidx {
-            if let Some((deleted, row_data)) = mvcc.0.get(&i) {
-                if *deleted {
+        let mut result : Vec<Vec<AlbaTypes>> = Vec::with_capacity((max-index.0) as usize);
+        for i in index.0..=max{
+            let index = i as usize;
+            if let Some(val) = mvcc.0.get(&i){
+                if !val.0{
+                    result.push(val.1.clone());
                     continue;
                 }
-    
-                let mut row = row_data.clone();
-                match mvcc.0.get(&i){
-                    Some(row_in_mvcc) => {
-                        if !row_in_mvcc.0{
-                            row = row_in_mvcc.1.clone()
-                        }
-                    },
-                    None => {}
-                }
-                for value in row.iter_mut() {
-                    if let AlbaTypes::Text(c) = value {
-                        if let Some((deleted, new_text)) = mvcc.1.get(c) {
-                            if !*deleted {
-                                *value = AlbaTypes::Text(new_text.to_string());
-                            }
-                        }else{
-                            match fs::File::open(format!("{}/rf/{}",self.location,c)).await{
-                                Ok(mut a) => {
-                                    let mut bu : Vec<u8> = Vec::new();
-                                    a.read_to_end(&mut bu).await?;
-                                    *value = AlbaTypes::Text(match String::from_utf8(bu){Ok(a) => a,Err(e)=>return Err(gerr(&e.to_string()))})
-                                },
-                                Err(e) => {return Err(e)}
-                            }
-                        }
-                    }
-                }
-    
-                result.push(row); 
-            } else {
-                let start = ((i - index.0) * self.element_size as u64) as usize;
-                let end = start + self.element_size;
-                let row_buf = &buff[start..end];
-                let row = self.deserialize_row(row_buf.to_vec()).await?;
-                result.push(row);
+            }
+            if buffer.len() > self.element_size*index{
+                result.push(
+                    self.deserialize_row(
+                        &buffer[index*self.element_size .. (index+1)*self.element_size] // row-bytes
+                    ).await? // row
+                );
             }
         }
-    
         Ok(result)
     }
+    
+    /* 
     pub async fn get_spread_rows(&mut self, index: &mut Vec<u64>) -> Result<Vec<Vec<AlbaTypes>>, Error> {
         let maxl = if self.len().await? > self.headers_offset {
             (self.len().await? - self.headers_offset) / self.element_size as u64
@@ -579,61 +407,9 @@ impl Container{
         result.shrink_to_fit();
         Ok(result)
     }
-    
-    pub async fn heavy_get_spread_rows(&mut self, index: &mut BTreeSet<IndexSizes>) -> Result<WrittingQuery, Error> {
-        let maxl = if self.len().await? > self.headers_offset {
-            (self.len().await? - self.headers_offset) / self.element_size as u64
-        } else {
-            0
-        };
-        let mut buffers : BTreeMap<IndexSizes,Vec<u8>> = BTreeMap::new();
-        let mut result : WrittingQuery = BTreeMap::new();
-        let mvcc = self.mvcc.read().await;
-        for i in index.iter(){
-            if let Some(g) = mvcc.0.get(&(IndexSizes::to_usize(*i) as u64)){
-                if !g.0||*i > IndexSizes::U64(maxl){
-                    result.insert(*i,g.1.clone());
-                    continue;
-                }
-            }
-            buffers.insert(*i ,vec![0u8;self.element_size]);
-        }
-        drop(mvcc);
-        let element_size = IndexSizes::Usize(self.element_size);
-        let mut it = buffers.iter_mut();
-        while let Some(b) = it.next(){
-            
-            if let Some(c) = it.next(){
-                if (*c.0-*b.0) < IndexSizes::U64(10){
-                    let buff_size = (*c.0 - *b.0 + IndexSizes::U64(1)) * element_size ;
-                    let mut buff = vec![0u8;buff_size.as_usize()];
-                    self.file.read_exact_at(&mut buff, (b.0.as_u64()*element_size.as_u64())+self.headers_offset)?;
-                    *b.1 = buff[0..self.element_size].to_vec();
-                    let c_off = ((*c.0-*b.0)*element_size).as_usize() ;
-                    *c.1 = buff[c_off..(c_off+self.element_size)].to_vec();
-                    result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
-                    result.insert(c.0.to_owned(),self.deserialize_row(c.1.to_vec()).await?);
-                    continue;
-                }else{
-                    self.file.read_exact_at(b.1, (b.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
-                    self.file.read_exact_at(c.1, (c.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
-                    result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
-                    result.insert(c.0.to_owned(),self.deserialize_row(c.1.to_vec()).await?);
-
-                    continue;
-                }
-            }
-            self.file.read_exact_at(b.1, (b.0.as_u64()*self.element_size as u64)+self.headers_offset)?;
-            result.insert(b.0.to_owned(),self.deserialize_row(b.1.to_vec()).await?);
-        }
-        Ok(result)
-    }
-    
-    pub fn columns(&self) -> Vec<&AlbaTypes>{
-        self.headers.values().by_ref().collect()
-    }
-    pub fn columns_owned(&self) -> Vec<AlbaTypes>{
-        self.headers.values().cloned().collect()
+    */
+    pub fn columns(&self) -> Vec<AlbaTypes>{
+        self.headers.iter().map(|v|v.1.clone()).collect()
     }
     pub fn serialize_row(&self, row: &[AlbaTypes]) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(self.element_size);
@@ -721,7 +497,7 @@ impl Container{
     
         Ok(buffer)
     }
-    async fn deserialize_row(&self, buf: Vec<u8>) -> Result<Vec<AlbaTypes>, Error> {
+    async fn deserialize_row(&self, buf: &[u8]) -> Result<Vec<AlbaTypes>, Error> {
         let mut index = 0;
         let mut values = Vec::new();
     

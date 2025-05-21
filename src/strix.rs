@@ -1,7 +1,6 @@
 use std::{fs::File, os::unix::fs::FileExt, sync::Arc};
 
 use ahash::AHashMap;
-use tokio::time::sleep;
 use xxhash_rust::const_xxh3;
 use tokio::sync::RwLock;
 
@@ -17,11 +16,11 @@ pub struct Strix{
 
 
 pub async fn start_strix(strix : Arc<RwLock<Strix>>){
-    let interval = std::time::Duration::from_millis(100);
+    //let interval = std::time::Duration::from_millis(100);
     tokio::task::spawn_blocking(async move ||{
         loop{
             // Sleeping
-            sleep(interval).await;
+            //sleep(interval).await;
             let fl = strix.read().await;
             let wards_iter = fl.wards.iter().enumerate();
             let mut to_remove : Vec<usize> = Vec::new();
