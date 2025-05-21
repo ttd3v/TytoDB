@@ -4,7 +4,7 @@ use base64::{alphabet, engine::{self, GeneralPurpose}, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::{Container, New}, gerr, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::{debug_tokens, parse}, query::Query, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::Container, gerr, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::{debug_tokens, parse}, query::Query, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
@@ -103,7 +103,7 @@ pub struct Database{
     settings : Settings,
     containers : Vec<String>,
     headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
-    pub container : HashMap<String,Container>,
+    pub container : HashMap<String,Arc<RwLock<Container>>>,
     queries : Arc<RwLock<HashMap<String,Query>>>,
     secret_keys : Arc<RwLock<HashMap<[u8;32],Vec<u8>>>>,
 }
@@ -206,7 +206,7 @@ impl Database{
             
         }
         for (_, wedfygt) in self.container.iter() {
-            
+            let wedfygt = wedfygt.read().await;
             let count = (wedfygt.len().await? - wedfygt.headers_offset) / wedfygt.element_size as u64;
             
             if count < 1 {
@@ -253,7 +253,7 @@ impl Database{
         
         for (_, c) in self.container.iter_mut() {
             
-            c.commit().await?;
+            c.write().await.commit().await?;
             
         }
         
@@ -264,7 +264,7 @@ impl Database{
         
         for (_, c) in self.container.iter_mut() {
             
-            c.rollback().await?;
+            c.write().await.rollback().await?;
             
         }
         
@@ -542,12 +542,12 @@ impl Database{
             },
             AST::CreateRow(structure) => {
                 
-                let container = match self.container.get_mut(&structure.container) {
+                let mut container = match self.container.get_mut(&structure.container) {
                     None => {
                         
                         return Err(gerr(&format!("Container '{}' does not exist.", structure.container)));
                     },
-                    Some(a) => a,
+                    Some(a) => a.write().await,
                 };
                 
                 if structure.col_nam.len() != structure.col_val.len() {
@@ -668,7 +668,7 @@ impl Database{
                         match self.container.get_mut(&container) {
                             Some(a) => {
                                 
-                                a.commit().await?;
+                                a.write().await.commit().await?;
                                 
                                 return Ok(Query::new(Vec::new()));
                             },
@@ -692,7 +692,7 @@ impl Database{
                         match self.container.get_mut(&container) {
                             Some(a) => {
                                 
-                                a.rollback().await?;
+                                a.write().await.rollback().await?;
                                 
                                 return Ok(Query::new(Vec::new()));
                             },
@@ -749,12 +749,8 @@ impl Database{
     }
     
     pub async fn execute(&mut self, input: &str, arguments: Vec<String>) -> Result<Query, Error> {
-        
-        
         let ast = parse(input.to_owned(), arguments)?;
-        
         let result = self.run(ast).await?;
-        
         Ok(result)
     }
 }
@@ -768,7 +764,6 @@ pub async fn connect() -> Result<Database, Error>{
     };
 
     let db_path = PathBuf::from(path);
-    //
     if db_path.exists() {
         if !db_path.is_dir() {
             return Err(Error::new(

@@ -1,16 +1,16 @@
 
 use std::{collections::{BTreeSet, HashMap}, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
-use tokio::{io::AsyncReadExt, sync::RwLock};
+use tokio::{io::AsyncReadExt, sync::{mpsc::{unbounded_channel, UnboundedReceiver}, RwLock}};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, strix::DataReference};
+use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, search_runner::SearchRunner, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 #[derive(Debug)]
 pub struct Container{
-    pub file : std::fs::File,
+    pub file : Arc<std::fs::File>,
     pub element_size : usize,
     pub headers : Vec<(String,AlbaTypes)>,
     pub str_size : usize,
@@ -18,6 +18,7 @@ pub struct Container{
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
+    pub search_runner : Arc<SearchRunner>,
     file_path : String
 
 }
@@ -41,13 +42,9 @@ fn serialize_closed_blob(item : &AlbaTypes,blob : &mut Vec<u8>,buffer : &mut Vec
     buffer.extend_from_slice(&bytes);
 }
 
-pub trait New {
-    async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> where Self: Sized ;
 
-}
-
-impl New for Container {
-    async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Self,Error> {
+impl Container {
+    pub async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Arc<RwLock<Self>>,Error> {
         let mut  headers = Vec::new();
         for index in 0..((columns.len()+column_names.len())/2){
             let name = match column_names.get(index){
@@ -70,18 +67,32 @@ impl New for Container {
             }
             headers.push((name.to_owned(), value.to_owned()));
         }
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path)?;
-        let mut container = Container{
-            file,
-            element_size,
+        let file = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&path)?);
+        let mut hash_header = HashMap::new();
+        for i in headers.iter(){
+            hash_header.insert(i.0.clone(),i.1.clone());
+        }
+        let a = unbounded_channel();
+        let search_runner = Arc::new(SearchRunner{
+            file:RwLock::new(file.clone()),
+            metadata:((headers_offset as usize).clone(),element_size.clone(),hash_header),
+            memo: RwLock::new(HashMap::new()),
+            running: RwLock::new(false),
+            window: a.1,
+            sender: a.0
+        });
+        let container = Arc::new(RwLock::new(Container{
+            file:file.clone(),
+            element_size: element_size.clone(),
             str_size,
             mvcc: Arc::new(RwLock::new((AHashMap::new(),HashMap::new()))),
-            headers_offset ,
+            headers_offset: headers_offset.clone() ,
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
-            file_path: path.to_string()
-        };
+            file_path: path.to_string(),
+            search_runner: search_runner.clone()
+        }));
         Ok(container)
     }
     
@@ -497,7 +508,7 @@ impl Container{
     
         Ok(buffer)
     }
-    async fn deserialize_row(&self, buf: &[u8]) -> Result<Vec<AlbaTypes>, Error> {
+    pub async fn deserialize_row(&self, buf: &[u8]) -> Result<Vec<AlbaTypes>, Error> {
         let mut index = 0;
         let mut values = Vec::new();
     

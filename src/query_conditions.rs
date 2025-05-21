@@ -15,6 +15,7 @@ fn string_to_char(s: String) -> Result<char, io::Error> {
     }
 }
 
+#[derive(Clone)]
 enum Operator{
     Equal,
     StrictEqual,
@@ -34,12 +35,13 @@ enum LogicalGate{
     Or,
 }
 
+#[derive(Clone)]
 pub struct QueryConditonAtom{
     column : String,
     operator : Operator,
     value : AlbaTypes,
 }
-
+#[derive(Clone)]
 pub struct QueryConditions{
     chain : Vec<(QueryConditonAtom,Option<LogicalGate>)>
 }
@@ -238,7 +240,7 @@ impl QueryConditions{
         }
         return Ok(QueryConditions { chain })
     }
-    pub fn row_match(&self,row : Row) -> Result<bool,Error>{
+    pub fn row_match(&self,row : &Row) -> Result<bool,Error>{
         if self.chain.is_empty(){
             return Ok(true)
         }

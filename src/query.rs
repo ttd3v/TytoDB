@@ -132,7 +132,7 @@ impl Query {
         let container = match database.container.get(container_name) {
             Some(a) => {
                 
-                a
+                a.read().await
             },
             None => {
                 
