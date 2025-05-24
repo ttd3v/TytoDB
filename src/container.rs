@@ -1,10 +1,10 @@
 
 use std::{collections::{BTreeSet, HashMap}, ffi::CString, io::{self, Error, ErrorKind, Write}, os::unix::fs::FileExt, sync::Arc};
 use ahash::AHashMap;
-use tokio::{io::AsyncReadExt, sync::{mpsc::{unbounded_channel, UnboundedReceiver}, RwLock}};
+use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, search_runner::SearchRunner, strix::DataReference};
+use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -18,7 +18,6 @@ pub struct Container{
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
-    pub search_runner : Arc<SearchRunner>,
     file_path : String
 
 }
@@ -72,15 +71,6 @@ impl Container {
         for i in headers.iter(){
             hash_header.insert(i.0.clone(),i.1.clone());
         }
-        let a = unbounded_channel();
-        let search_runner = Arc::new(SearchRunner{
-            file:RwLock::new(file.clone()),
-            metadata:((headers_offset as usize).clone(),element_size.clone(),hash_header),
-            memo: RwLock::new(HashMap::new()),
-            running: RwLock::new(false),
-            window: a.1,
-            sender: a.0
-        });
         let container = Arc::new(RwLock::new(Container{
             file:file.clone(),
             element_size: element_size.clone(),
@@ -90,16 +80,12 @@ impl Container {
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
-            file_path: path.to_string(),
-            search_runner: search_runner.clone()
+            file_path: path.to_string()
         }));
         Ok(container)
     }
     
 }
-
-
-const INDEXING_CHUNK_SIZE : u64 = 100;
 impl Container{
     pub fn column_names(&self) -> Vec<String>{
         self.headers.iter().map(|v|v.0.to_string()).collect()

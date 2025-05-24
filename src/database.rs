@@ -632,7 +632,9 @@ impl Database{
                 }
                 
             },
-            AST::Search(_) => todo!(),
+            AST::Search(structure) => {
+                todo!()
+            },
             AST::EditRow(_) => todo!(),
             AST::DeleteRow(_) => todo!(),
             AST::DeleteContainer(structure) => {

@@ -6,7 +6,6 @@ mod strix;
 mod row;
 mod query;
 mod query_conditions;
-mod search_runner;
 use std::io::{Error,ErrorKind};
 use tokio;
 use database::connect;
