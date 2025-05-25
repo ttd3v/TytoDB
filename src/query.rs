@@ -3,7 +3,7 @@ use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{container::Container, database::{generate_secure_code, Database}, gerr, lexer_functions::{AlbaTypes, Token}, query_conditions::QueryConditions, row::Row};
+use crate::{container::Container, database::{generate_secure_code, Database}, gerr, lexer_functions::Token, alba_types::AlbaTypes, query_conditions::QueryConditions, row::Row};
 
 
 const PAGE_SIZE: usize = 100;
@@ -302,7 +302,7 @@ pub async fn search(container : Arc<Container>,args : SearchArguments) -> Result
         query.push((page_bucket.clone(),args.container_name.clone()));
     }
     drop(page_bucket);
-    drop(page_bucket_len);
+    let _ = page_bucket_len;
 
     Ok(query)
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::lexer_functions::AlbaTypes;
+use crate::alba_types::AlbaTypes;
 
 
 #[derive(Clone,Debug)]

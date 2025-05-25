@@ -4,13 +4,13 @@ use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use crate::{database::{write_data, STRIX}, gerr, lexer_functions::AlbaTypes, logerr, loginfo, strix::DataReference};
+use crate::{database::{write_data, STRIX}, gerr, alba_types::AlbaTypes, logerr, loginfo, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
 #[derive(Debug)]
 pub struct Container{
-    pub file : Arc<std::fs::File>,
+    pub file : Arc<RwLock<std::fs::File>>,
     pub element_size : usize,
     pub headers : Vec<(String,AlbaTypes)>,
     pub str_size : usize,
@@ -18,6 +18,7 @@ pub struct Container{
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
+    pub container_name : String,
     file_path : String
 
 }
@@ -43,7 +44,7 @@ fn serialize_closed_blob(item : &AlbaTypes,blob : &mut Vec<u8>,buffer : &mut Vec
 
 
 impl Container {
-    pub async fn new(path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Arc<RwLock<Self>>,Error> {
+    pub async fn new(container_name : String,path : &str,location : String,element_size : usize, columns : Vec<AlbaTypes>,str_size : usize,headers_offset : u64,column_names : Vec<String>) -> Result<Arc<RwLock<Self>>,Error> {
         let mut  headers = Vec::new();
         for index in 0..((columns.len()+column_names.len())/2){
             let name = match column_names.get(index){
@@ -66,7 +67,7 @@ impl Container {
             }
             headers.push((name.to_owned(), value.to_owned()));
         }
-        let file = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&path)?);
+        let file = Arc::new(RwLock::new(std::fs::OpenOptions::new().read(true).write(true).open(&path)?));
         let mut hash_header = HashMap::new();
         for i in headers.iter(){
             hash_header.insert(i.0.clone(),i.1.clone());
@@ -80,6 +81,7 @@ impl Container {
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
+            container_name,
             file_path: path.to_string()
         }));
         Ok(container)
@@ -189,7 +191,7 @@ fn handle_bytes(buf: &[u8],index: &mut usize,size: usize,values: &mut Vec<AlbaTy
 
 impl Container{
     pub async fn len(&self) -> Result<u64,Error>{
-        Ok(self.file.metadata()?.len())
+        Ok(self.file.read().await.metadata()?.len())
     }
     pub async fn arrlen(&self) -> Result<u64, Error> {
         let file_len = self.len().await?;
@@ -264,24 +266,25 @@ impl Container{
         let hdr_off = self.headers_offset;
         let row_sz = self.element_size as u64;
         let buf = vec![0u8; self.element_size];
+        let fi = self.file.write().await;
         for (row_index, row_data) in insertions {
             let serialized = self.serialize_row(&row_data)?;
             let offset = hdr_off + row_index * row_sz;
-            self.file.write_all_at(serialized.as_slice(), offset)?;
+            fi.write_all_at(serialized.as_slice(), offset)?;
             virtual_ward.insert(offset as usize, (const_xxh3::xxh3_64(serialized.as_slice()),serialized));
         }
         
         let mut graveyard = self.graveyard.write().await;
         for del in &deletes {
             let from = hdr_off + del.0 * row_sz;
-            self.file.write_all_at(&buf, from)?;
+            fi.write_all_at(&buf, from)?;
             virtual_ward.insert(from as usize, (const_xxh3::xxh3_64(&buf),buf.clone()));
             total -= 1;
             graveyard.insert(del.0);
         }
         drop(graveyard);
         let new_len = hdr_off + total * row_sz;
-        self.file.set_len(new_len)?;
+        fi.set_len(new_len)?;
         
 
         for (i, txt) in  mvcc.1.iter(){
@@ -324,7 +327,7 @@ impl Container{
             return Err(gerr(&format!("Failed to get rows, the first index should be lower than the second. Review the arguments: (index0:{},index1:{})",index.0,index.1)))
         }
         let mut buffer = vec![0u8;(max-index.0).max(1) as usize * self.element_size];
-        self.file.read_exact_at(&mut buffer, (index.0 * self.element_size as u64)+self.headers_offset)?;
+        self.file.read().await.read_exact_at(&mut buffer, (index.0 * self.element_size as u64)+self.headers_offset)?;
         println!("{}//{}",buffer.len(),self.len().await?);
         
         let mvcc = self.mvcc.read().await;

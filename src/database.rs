@@ -4,7 +4,7 @@ use base64::{alphabet, engine::{self, GeneralPurpose}, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::Container, gerr, lexer_functions::{AlbaTypes, Token}, logerr, loginfo, parser::{debug_tokens, parse}, query::Query, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{container::Container,alba_types::AlbaTypes , gerr, lexer_functions::Token, logerr, loginfo, parser::{debug_tokens, parse}, query::Query, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
@@ -194,6 +194,7 @@ impl Database{
             self.container.insert(
                 contain.to_string(),
                 Container::new(
+                    contain.to_string(),
                     &format!("{}/{}", self.location, contain),
                     self.location.clone(),
                     element_size,
@@ -217,7 +218,7 @@ impl Database{
                 
                 let mut wb = vec![0u8; wedfygt.element_size];
                 
-                if let Err(e) = wedfygt.file.read_exact_at(
+                if let Err(e) = wedfygt.file.read().await.read_exact_at(
                     &mut wb,
                     wedfygt.headers_offset as u64 + (wedfygt.element_size as u64 * i as u64),
                 ) {
@@ -515,6 +516,7 @@ impl Database{
                     self.container.insert(
                         structure.name.clone(),
                         Container::new(
+                            structure.name.to_string(),
                             &format!("{}/{}", self.location, structure.name),
                             self.location.clone(),
                             element_size,

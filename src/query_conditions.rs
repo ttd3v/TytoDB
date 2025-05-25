@@ -1,9 +1,9 @@
-use std::{collections::HashMap, io::{self, Error, ErrorKind}};
+use std::{collections::HashMap, io::{self, Error, ErrorKind},mem::discriminant, ops::{Range, RangeInclusive}};
 
 use ahash::AHashMap;
 use regex::Regex;
 
-use crate::{gerr, lexer_functions::{AlbaTypes, Token}, query::PrimitiveQueryConditions, row::Row};
+use crate::{alba_types::AlbaTypes, gerr, indexing::getIndex, lexer_functions::Token, query::PrimitiveQueryConditions, row::Row};
 
 
 fn string_to_char(s: String) -> Result<char, io::Error> {
@@ -13,6 +13,47 @@ fn string_to_char(s: String) -> Result<char, io::Error> {
         (Some(c), None) => Ok(c),
         _ => Err(Error::new(ErrorKind::InvalidInput, "Input must be exactly one character")),
     }
+}
+
+#[derive(Clone, Copy)]
+enum LogicalGate{
+    And,
+    Or,
+}
+
+#[derive(Clone)]
+pub struct QueryConditionAtom{
+    column : String,
+    operator : Operator,
+    value : AlbaTypes,
+}
+#[derive(Clone,Default)]
+pub struct QueryConditions{
+    primary_key : Option<String>,
+    chain : Vec<(QueryConditionAtom,Option<LogicalGate>)>
+}
+
+fn gather_regex<'a>(regex_map: &'a mut HashMap<String, Regex>, key: String) -> Result<&'a Regex, Error> {
+    if regex_map.contains_key(&key) {
+        return Ok(regex_map.get(&key).unwrap());
+    }
+    let reg = match Regex::new(&key) {
+        Ok(a) => a,
+        Err(e) => return Err(gerr(&e.to_string())),
+    };
+    regex_map.insert(key.clone(), reg);
+    Ok(regex_map.get(&key).unwrap())
+}
+
+pub enum QueryIndexType {
+    Strict(u64),
+    Range(Range<u64>),
+    InclusiveRange(RangeInclusive<u64>), 
+}
+
+pub enum QueryType{
+    Scan,
+    Indexed(QueryIndexType),
 }
 
 #[derive(Clone)]
@@ -29,38 +70,9 @@ enum Operator{
     StringRegularExpression
 }
 
-#[derive(Clone, Copy)]
-enum LogicalGate{
-    And,
-    Or,
-}
-
-#[derive(Clone)]
-pub struct QueryConditonAtom{
-    column : String,
-    operator : Operator,
-    value : AlbaTypes,
-}
-#[derive(Clone)]
-pub struct QueryConditions{
-    chain : Vec<(QueryConditonAtom,Option<LogicalGate>)>
-}
-
-fn gather_regex<'a>(regex_map: &'a mut HashMap<String, Regex>, key: String) -> Result<&'a Regex, Error> {
-    if regex_map.contains_key(&key) {
-        return Ok(regex_map.get(&key).unwrap());
-    }
-    let reg = match Regex::new(&key) {
-        Ok(a) => a,
-        Err(e) => return Err(gerr(&e.to_string())),
-    };
-    regex_map.insert(key.clone(), reg);
-    Ok(regex_map.get(&key).unwrap())
-}
-
 impl QueryConditions{
-    pub fn from_primitive_conditions(&self,primitive_conditions : PrimitiveQueryConditions, column_properties : &HashMap<String,AlbaTypes>) -> Result<Self,Error>{
-        let mut chain : Vec<(QueryConditonAtom,Option<LogicalGate>)> = Vec::new();
+    pub fn from_primitive_conditions(&self,primitive_conditions : PrimitiveQueryConditions, column_properties : &HashMap<String,AlbaTypes>,primary_key : String) -> Result<Self,Error>{
+        let mut chain : Vec<(QueryConditionAtom,Option<LogicalGate>)> = Vec::new();
         let condition_chunk = primitive_conditions.0;
         let condition_logical_gates_vec = primitive_conditions.1;
         let mut condition_logical_gates = AHashMap::new();
@@ -236,9 +248,9 @@ impl QueryConditions{
                 .get(&index)
                 .map(|a| a.clone());
 
-            chain.push((QueryConditonAtom{column,operator,value:column_value},gate));
+            chain.push((QueryConditionAtom{column,operator,value:column_value},gate));
         }
-        return Ok(QueryConditions { chain })
+        return Ok(QueryConditions { chain, primary_key : Some(primary_key)})
     }
     pub fn row_match(&self,row : &Row) -> Result<bool,Error>{
         if self.chain.is_empty(){
@@ -477,5 +489,106 @@ impl QueryConditions{
 
         Ok(result)
     }
+    pub fn raw_chain(&self) -> Vec<QueryConditionAtom>{
+        return self.chain.iter().cloned().map(|group|group.0).collect()
+    }
+    pub fn query_type(&self) -> Result<QueryType,Error>{
+        let mut raw_chain = self.raw_chain();
+        if raw_chain.is_empty(){
+            return Ok(QueryType::Scan) 
+        }
+        let primary_key = if let Some(pk) = &self.primary_key{
+            pk
+        }else{
+            return Ok(QueryType::Scan)
+        };
+        let mut sorting = (
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+            Vec::with_capacity(raw_chain.len()/10),
+        );
+    
+        for query_atom in raw_chain {
+            match query_atom.operator {
+                Operator::Equal => sorting.0.push(query_atom),
+                Operator::StrictEqual => sorting.1.push(query_atom),
+                Operator::Greater => sorting.4.push(query_atom),
+                Operator::Lower => sorting.5.push(query_atom),
+                Operator::GreaterEquality => sorting.2.push(query_atom),
+                Operator::LowerEquality => sorting.3.push(query_atom),
+                Operator::Different => sorting.6.push(query_atom),
+                Operator::StringContains => sorting.7.push(query_atom),
+                Operator::StringCaseInsensitiveContains => sorting.8.push(query_atom),
+                Operator::StringRegularExpression => sorting.9.push(query_atom),
+            }
+        }
+        raw_chain = Vec::new();
 
+        for vec in [&sorting.0, &sorting.1, &sorting.2, &sorting.3, &sorting.4, &sorting.5, &sorting.6, &sorting.7, &sorting.8, &sorting.9] {
+            let secvec = vec;
+            for i in secvec{
+                raw_chain.push((*i).clone());
+            }
+        }
+        drop(sorting);
+        if raw_chain.len() == 0{
+            return Ok(QueryType::Scan);
+        }       
+        let first : &QueryConditionAtom = &raw_chain[0];
+        let is_equality : bool = match first.operator{
+            Operator::Equal | Operator::StrictEqual => true,
+            _ => false
+        };
+        if is_equality && first.column == *primary_key{
+            return Ok(QueryType::Indexed(QueryIndexType::Strict(first.value.get_index())))
+        }
+        // 0 = Scan
+        // 1 = RangeEquality
+        // 2 = Range
+        let mut typo_range : (u64,u64)= (0,0);
+        let typo : u8 = match first.operator{
+            Operator::GreaterEquality => {
+                let mut a = 0;
+                for i in raw_chain.iter(){
+                    if discriminant(&i.operator) == discriminant(&Operator::LowerEquality){
+                        typo_range = (first.value.get_index(),i.value.get_index());
+                        a=1;
+                    }
+                    if discriminant(&i.operator) == discriminant(&Operator::Lower){
+                        typo_range = (first.value.get_index(),i.value.get_index());
+                        a=2;
+                    }
+                }
+                a
+            },
+            Operator::Greater => {
+                let mut a = 0;
+                for i in raw_chain.iter(){
+                    if discriminant(&i.operator) == discriminant(&Operator::LowerEquality){
+                        typo_range = (first.value.get_index(),i.value.get_index());
+                        a=1
+                    }
+                    if discriminant(&i.operator) == discriminant(&Operator::Lower){
+                        typo_range = (first.value.get_index(),i.value.get_index());
+                        a=2
+                    }
+                }
+                a
+            },
+            _ => {0}
+        };
+        return Ok(match typo{
+            0 => QueryType::Scan,
+            1 => QueryType::Indexed(QueryIndexType::Range(typo_range.0..typo_range.1)),
+            2 => QueryType::Indexed(QueryIndexType::InclusiveRange(typo_range.0..=typo_range.1)),
+            _ => QueryType::Scan,
+        })
+    }
 }

@@ -5,12 +5,15 @@ mod parser;
 mod strix;
 mod row;
 mod query;
+mod indexing;
+mod alba_types;
 mod query_conditions;
 use std::io::{Error,ErrorKind};
+use alba_types::AlbaTypes;
 use tokio;
 use database::connect;
 use lexer_functions::{
-    lexer_boolean_match, lexer_bytes_match, lexer_group_match, lexer_ignore_comments_match, lexer_keyword_match, lexer_number_match, lexer_operator_match, lexer_string_match, lexer_subcommand_match, AlbaTypes, Token
+    lexer_boolean_match, lexer_bytes_match, lexer_group_match, lexer_ignore_comments_match, lexer_keyword_match, lexer_number_match, lexer_operator_match, lexer_string_match, lexer_subcommand_match, Token
 };
 pub mod better_logs;
 
