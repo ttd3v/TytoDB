@@ -3,7 +3,7 @@ use std::{collections::HashMap, io::{self, Error, ErrorKind},mem::discriminant, 
 use ahash::AHashMap;
 use regex::Regex;
 
-use crate::{alba_types::AlbaTypes, gerr, indexing::getIndex, lexer_functions::Token, query::PrimitiveQueryConditions, row::Row};
+use crate::{alba_types::AlbaTypes, gerr, indexing::GetIndex, lexer_functions::Token, query::PrimitiveQueryConditions, row::Row};
 
 
 fn string_to_char(s: String) -> Result<char, io::Error> {

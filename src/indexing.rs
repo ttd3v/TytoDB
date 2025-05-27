@@ -1,7 +1,7 @@
 use tokio::sync::RwLock;
 
 use crate::{alba_types::AlbaTypes, container::Container, gerr};
-use std::{collections::BTreeSet, fs::{self, File}, hash::{DefaultHasher, Hash, Hasher}, io::{Error, Read, Write}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, fs::{self, File}, hash::{DefaultHasher, Hash, Hasher}, io::{Error, Read, Write}, ops::{RangeInclusive,Range}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc, time::Duration};
 
 const INDEX_CHUNK_SIZE : u64 = GERAL_DISK_CHUNK as u64;
 const GERAL_DISK_CHUNK : usize = 4096;
@@ -17,7 +17,7 @@ trait Add{
 }
 trait Remove{
     /// Remove a index value from indexes
-    async fn remove(&self, arg: u64) -> Result<(),Error>;
+    async fn remove(&self, arg: u64,arg_offset : u64) -> Result<(),Error>;
 }
 /// Types that can be used as search inputs.
 pub trait SearchQuery {}
@@ -59,8 +59,8 @@ impl Indexing{
             return Err(gerr("One of the indexing files are missing"))
         }
 
-        let indexes_file = File::create_new(&ifp)?;
-        let mut metadata_file = File::create_new(&mtp)?;
+        let indexes_file = File::open(&ifp)?;
+        let mut metadata_file = File::open(&mtp)?;
 
         let index_metadata  = {
             let size = metadata_file.metadata()?.size() as usize;
@@ -142,6 +142,49 @@ impl Indexing{
         *self.changes.write().await = true;
         Ok(())
     }
+    pub async  fn remove_index(&self,arg : u64,arg_offset : u64) -> Result<(),Error>{
+        let index_file = self.indexes_file.write().await;
+        let meta_file = self.indexes_file.write().await;
+        let mut metadata = self.metadata.write().await;
+        let mut slots = Vec::with_capacity(5);
+
+        for (index,value) in metadata.iter_mut().enumerate(){
+            if arg >= value.0 && arg <= value.1{
+                slots.push((index,value));
+            }
+        }
+
+        for (idx,v) in slots{
+            let mut buffer = [0u8;INDEX_CHUNK_SIZE as usize * 16];
+            let offset = idx * INDEX_CHUNK_SIZE as usize;
+            index_file.read_exact_at(&mut buffer, offset as u64)?;
+            let mut index_value_vector = Vec::with_capacity(INDEX_CHUNK_SIZE as usize);
+            for i in buffer.chunks_exact(16){
+                let index_value = u64::from_be_bytes(i[..8].try_into().unwrap());
+                let offset_value = u64::from_be_bytes(i[8..].try_into().unwrap());
+                if index_value == arg && arg_offset == offset_value{
+                    continue;
+                }else{
+                    index_value_vector.push((index_value,offset_value))
+                }
+            }
+            buffer = [0u8;INDEX_CHUNK_SIZE as usize * 16];
+            for i in index_value_vector.iter().enumerate(){
+                let index = i.0 * 16;
+                buffer[index..index+8].copy_from_slice(&i.1.0.to_be_bytes());
+                buffer[index+8..index+16].copy_from_slice(&i.1.1.to_be_bytes());
+            }
+            index_file.write_all_at(&mut buffer, INDEX_CHUNK_SIZE *(idx as u64 *16))?;
+            v.2 -= 1;
+            let mut metadata_buffer = [0u8;18];
+            metadata_buffer[..8].copy_from_slice(&v.0.to_be_bytes());
+            metadata_buffer[8..16].copy_from_slice(&v.1.to_be_bytes());
+            metadata_buffer[16..].copy_from_slice(&v.2.to_be_bytes());
+            meta_file.write_all_at(&mut metadata_buffer, idx as u64*18)?;
+            *self.changes.write().await = true;
+        }
+        Ok(())
+    }
 }
 
 impl Add for Indexing {
@@ -162,59 +205,125 @@ impl Add for Indexing {
         self.insert_index(arg, arg_offset,meta).await
     }
 }
+impl Remove for Indexing{
+    async fn remove(&self, arg: u64,arg_offset : u64) -> Result<(),Error> {
+        self.remove_index(arg, arg_offset).await
+    }
+}
+impl Search<Range<u64>> for Indexing {
+    async fn search(&self, arg: Range<u64>) -> Result<BTreeSet<u64>, Error> {
+        let metadata = self.metadata.read().await;
+        let mut groups = Vec::new();
+        for (idx,i) in metadata.iter().enumerate(){
+            if arg.contains(&i.0) && arg.contains(&i.1){
+                groups.push(idx);
+            }
+        }
+        groups.sort();
+
+        let indexes_file = self.indexes_file.read().await;
+        let mut offsets : BTreeSet<u64> = BTreeSet::new();
+        
+        for i in groups{
+            let mut buffer = [0u8;INDEX_CHUNK_SIZE as usize * 16];
+            indexes_file.read_exact_at(&mut buffer, i as u64*INDEX_CHUNK_SIZE*16)?;
+            for chunk in buffer.chunks_exact(16){
+                let index_value = u64::from_be_bytes(chunk[..8].try_into().unwrap());
+                let index_offset = u64::from_be_bytes(chunk[8..].try_into().unwrap());
+                if arg.contains(&index_value) {
+                    offsets.insert(index_offset);
+                }
+
+            }
+        }
+        
+        Ok(offsets)
+    }
+}
+impl Search<RangeInclusive<u64>> for Indexing {
+    async fn search(&self, arg: RangeInclusive<u64>) -> Result<BTreeSet<u64>, Error> {
+        let metadata = self.metadata.read().await;
+        let mut groups = Vec::new();
+        let (start, end) = (*arg.start(), *arg.end());
+
+        for (idx, i) in metadata.iter().enumerate() {
+            if start <= i.1 && end >= i.0 {
+                groups.push(idx);
+            }
+        }
+        groups.sort();
+
+        let indexes_file = self.indexes_file.read().await;
+        let mut offsets : BTreeSet<u64> = BTreeSet::new();
+        
+        for i in groups{
+            let mut buffer = [0u8;INDEX_CHUNK_SIZE as usize * 16];
+            indexes_file.read_exact_at(&mut buffer, i as u64*INDEX_CHUNK_SIZE*16)?;
+            for chunk in buffer.chunks_exact(16){
+                let index_value = u64::from_be_bytes(chunk[..8].try_into().unwrap());
+                let index_offset = u64::from_be_bytes(chunk[8..].try_into().unwrap());
+                if arg.contains(&index_value) {
+                    offsets.insert(index_offset);
+                }
+
+            }
+        }
+        
+        Ok(offsets)
+    }
+}
 
 
-
-pub trait getIndex{
+pub trait GetIndex{
     fn get_index(&self) -> u64;
 }
 
-impl getIndex for i32{
+impl GetIndex for i32{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for i64{
+impl GetIndex for i64{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for i16{
+impl GetIndex for i16{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for i128{
+impl GetIndex for i128{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for u128{
+impl GetIndex for u128{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for u64{
+impl GetIndex for u64{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for u32{
+impl GetIndex for u32{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for u16{
+impl GetIndex for u16{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for u8{
+impl GetIndex for u8{
     fn get_index(&self) -> u64{
         *self as u64/INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for f64{
+impl GetIndex for f64{
     fn get_index(&self) -> u64{
         if self.is_nan(){
             return 0
@@ -222,7 +331,7 @@ impl getIndex for f64{
         (self.abs() as u64) / INDEX_CHUNK_SIZE
     }
 }
-impl getIndex for bool{
+impl GetIndex for bool{
     fn get_index(&self) -> u64{
         if *self{
             return 1
@@ -230,7 +339,7 @@ impl getIndex for bool{
         0
     }
 }
-impl getIndex for String{
+impl GetIndex for String{
     fn get_index(&self) -> u64{
         let mut hasher = DefaultHasher::new();
         self.hash(&mut hasher);
@@ -239,7 +348,7 @@ impl getIndex for String{
 }
 
 
-impl getIndex for AlbaTypes {
+impl GetIndex for AlbaTypes {
     fn get_index(&self) -> u64 {
         match self {
             AlbaTypes::Text(s) => s.get_index(),
