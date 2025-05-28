@@ -4,7 +4,7 @@ use base64::{alphabet, engine::{self, GeneralPurpose}, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{alba_types::AlbaTypes, container::Container, gerr, indexing::Search, logerr, parser::{debug_tokens, parse}, query::{indexed_search, search, Query, SearchArguments}, query_conditions::{QueryConditions, QueryType}, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{alba_types::AlbaTypes, container::Container, gerr, indexing::Search, logerr, parser::{debug_tokens, parse}, query::{indexed_search, indexed_search_direct, search, search_direct, Query, SearchArguments}, query_conditions::{QueryConditions, QueryType}, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
 use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
 /////////////////////////////////////////////////
@@ -700,12 +700,73 @@ impl Database{
                 }
             },
             AST::EditRow(structure) => {
-                let container = if let Some(cnt) = self.container.get(&structure.container){
-                    cnt.read().await
-                }else{
-                    return Err(gerr(&format!("There is no container called {}",structure.container)))
+                let container = match self.container.get(&structure.container){
+                    Some(a) => a,
+                    None => {return Err(gerr(&format!("Failed to perform the query, there is no container named {}",structure.container)))}
                 };
-                todo!()
+                let header_types = container.read().await.headers.clone();
+
+                let mut headers_hash_map = HashMap::new();
+                for i in header_types.iter().cloned(){
+                    headers_hash_map.insert(i.0,i.1);
+                }
+                let qc = QueryConditions::from_primitive_conditions( structure.conditions.clone(), &headers_hash_map,if let Some(a) = header_types.first(){a.0.clone()}else{return Err(gerr("Error, no primary key found"))})?;
+                let container_book = container.read().await;
+                let qt = qc.query_type()?;
+
+                let mut column_name_idx : AHashMap<String,usize> = AHashMap::new();
+                let mut changes : AHashMap<usize,AlbaTypes> = AHashMap::new();
+                for i in container.read().await.headers.iter().enumerate(){
+                    column_name_idx.insert(i.1.0.clone(), i.0);
+                }
+                for i in structure.col_nam.iter().enumerate(){
+                    let val = if let Some(v) = structure.col_val.get(i.0){
+                        v
+                    }else{
+                        return Err(gerr("Failed to execute edit because there is a value missing for one of the columns entered"))
+                    };
+                    let id = column_name_idx.get(i.1).unwrap();
+                    changes.insert(*id, val.to_owned());
+                }
+
+                let result : Vec<(Vec<AlbaTypes>,u64)> = match qt{
+                    QueryType::Scan => { search_direct(container.clone(), SearchArguments{
+                        element_size: container_book.element_size.clone(),
+                        header_offset: container_book.headers_offset.clone() as usize,
+                        file: container_book.file.clone(),
+                        container_headers: headers_hash_map,
+                        container_values: header_types,
+                        container_name: structure.container,
+                        conditions: qc,
+                    }).await?}
+                    QueryType::Indexed(query_index_type) => {
+                        let values = match query_index_type{
+                            crate::query_conditions::QueryIndexType::Strict(t) => container_book.indexing.search(t).await,
+                            crate::query_conditions::QueryIndexType::Range(t) => container_book.indexing.search(t).await,
+                            crate::query_conditions::QueryIndexType::InclusiveRange(t) => container_book.indexing.search(t).await,
+                        }?;
+                        indexed_search_direct(container.clone(), SearchArguments{
+                            element_size: container_book.element_size.clone(),
+                            header_offset: container_book.headers_offset.clone() as usize,
+                            file: container_book.file.clone(),
+                            container_headers: headers_hash_map,
+                            container_values: header_types,
+                            container_name: structure.container,
+                            conditions: qc,
+                        },&values).await?
+                    }
+                }.iter_mut().map(|f|{
+                    for i in &changes{
+                        f.0.insert(i.0.clone(), i.1.clone());
+                    }
+                    f.to_owned()
+                }).collect();
+                
+                let container = container.write().await;
+                let mut mvcc = container.mvcc.write().await;
+                for i in result{
+                    mvcc.0.insert(i.1, (false,i.0));
+                }
             },
             AST::DeleteRow(_) => todo!(),
             AST::DeleteContainer(structure) => {

@@ -371,3 +371,118 @@ pub async fn indexed_search(container : Arc<RwLock<Container>>,args : SearchArgu
 
     Ok(query)
 }
+
+pub async fn search_direct(container: Arc<RwLock<Container>>, args: SearchArguments) -> Result<Vec<(Vec<AlbaTypes>, u64)>, Error> {
+    let element_size = args.element_size;
+    let header_offset = args.header_offset;
+
+    let file = args.file.read().await;
+    let file_size = file.metadata()?.size() as usize;
+    let total_rows = (file_size - header_offset) / element_size;
+    let mut readen_rows = 0;
+    let rows_per_iteration = std::cmp::max(1, CHUNK_MATRIX / element_size).min(total_rows);
+
+    let container = container.read().await;
+    let mut result: Vec<(Vec<AlbaTypes>, u64)> = Vec::new();
+    
+    while readen_rows < total_rows {
+        let to_read = rows_per_iteration.min(total_rows - readen_rows);
+        let read_size = to_read * element_size;
+        let mut buffer = vec![0u8; read_size];
+        file.read_exact_at(&mut buffer, (header_offset + (readen_rows * element_size)) as u64)?;
+        
+        for i in 0..to_read {
+            let buff = &buffer[(i * element_size)..((i + 1) * element_size)];
+            let row_address = (readen_rows + i) as u64;
+            
+            let row = match container.deserialize_row(buff).await {
+                Ok(row_content) => {
+                    let mut data: HashMap<String, AlbaTypes> = HashMap::new();
+                    for (index, value) in container.headers.iter().enumerate() {
+                        let column_value = match row_content.get(index) {
+                            Some(a) => {
+                                let cv = a.to_owned();
+                                if std::mem::discriminant(&cv) != std::mem::discriminant(&value.1) {
+                                    return Err(gerr("Invalid alba type row order, unmatching stuff"));
+                                }
+                                cv
+                            }
+                            None => {
+                                return Err(gerr("Invalid alba type row order, missing stuff"));
+                            }
+                        };
+                        data.insert(value.0.clone(), column_value);
+                    }
+                    Row {
+                        data,
+                        metadata: args.container_headers.clone(),
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
+            if args.conditions.row_match(&row)? {
+                result.push((row.data.values().map(|f|f.to_owned()).collect(), row_address));
+            }
+        }
+        readen_rows += to_read;
+    }
+
+    Ok(result)
+}
+
+pub async fn indexed_search_direct(container: Arc<RwLock<Container>>, args: SearchArguments, address: &BTreeSet<u64>) -> Result<Vec<(Vec<AlbaTypes>, u64)>, Error> {
+    let element_size = args.element_size;
+    let header_offset = args.header_offset;
+
+    let file = args.file.read().await;
+    let container = container.read().await;
+    let mut result: Vec<(Vec<AlbaTypes>, u64)> = Vec::new();
+
+    for &row_address in address {
+        let mut buffer = vec![0u8; element_size];
+        file.read_exact_at(&mut buffer, ((row_address * element_size as u64) + header_offset as u64) as u64)?;
+        
+        let row_content = match container.deserialize_row(&buffer).await {
+            Ok(row_content) => {
+                let mut data: HashMap<String, AlbaTypes> = HashMap::new();
+                for (index, value) in container.headers.iter().enumerate() {
+                    let column_value = match row_content.get(index) {
+                        Some(a) => {
+                            let cv = a.to_owned();
+                            if std::mem::discriminant(&cv) != std::mem::discriminant(&value.1) {
+                                return Err(gerr("Invalid alba type row order, unmatching stuff"));
+                            }
+                            cv
+                        }
+                        None => {
+                            return Err(gerr("Invalid alba type row order, missing stuff"));
+                        }
+                    };
+                    data.insert(value.0.clone(), column_value);
+                }
+                let row = Row {
+                    data,
+                    metadata: args.container_headers.clone(),
+                };
+
+                if args.conditions.row_match(&row)? {
+                    Some(row_content)
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        if let Some(content) = row_content {
+            result.push((content, row_address));
+        }
+    }
+
+    Ok(result)
+}
