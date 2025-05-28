@@ -1,5 +1,5 @@
-use std::{collections::HashMap, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, ops::RangeTo, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc, task};
-use ahash::{AHashMap, AHashSet};
+use std::{collections::HashMap, fs, io::{Error, ErrorKind, Read, Write}, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc};
+use ahash::AHashMap;
 use base64::{alphabet, engine::{self, GeneralPurpose}, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
@@ -665,7 +665,6 @@ impl Database{
                                 element_size: container_book.element_size.clone(),
                                 header_offset: container_book.headers_offset.clone() as usize,
                                 file: container_book.file.clone(),
-                                container_headers: headers_hash_map,
                                 container_values: header_types,
                                 container_name,
                                 conditions: qc,
@@ -680,7 +679,6 @@ impl Database{
                                     element_size: container_book.element_size.clone(),
                                     header_offset: container_book.headers_offset.clone() as usize,
                                     file: container_book.file.clone(),
-                                    container_headers: headers_hash_map,
                                     container_values: header_types,
                                     container_name,
                                     conditions: qc,
@@ -734,7 +732,6 @@ impl Database{
                         element_size: container_book.element_size.clone(),
                         header_offset: container_book.headers_offset.clone() as usize,
                         file: container_book.file.clone(),
-                        container_headers: headers_hash_map,
                         container_values: header_types,
                         container_name: structure.container,
                         conditions: qc,
@@ -749,7 +746,6 @@ impl Database{
                             element_size: container_book.element_size.clone(),
                             header_offset: container_book.headers_offset.clone() as usize,
                             file: container_book.file.clone(),
-                            container_headers: headers_hash_map,
                             container_values: header_types,
                             container_name: structure.container,
                             conditions: qc,
@@ -788,7 +784,6 @@ impl Database{
                         element_size: container_book.element_size.clone(),
                         header_offset: container_book.headers_offset.clone() as usize,
                         file: container_book.file.clone(),
-                        container_headers: headers_hash_map,
                         container_values: header_types,
                         container_name: structure.container,
                         conditions: qc,
@@ -803,7 +798,6 @@ impl Database{
                             element_size: container_book.element_size.clone(),
                             header_offset: container_book.headers_offset.clone() as usize,
                             file: container_book.file.clone(),
-                            container_headers: headers_hash_map,
                             container_values: header_types,
                             container_name: structure.container,
                             conditions: qc,

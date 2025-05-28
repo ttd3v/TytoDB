@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs::File, io::{self, Error, ErrorKind, Read}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc};
+use std::{collections::{BTreeSet, HashMap}, fs::File, io::Error, os::unix::fs::{FileExt, MetadataExt}, sync::Arc};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
@@ -224,7 +224,6 @@ pub struct SearchArguments {
     pub element_size : usize,
     pub header_offset : usize,
     pub file : Arc<RwLock<File>>,
-    pub container_headers : HashMap<String,AlbaTypes>,
     pub container_values : Vec<(String,AlbaTypes)>,
     pub container_name : String,
     pub conditions : QueryConditions
@@ -271,8 +270,7 @@ pub async fn search(container : Arc<RwLock<Container>>,args : SearchArguments) -
                         data.insert(value.0.clone(),column_value);
                     }
                     Row{
-                        data,
-                        metadata:args.container_headers.clone()
+                        data
                     }
                 },
                 Err(e) => {
@@ -319,7 +317,7 @@ pub async fn indexed_search(container : Arc<RwLock<Container>>,args : SearchArgu
     let mut rows : Vec<(Row,u64)> = Vec::new();
     for i in address{
         let mut buffer = vec![0u8;element_size];
-        file.read_exact_at(&mut buffer,((*i*element_size as u64)+header_offset as u64) as u64);
+        file.read_exact_at(&mut buffer,((*i*element_size as u64)+header_offset as u64) as u64)?;
         let row = match container.deserialize_row(&buffer).await{
             Ok(row_content) => {
                 let mut data : HashMap<String,AlbaTypes> = HashMap::new();
@@ -339,8 +337,7 @@ pub async fn indexed_search(container : Arc<RwLock<Container>>,args : SearchArgu
                     data.insert(value.0.clone(),column_value);
                 }
                 Row{
-                    data,
-                    metadata:args.container_headers.clone()
+                    data
                 }
             },
             Err(e) => {
@@ -414,8 +411,7 @@ pub async fn search_direct(container: Arc<RwLock<Container>>, args: SearchArgume
                         data.insert(value.0.clone(), column_value);
                     }
                     Row {
-                        data,
-                        metadata: args.container_headers.clone(),
+                        data
                     }
                 }
                 Err(e) => {
@@ -464,8 +460,7 @@ pub async fn indexed_search_direct(container: Arc<RwLock<Container>>, args: Sear
                     data.insert(value.0.clone(), column_value);
                 }
                 let row = Row {
-                    data,
-                    metadata: args.container_headers.clone(),
+                    data
                 };
 
                 if args.conditions.row_match(&row)? {

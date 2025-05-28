@@ -1,9 +1,8 @@
 use lazy_static::lazy_static;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use base64::{alphabet, engine::{self, general_purpose}, Engine as _};
-use serde::{Deserialize, Serialize};
 
-use crate::{database::MAX_STR_LEN, lexer};
+use crate::lexer;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token{

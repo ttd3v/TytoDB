@@ -1,13 +1,13 @@
 use tokio::sync::RwLock;
 
-use crate::{alba_types::AlbaTypes, container::Container, gerr};
-use std::{collections::BTreeSet, fs::{self, File}, hash::{DefaultHasher, Hash, Hasher}, io::{Error, Read, Write}, ops::{RangeInclusive,Range}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc, time::Duration};
+use crate::{alba_types::AlbaTypes, gerr};
+use std::{collections::BTreeSet, fs::{self, File}, hash::{DefaultHasher, Hash, Hasher}, io::{Error, Read}, ops::{RangeInclusive,Range}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc, time::Duration};
 
 const INDEX_CHUNK_SIZE : u64 = GERAL_DISK_CHUNK as u64;
 const GERAL_DISK_CHUNK : usize = 4096;
 
 
-type IndexElement = (u64,u64); // index value , offset value
+//type IndexElement = (u64,u64); // index value , offset value
 type MetadataElement = (u64,u64,u16); // minimum index value, maximum index value , items in chunk
 
 

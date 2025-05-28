@@ -4,7 +4,7 @@ use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use crate::{alba_types::AlbaTypes, database::{write_data, STRIX}, gerr, indexing::Indexing, logerr, loginfo, strix::DataReference};
+use crate::{alba_types::AlbaTypes, database::{write_data, STRIX}, gerr, indexing::{Add, GetIndex, Indexing, Remove}, logerr, loginfo, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -18,7 +18,6 @@ pub struct Container{
     pub headers_offset : u64,
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
-    pub container_name : String,
     pub indexing : Arc<Indexing>,
     file_path : String
 
@@ -82,7 +81,6 @@ impl Container {
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
-            container_name:container_name.to_string(),
             indexing:Indexing::load_index(&container_name).await?,
             file_path: path.to_string()
         }));
@@ -208,15 +206,15 @@ impl Container{
         };
         Ok(file_rows.max(mvcc_max))
     }
-    pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<AlbaTypes>{
-        for i in self.headers.iter(){
-            if *i.0 == *column_name{
-                let v = i.1.clone();
-                return Some(v)
-            }
-        }
-        None
-    }
+    // pub fn get_alba_type_from_column_name(&self,column_name : &String) -> Option<AlbaTypes>{
+    //     for i in self.headers.iter(){
+    //         if *i.0 == *column_name{
+    //             let v = i.1.clone();
+    //             return Some(v)
+    //         }
+    //     }
+    //     None
+    // }
 
     pub async fn get_next_addr(&self) -> Result<u64, Error> {
         let mut graveyard = self.graveyard.write().await;
@@ -272,13 +270,34 @@ impl Container{
         for (row_index, row_data) in insertions {
             let serialized = self.serialize_row(&row_data)?;
             let offset = hdr_off + row_index * row_sz;
+            if let Some(arg) = row_data.first(){
+                let i = self.indexing.clone();
+                let j = offset.clone();
+                let idx = arg.get_index();
+                tokio::spawn(async move{
+                    if let Err(e) = i.add(idx, j).await{
+                        logerr!("ERROR: {}",e);
+                    };
+                });
+            }
             fi.write_all_at(serialized.as_slice(), offset)?;
             virtual_ward.insert(offset as usize, (const_xxh3::xxh3_64(serialized.as_slice()),serialized));
         }
         
         let mut graveyard = self.graveyard.write().await;
-        for del in &deletes {
+        for del in &deletes  {
             let from = hdr_off + del.0 * row_sz;
+            if let Some(arg) = del.1.first(){
+                let i = self.indexing.clone();
+                let j = from.clone();
+                let idx = arg.get_index();
+                tokio::spawn(async move{
+                    if let Err(e) = i.remove(idx, j).await{
+                        logerr!("ERROR: {}",e);
+                    };
+                });
+            }
+            
             fi.write_all_at(&buf, from)?;
             virtual_ward.insert(from as usize, (const_xxh3::xxh3_64(&buf),buf.clone()));
             total -= 1;
