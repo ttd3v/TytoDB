@@ -1,12 +1,11 @@
-use std::{collections::{BTreeMap, HashMap}, fs, io::{Error, ErrorKind, Read, Write}, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fs, io::{Error, ErrorKind, Read, Write}, mem::discriminant, ops::RangeTo, os::unix::fs::FileExt, path::PathBuf, str::FromStr, sync::Arc, task};
 use ahash::{AHashMap, AHashSet};
 use base64::{alphabet, engine::{self, GeneralPurpose}, Engine};
 use lazy_static::lazy_static;
 use serde::{Serialize,Deserialize};
 use serde_yaml;
-use crate::{container::Container,alba_types::AlbaTypes , gerr, lexer_functions::Token, logerr, loginfo, parser::{debug_tokens, parse}, query::Query, strix::{start_strix, Strix}, AlbaContainer, AST};
+use crate::{alba_types::AlbaTypes, container::Container, gerr, indexing::Search, logerr, parser::{debug_tokens, parse}, query::{indexed_search, search, Query, SearchArguments}, query_conditions::{QueryConditions, QueryType}, strix::{start_strix, Strix}, AlbaContainer, AST};
 use rand::{Rng, distributions::Alphanumeric};
-use regex::Regex;
 use tokio::{net::TcpListener, sync::{OnceCell,RwLock}};
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
@@ -635,9 +634,79 @@ impl Database{
                 
             },
             AST::Search(structure) => {
+                let mut query : Option<Query> = None;
+                for i in structure.container{
+                    if let AlbaContainer::Virtual(virt) = i{
+                        let ast = debug_tokens(&virt)?;
+                        let result_query = Box::pin(self.run(ast)).await?;
+                        if let Some(ref mut q) = query{
+                            q.join(result_query);
+                        }else{
+                            query = Some(result_query)
+                        }
+                        continue;
+                    }
+                    if let AlbaContainer::Real(container_name) = i{
+                        let container = match self.container.get(&container_name){
+                            Some(a) => a,
+                            None => {return Err(gerr(&format!("Failed to perform the query, there is no container named {}",container_name)))}
+                        };
+                        let header_types = container.read().await.headers.clone();
+
+                        let mut headers_hash_map = HashMap::new();
+                        for i in header_types.iter().cloned(){
+                            headers_hash_map.insert(i.0,i.1);
+                        }
+                        let qc = QueryConditions::from_primitive_conditions( structure.conditions.clone(), &headers_hash_map,if let Some(a) = header_types.first(){a.0.clone()}else{return Err(gerr("Error, no primary key found"))})?;
+                        let container_book = container.read().await;
+                        let qt = qc.query_type()?;
+                        let result = match qt{
+                            QueryType::Scan => { search(container.clone(), SearchArguments{
+                                element_size: container_book.element_size.clone(),
+                                header_offset: container_book.headers_offset.clone() as usize,
+                                file: container_book.file.clone(),
+                                container_headers: headers_hash_map,
+                                container_values: header_types,
+                                container_name,
+                                conditions: qc,
+                            }).await?}
+                            QueryType::Indexed(query_index_type) => {
+                                let values = match query_index_type{
+                                    crate::query_conditions::QueryIndexType::Strict(t) => container_book.indexing.search(t).await,
+                                    crate::query_conditions::QueryIndexType::Range(t) => container_book.indexing.search(t).await,
+                                    crate::query_conditions::QueryIndexType::InclusiveRange(t) => container_book.indexing.search(t).await,
+                                }?;
+                                indexed_search(container.clone(), SearchArguments{
+                                    element_size: container_book.element_size.clone(),
+                                    header_offset: container_book.headers_offset.clone() as usize,
+                                    file: container_book.file.clone(),
+                                    container_headers: headers_hash_map,
+                                    container_values: header_types,
+                                    container_name,
+                                    conditions: qc,
+                                },&values).await?
+                            }
+                        };
+                        match query{
+                            Some(ref mut b) => b.join(result),
+                            None => {query = Some(result)}
+                        }
+                    };
+                }
+                if let Some(q) = query{
+                    return Ok(q)
+                }else{
+                    return Err(gerr("Error, no query result found"))
+                }
+            },
+            AST::EditRow(structure) => {
+                let container = if let Some(cnt) = self.container.get(&structure.container){
+                    cnt.read().await
+                }else{
+                    return Err(gerr(&format!("There is no container called {}",structure.container)))
+                };
                 todo!()
             },
-            AST::EditRow(_) => todo!(),
             AST::DeleteRow(_) => todo!(),
             AST::DeleteContainer(structure) => {
                 

@@ -71,7 +71,7 @@ enum Operator{
 }
 
 impl QueryConditions{
-    pub fn from_primitive_conditions(&self,primitive_conditions : PrimitiveQueryConditions, column_properties : &HashMap<String,AlbaTypes>,primary_key : String) -> Result<Self,Error>{
+    pub fn from_primitive_conditions(primitive_conditions : PrimitiveQueryConditions, column_properties : &HashMap<String,AlbaTypes>,primary_key : String) -> Result<Self,Error>{
         let mut chain : Vec<(QueryConditionAtom,Option<LogicalGate>)> = Vec::new();
         let condition_chunk = primitive_conditions.0;
         let condition_logical_gates_vec = primitive_conditions.1;

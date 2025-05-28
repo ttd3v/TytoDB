@@ -4,7 +4,7 @@ use ahash::AHashMap;
 use tokio::{io::AsyncReadExt, sync::RwLock};
 use tokio::fs::{File,self};
 use xxhash_rust::const_xxh3;
-use crate::{database::{write_data, STRIX}, gerr, alba_types::AlbaTypes, logerr, loginfo, strix::DataReference};
+use crate::{alba_types::AlbaTypes, database::{write_data, STRIX}, gerr, indexing::Indexing, logerr, loginfo, strix::DataReference};
 
 
 type MvccType = Arc<RwLock<(AHashMap<u64,(bool,Vec<AlbaTypes>)>,HashMap<String,(bool,String)>)>>;
@@ -19,6 +19,7 @@ pub struct Container{
     pub location : String,
     pub graveyard : Arc<RwLock<BTreeSet<u64>>>,
     pub container_name : String,
+    pub indexing : Arc<Indexing>,
     file_path : String
 
 }
@@ -81,7 +82,8 @@ impl Container {
             headers,
             location,
             graveyard: Arc::new(RwLock::new(BTreeSet::new())),
-            container_name,
+            container_name:container_name.to_string(),
+            indexing:Indexing::load_index(&container_name).await?,
             file_path: path.to_string()
         }));
         Ok(container)

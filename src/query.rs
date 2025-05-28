@@ -1,4 +1,4 @@
-use std::{fs::File, io::{self, Error, ErrorKind},collections::HashMap, os::unix::fs::{FileExt, MetadataExt}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs::File, io::{self, Error, ErrorKind, Read}, os::unix::fs::{FileExt, MetadataExt}, sync::Arc};
 use tokio::sync::RwLock;
 
 use serde::{Deserialize, Serialize};
@@ -221,18 +221,18 @@ impl Query {
 }
 
 pub struct SearchArguments {
-    element_size : usize,
-    header_offset : usize,
-    file : Arc<RwLock<File>>,
-    container_headers : HashMap<String,AlbaTypes>,
-    container_values : Vec<(String,AlbaTypes)>,
-    container_name : String,
-    conditions : QueryConditions
+    pub element_size : usize,
+    pub header_offset : usize,
+    pub file : Arc<RwLock<File>>,
+    pub container_headers : HashMap<String,AlbaTypes>,
+    pub container_values : Vec<(String,AlbaTypes)>,
+    pub container_name : String,
+    pub conditions : QueryConditions
 
 }
 const CHUNK_MATRIX : usize = 4096 * 10;
 
-pub async fn search(container : Arc<Container>,args : SearchArguments) -> Result<Query,Error>{
+pub async fn search(container : Arc<RwLock<Container>>,args : SearchArguments) -> Result<Query,Error>{
     let element_size = args.element_size;
     let header_offset = args.header_offset;
 
@@ -243,7 +243,7 @@ pub async fn search(container : Arc<Container>,args : SearchArguments) -> Result
     let rows_per_iteration = std::cmp::max(1, CHUNK_MATRIX / element_size).min(total_rows);
 
     
-
+    let container = container.read().await;
     let mut rows : Vec<(Row,usize)> = Vec::new();
     while readen_rows < total_rows{
         let to_read = rows_per_iteration.min(total_rows-readen_rows);
@@ -292,6 +292,71 @@ pub async fn search(container : Arc<Container>,args : SearchArguments) -> Result
     for i in rows{
         if args.conditions.row_match(&i.0)?{
             page_bucket.push(i.1 as u64); page_bucket_len += 1;
+            if page_bucket_len >= 100{
+                query.push((page_bucket.clone(),args.container_name.clone()));
+                page_bucket.clear(); page_bucket_len = 0;
+            }
+        }
+    }
+    if page_bucket_len > 0 {
+        query.push((page_bucket.clone(),args.container_name.clone()));
+    }
+    drop(page_bucket);
+    let _ = page_bucket_len;
+
+    Ok(query)
+}
+
+
+pub async fn indexed_search(container : Arc<RwLock<Container>>,args : SearchArguments,address : &BTreeSet<u64>) -> Result<Query,Error>{
+    let element_size = args.element_size;
+    let header_offset = args.header_offset;
+
+    let file = args.file.read().await;
+
+    
+    let container = container.read().await;
+    let mut rows : Vec<(Row,u64)> = Vec::new();
+    for i in address{
+        let mut buffer = vec![0u8;element_size];
+        file.read_exact_at(&mut buffer,((*i*element_size as u64)+header_offset as u64) as u64);
+        let row = match container.deserialize_row(&buffer).await{
+            Ok(row_content) => {
+                let mut data : HashMap<String,AlbaTypes> = HashMap::new();
+                for (index,value) in container.headers.iter().enumerate(){
+                    let column_value = match row_content.get(index){
+                        Some(a) => {
+                            let cv = a.to_owned();
+                            if std::mem::discriminant(&cv) != std::mem::discriminant(&value.1){
+                                return Err(gerr("Invalid alba type row order, unmatching stuff"))
+                            }
+                            cv
+                        },
+                        None => {
+                            return Err(gerr("Invalid alba type row order, missing stuff"));
+                        }
+                    };
+                    data.insert(value.0.clone(),column_value);
+                }
+                Row{
+                    data,
+                    metadata:args.container_headers.clone()
+                }
+            },
+            Err(e) => {
+                return Err(e)
+            }
+        };
+        rows.push((row,*i));
+    }
+    
+    let mut query = Query::new(args.container_values.iter().map(|f|f.1.clone()).collect());
+    let mut page_bucket : Vec<u64> = Vec::with_capacity(100);
+    let mut page_bucket_len = 0;
+
+    for i in rows{
+        if args.conditions.row_match(&i.0)?{
+            page_bucket.push(i.1); page_bucket_len += 1;
             if page_bucket_len >= 100{
                 query.push((page_bucket.clone(),args.container_name.clone()));
                 page_bucket.clear(); page_bucket_len = 0;

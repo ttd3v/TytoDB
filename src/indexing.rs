@@ -11,11 +11,11 @@ type IndexElement = (u64,u64); // index value , offset value
 type MetadataElement = (u64,u64,u16); // minimum index value, maximum index value , items in chunk
 
 
-trait Add{
+pub trait Add{
     /// Insert a index value into indexes
     async fn add(&self, arg: u64,arg_offset : u64) -> Result<(),Error>; // direct index value
 }
-trait Remove{
+pub trait Remove{
     /// Remove a index value from indexes
     async fn remove(&self, arg: u64,arg_offset : u64) -> Result<(),Error>;
 }
@@ -23,11 +23,14 @@ trait Remove{
 pub trait SearchQuery {}
 impl SearchQuery for std::ops::Range<u64> {}
 impl SearchQuery for std::ops::RangeInclusive<u64> {}
-trait Search <T:SearchQuery>{
+impl SearchQuery for u64 {}
+pub trait Search <T:SearchQuery>{
     /// Look for offset values from a range of indexes, index or IncludeRange of indexes
+    /// Returns a BTreeSet with offsets of the matched rows in a container.
     async fn search(&self, arg:T) -> Result<BTreeSet<u64>,Error>;
 }
 
+#[derive(Debug)]
 pub struct Indexing{
     indexes_file : Arc<RwLock<File>>,
     indexes_metadata_file : Arc<RwLock<File>>,
@@ -36,8 +39,8 @@ pub struct Indexing{
     destroyed : Arc<RwLock<bool>>
 }
 impl Indexing{
-    pub async fn create_index(container : &Container) -> Result<(),Error>{
-        let container_name : &String = &container.container_name;
+    pub async fn create_index(container_name : String) -> Result<(),Error>{
+        let container_name : &String = &container_name;
 
         let ifp = format!("./{}.cindex",container_name);
         let mtp = format!("./{}.cimeta",container_name);
@@ -49,9 +52,8 @@ impl Indexing{
         File::create_new(mtp)?;
         Ok(())
     }
-    pub async fn load_index(container : &Container) -> Result<Arc<Self>,Error>{
-        Indexing::create_index(container).await?;
-        let container_name : &String = &container.container_name;
+    pub async fn load_index(container_name : &String) -> Result<Arc<Self>,Error>{
+        Indexing::create_index(container_name.to_string()).await?;
 
         let ifp = format!("./{}.cindex",container_name);
         let mtp = format!("./{}.cimeta",container_name);
@@ -240,6 +242,7 @@ impl Search<Range<u64>> for Indexing {
         Ok(offsets)
     }
 }
+
 impl Search<RangeInclusive<u64>> for Indexing {
     async fn search(&self, arg: RangeInclusive<u64>) -> Result<BTreeSet<u64>, Error> {
         let metadata = self.metadata.read().await;
@@ -263,6 +266,38 @@ impl Search<RangeInclusive<u64>> for Indexing {
                 let index_value = u64::from_be_bytes(chunk[..8].try_into().unwrap());
                 let index_offset = u64::from_be_bytes(chunk[8..].try_into().unwrap());
                 if arg.contains(&index_value) {
+                    offsets.insert(index_offset);
+                }
+
+            }
+        }
+        
+        Ok(offsets)
+    }
+}
+
+impl Search<u64> for Indexing {
+    async fn search(&self, arg: u64) -> Result<BTreeSet<u64>, Error> {
+        let metadata = self.metadata.read().await;
+        let mut groups = Vec::new();
+
+        for (idx, i) in metadata.iter().enumerate() {
+            if i.1 >= arg && i.0 <= arg {
+                groups.push(idx);
+            }
+        }
+        groups.sort();
+
+        let indexes_file = self.indexes_file.read().await;
+        let mut offsets : BTreeSet<u64> = BTreeSet::new();
+        
+        for i in groups{
+            let mut buffer = [0u8;INDEX_CHUNK_SIZE as usize * 16];
+            indexes_file.read_exact_at(&mut buffer, i as u64*INDEX_CHUNK_SIZE*16)?;
+            for chunk in buffer.chunks_exact(16){
+                let index_value = u64::from_be_bytes(chunk[..8].try_into().unwrap());
+                let index_offset = u64::from_be_bytes(chunk[8..].try_into().unwrap());
+                if arg == index_value {
                     offsets.insert(index_offset);
                 }
 
