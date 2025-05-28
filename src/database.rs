@@ -768,7 +768,55 @@ impl Database{
                     mvcc.0.insert(i.1, (false,i.0));
                 }
             },
-            AST::DeleteRow(_) => todo!(),
+            AST::DeleteRow(structure) => {
+                let container = match self.container.get(&structure.container){
+                    Some(a) => a,
+                    None => {return Err(gerr(&format!("Failed to perform the query, there is no container named {}",structure.container)))}
+                };
+                let header_types = container.read().await.headers.clone();
+
+                let mut headers_hash_map = HashMap::new();
+                for i in header_types.iter().cloned(){
+                    headers_hash_map.insert(i.0,i.1);
+                }
+                let qc = QueryConditions::from_primitive_conditions( if let Some(c) = structure.conditions{c}else{(Vec::new(),Vec::new())}, &headers_hash_map,if let Some(a) = header_types.first(){a.0.clone()}else{return Err(gerr("Error, no primary key found"))})?;
+                let container_book = container.read().await;
+                let qt = qc.query_type()?;
+
+                let result : Vec<(Vec<AlbaTypes>,u64)> = match qt{
+                    QueryType::Scan => { search_direct(container.clone(), SearchArguments{
+                        element_size: container_book.element_size.clone(),
+                        header_offset: container_book.headers_offset.clone() as usize,
+                        file: container_book.file.clone(),
+                        container_headers: headers_hash_map,
+                        container_values: header_types,
+                        container_name: structure.container,
+                        conditions: qc,
+                    }).await?}
+                    QueryType::Indexed(query_index_type) => {
+                        let values = match query_index_type{
+                            crate::query_conditions::QueryIndexType::Strict(t) => container_book.indexing.search(t).await,
+                            crate::query_conditions::QueryIndexType::Range(t) => container_book.indexing.search(t).await,
+                            crate::query_conditions::QueryIndexType::InclusiveRange(t) => container_book.indexing.search(t).await,
+                        }?;
+                        indexed_search_direct(container.clone(), SearchArguments{
+                            element_size: container_book.element_size.clone(),
+                            header_offset: container_book.headers_offset.clone() as usize,
+                            file: container_book.file.clone(),
+                            container_headers: headers_hash_map,
+                            container_values: header_types,
+                            container_name: structure.container,
+                            conditions: qc,
+                        },&values).await?
+                    }
+                };
+                
+                let container = container.write().await;
+                let mut mvcc = container.mvcc.write().await;
+                for i in result{
+                    mvcc.0.insert(i.1, (true,i.0));
+                }
+            },
             AST::DeleteContainer(structure) => {
                 
                 if self.containers.contains(&structure.container) {
