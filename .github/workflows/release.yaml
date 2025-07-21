@@ -95,7 +95,7 @@ jobs:
         with:
           files: tytodb-x86_64-linux.tar.gz
 
-  # Job 3: Build ARM64 release (using cross in Docker)
+  # Job 3: Build ARM64 release (using bare cargo with cross-compilation)
   build-arm64:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: test
@@ -103,35 +103,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust
+      - name: Install cross-compilation toolchain and dependencies
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source ~/.cargo/env
-          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config
+          # Add arm64 architecture and install arm64 version of liburing-dev
+          sudo dpkg --add-architecture arm64
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev:arm64
       
-      - name: Install cross
-        run: |
-          source ~/.cargo/env
-          cargo install cross --git https://github.com/cross-rs/cross
+      - name: Add ARM64 target
+        run: rustup target add aarch64-unknown-linux-gnu
         
-      - name: Create Cross.toml with proper Docker image
+      - name: Create Cargo config for cross-compilation
         run: |
-          cat > Cross.toml << 'EOF'
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
           [target.aarch64-unknown-linux-gnu]
-          image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
-          pre-build = [
-            "dpkg --add-architecture arm64",
-            "apt-get update && apt-get install -y pkg-config liburing-dev:arm64"
-          ]
+          linker = "aarch64-linux-gnu-gcc"
+          
+          [env]
+          PKG_CONFIG_ALLOW_CROSS = "1"
+          PKG_CONFIG_PATH_aarch64-unknown-linux-gnu = "/usr/lib/aarch64-linux-gnu/pkgconfig"
           EOF
           
       - name: Build ARM64
-        run: |
-          source ~/.cargo/env
-          cross build --release --target aarch64-unknown-linux-gnu
+        run: cargo build --release --target aarch64-unknown-linux-gnu
           
       - name: Package ARM64
         run: tar -czf tytodb-arm64-linux.tar.gz -C target/aarch64-unknown-linux-gnu/release tytodb
+        
+      - name: Upload ARM64 to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tytodb-arm64-linux.tar.gz
         
       # Send build success notification for ARM64
       - name: Send Discord build notification (ARM64 Success)
@@ -152,9 +157,15 @@ jobs:
                ${{ secrets.DISCORD_WEBHOOK_URL }}
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      # Send build success notification for x86_64
+
+  # Send build success notification for x86_64 (moved to separate job)
+  notify-x86_64:
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: build-x86_64
+    runs-on: ubuntu-latest
+    steps:
       - name: Send Discord build notification (x86_64 Success)
-        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        if: env.DISCORD_WEBHOOK_URL != ''
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
