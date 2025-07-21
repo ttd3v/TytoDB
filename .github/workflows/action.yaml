@@ -17,9 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code
-      run: |
-        git clone https://github.com/${{ github.repository }}.git .
-        git checkout ${{ github.sha }}
+      uses: actions/checkout@v4
     
     - name: Install liburing-dev
       run: sudo apt-get update && sudo apt-get install -y liburing-dev
@@ -30,53 +28,88 @@ jobs:
     - name: Run tests
       id: tests
       run: |
+        # Run tests and capture output
         if cargo test --verbose > test_output.txt 2>&1; then
           echo "tests_passed=true" >> $GITHUB_OUTPUT
         else
           echo "tests_passed=false" >> $GITHUB_OUTPUT
-          cat test_output.txt
-          exit 1
         fi
+        # Display the output
         cat test_output.txt
     
-    # Send Discord notification (optional)
+    # Send success notification
     - name: Send Discord notification (Success)
-      if: success() && steps.tests.outputs.tests_passed == 'true' && env.DISCORD_WEBHOOK_URL != ''
+      if: success() && steps.tests.outputs.tests_passed == 'true' && vars.DISCORD_WEBHOOK_URL != ''
       run: |
         curl -H "Content-Type: application/json" \
              -d '{
                "embeds": [{
                  "title": "✅ Tests Passed",
-                 "description": "All tests passed for `'${{ github.repository }}'`",
+                 "description": "All tests passed successfully for `${{ github.repository }}`",
                  "color": 65280,
                  "fields": [
-                   {"name": "Branch", "value": "'${{ github.ref_name }}'", "inline": true},
-                   {"name": "Author", "value": "'${{ github.actor }}'", "inline": true}
-                 ]
+                   {
+                     "name": "Branch",
+                     "value": "${{ github.ref_name }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Commit",
+                     "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})",
+                     "inline": true
+                   },
+                   {
+                     "name": "Author",
+                     "value": "${{ github.actor }}",
+                     "inline": true
+                   }
+                 ],
+                 "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                }]
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
     
+    # Send failure notification
     - name: Send Discord notification (Failure)
-      if: failure() && env.DISCORD_WEBHOOK_URL != ''
+      if: failure() || steps.tests.outputs.tests_passed == 'false'
       run: |
+        # Get the last few lines of test output for the notification
+        tail -20 test_output.txt > short_output.txt 2>/dev/null || echo "No test output available" > short_output.txt
+        TEST_OUTPUT=$(cat short_output.txt | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+        
         curl -H "Content-Type: application/json" \
              -d '{
                "embeds": [{
                  "title": "❌ Tests Failed",
-                 "description": "Tests failed for `'${{ github.repository }}'`",
+                 "description": "Tests failed for `${{ github.repository }}`",
                  "color": 16711680,
                  "fields": [
-                   {"name": "Branch", "value": "'${{ github.ref_name }}'", "inline": true},
-                   {"name": "Author", "value": "'${{ github.actor }}'", "inline": true}
-                 ]
+                   {
+                     "name": "Branch",
+                     "value": "${{ github.ref_name }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Commit",
+                     "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})",
+                     "inline": true
+                   },
+                   {
+                     "name": "Author",
+                     "value": "${{ github.actor }}",
+                     "inline": true
+                   },
+                   {
+                     "name": "Error Output",
+                     "value": "```\n'"$TEST_OUTPUT"'\n```"
+                   }
+                 ],
+                 "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                }]
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
-      env:
-        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-  # Matrix job: Build releases for multiple targets
+  # Matrix job: Build releases for multiple targets (only on release)
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: test
@@ -97,9 +130,7 @@ jobs:
     
     steps:
       - name: Checkout code
-        run: |
-          git clone https://github.com/${{ github.repository }}.git .
-          git checkout ${{ github.sha }}
+        uses: actions/checkout@v4
       
       - name: Install dependencies (native)
         if: matrix.target.native == true
@@ -142,11 +173,11 @@ jobs:
         
       - name: Package binary (native)
         if: matrix.target.native == true
-        run: tar -czf tytodb-${{ matrix.target.arch }}-linux.tar.gz -C target/release tytodb
+        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/release tyto-db
         
       - name: Package binary (cross-compiled)
         if: matrix.target.native == false
-        run: tar -czf tytodb-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tytodb
+        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
         
       - name: Upload to release
         run: |
@@ -155,25 +186,43 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
-            "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tytodb-${{ matrix.target.arch }}-linux.tar.gz" \
-            --data-binary "@tytodb-${{ matrix.target.arch }}-linux.tar.gz"
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-${{ matrix.target.arch }}-linux.tar.gz" \
+            --data-binary "@tyto-db-${{ matrix.target.arch }}-linux.tar.gz"
         
       # Send build success notification
       - name: Send Discord build notification (Success)
-        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        if: success() && vars.DISCORD_WEBHOOK_URL != ''
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
                    "title": "🚀 ${{ matrix.target.arch }} Release Built",
-                   "description": "Binary `tytodb-${{ matrix.target.arch }}-linux.tar.gz` built and uploaded for release `'${{ github.event.release.tag_name }}'`",
+                   "description": "Binary `tyto-db-${{ matrix.target.arch }}-linux.tar.gz` built and uploaded for release `${{ github.event.release.tag_name }}`",
                    "color": 3447003,
                    "fields": [
                      {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
-                     {"name": "Release", "value": "'${{ github.event.release.tag_name }}'", "inline": true}
-                   ]
+                     {"name": "Release", "value": "${{ github.event.release.tag_name }}", "inline": true}
+                   ],
+                   "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      
+      # Send build failure notification
+      - name: Send Discord build notification (Failure)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d '{
+                 "embeds": [{
+                   "title": "💥 ${{ matrix.target.arch }} Build Failed",
+                   "description": "Failed to build binary for release `${{ github.event.release.tag_name }}`",
+                   "color": 16711680,
+                   "fields": [
+                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Release", "value": "${{ github.event.release.tag_name }}", "inline": true}
+                   ],
+                   "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+                 }]
+               }' \
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
