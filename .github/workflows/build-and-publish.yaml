@@ -1,0 +1,38 @@
+name: Build and Publish TytoDB
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: actions/setup-rust@v1
+        with:
+          toolchain: stable
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build TytoDB
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Create wheel artifact
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/tytodb dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: tyto-db-wheel-${{ matrix.target }}
+          path: dist/
+
