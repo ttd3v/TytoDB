@@ -12,20 +12,22 @@ jobs:
     strategy:
       matrix:
         target:
-          - x86_64-unknown-linux-gnu    # 64-bit Intel/AMD
-          - aarch64-unknown-linux-gnu   # 64-bit ARM
-          - armv7-unknown-linux-gnueabihf # 32-bit ARM
-          - i686-unknown-linux-gnu      # 32-bit Intel/AMD
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - i686-unknown-linux-gnu
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # --- THIS IS THE CORRECTED STEP ---
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           target: ${{ matrix.target }}
           cache: true
+      # --- END CORRECTION ---
 
       - name: Install cross
         run: cargo install cross
@@ -48,9 +50,7 @@ jobs:
 
       - name: Package the binary
         run: |
-          # Create a directory for packaging
           mkdir -p dist
-          # Copy the binary into it
           cp target/${{ matrix.target }}/release/tytodb dist/
 
       - name: Upload artifact
@@ -63,9 +63,9 @@ jobs:
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
-    needs: [build-linux] # Now only depends on the build-linux job
+    needs: [build-linux]
     permissions:
-      contents: write # Required to upload assets to a release
+      contents: write
 
     steps:
       - name: Download all artifacts
@@ -75,8 +75,6 @@ jobs:
 
       - name: Prepare release assets by zipping them
         run: |
-          # The download-artifact action creates subdirectories for each artifact.
-          # We loop through them and create a zip file for each one.
           for dir in artifacts/*; do
             if [ -d "$dir" ]; then
               asset_name=$(basename "$dir")
@@ -87,5 +85,4 @@ jobs:
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
-          # This uploads all the .zip files we just created
-          files: artifacts/*.zip```
+          files: artifacts/*.zip
