@@ -14,7 +14,7 @@ env:
 jobs:
   # Job 1: Run tests (always runs first)
   test:
-    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -27,11 +27,9 @@ jobs:
     
     - name: Run tests
       run: |
-        # Run tests and tee the output to a file.
-        # If cargo test fails, this step will fail, correctly stopping the workflow.
         cargo test --verbose 2>&1 | tee test_output.txt
     
-    # Send success notification
+    # Success notification
     - name: Send Discord notification (Success)
       if: success() && vars.DISCORD_WEBHOOK_URL != ''
       run: |
@@ -51,14 +49,12 @@ jobs:
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
     
-    # Send failure notification
+    # Failure notification
     - name: Send Discord notification (Failure)
       if: failure()
       run: |
-        # Get the last few lines of test output for the notification
         tail -20 test_output.txt > short_output.txt 2>/dev/null || echo "No test output available" > short_output.txt
         TEST_OUTPUT=$(cat short_output.txt | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-        
         curl -H "Content-Type: application/json" \
              -d '{
                "embeds": [{
@@ -80,7 +76,7 @@ jobs:
   test-build:
     if: github.event_name != 'release'
     needs: test
-    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         target: 
@@ -89,54 +85,29 @@ jobs:
             native: true
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
-            gcc_package: gcc-aarch64-linux-gnu
-            gcc_triplet: aarch64-linux-gnu
-            cross_compiler: aarch64-linux-gnu-gcc
             native: false
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Install dependencies (native)
+      - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
       
-      - name: Install cross-compilation dependencies
+      - name: Install cross (for arm64)
         if: matrix.target.native == false
-        run: |
-          sudo dpkg --add-architecture ${{ matrix.target.arch }}
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ${{ matrix.target.gcc_package }} \
-            pkg-config \
-            liburing-dev:${{ matrix.target.arch }}
+        run: cargo install cross
       
-      - name: Add Rust target
-        if: matrix.target.native == false
-        run: rustup target add ${{ matrix.target.rust_target }}
-        
-      - name: Create Cargo config for cross-compilation
-        if: matrix.target.native == false
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.${{ matrix.target.rust_target }}]
-          linker = "${{ matrix.target.cross_compiler }}"
-          EOF
-      
-      - name: Build native
+      - name: Build (x86_64 native)
         if: matrix.target.native == true
         run: cargo build --release
       
-      - name: Build cross-compiled
+      - name: Build (arm64 cross)
         if: matrix.target.native == false
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_PATH: /usr/lib/${{ matrix.target.gcc_triplet }}/pkgconfig
-        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        run: cross build --release --target ${{ matrix.target.rust_target }}
         
-      # Send build success notification
+      # Success notification
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
         run: |
@@ -156,7 +127,7 @@ jobs:
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
       
-      # Send build failure notification
+      # Failure notification
       - name: Send Discord build notification (Failure)
         if: failure()
         run: |
@@ -180,7 +151,7 @@ jobs:
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: test
-    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         target: 
@@ -189,52 +160,27 @@ jobs:
             native: true
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
-            gcc_package: gcc-aarch64-linux-gnu
-            gcc_triplet: aarch64-linux-gnu
-            cross_compiler: aarch64-linux-gnu-gcc
             native: false
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Install dependencies (native)
+      - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
       
-      - name: Install cross-compilation dependencies
+      - name: Install cross (for arm64)
         if: matrix.target.native == false
-        run: |
-          sudo dpkg --add-architecture ${{ matrix.target.arch }}
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ${{ matrix.target.gcc_package }} \
-            pkg-config \
-            liburing-dev:${{ matrix.target.arch }}
+        run: cargo install cross
       
-      - name: Add Rust target
-        if: matrix.target.native == false
-        run: rustup target add ${{ matrix.target.rust_target }}
-        
-      - name: Create Cargo config for cross-compilation
-        if: matrix.target.native == false
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.${{ matrix.target.rust_target }}]
-          linker = "${{ matrix.target.cross_compiler }}"
-          EOF
-      
-      - name: Build native
+      - name: Build (x86_64 native)
         if: matrix.target.native == true
         run: cargo build --release
       
-      - name: Build cross-compiled
+      - name: Build (arm64 cross)
         if: matrix.target.native == false
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-          PKG_CONFIG_PATH: /usr/lib/${{ matrix.target.gcc_triplet }}/pkgconfig
-        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        run: cross build --release --target ${{ matrix.target.rust_target }}
         
       - name: Package binary (native)
         if: matrix.target.native == true
@@ -254,7 +200,7 @@ jobs:
             "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-${{ matrix.target.arch }}-linux.tar.gz" \
             --data-binary "@tyto-db-${{ matrix.target.arch }}-linux.tar.gz"
         
-      # Send build success notification
+      # Success notification
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
         run: |
@@ -273,7 +219,7 @@ jobs:
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
       
-      # Send build failure notification
+      # Failure notification
       - name: Send Discord build notification (Failure)
         if: failure()
         run: |
