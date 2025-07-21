@@ -14,7 +14,7 @@ env:
 jobs:
   # Job 1: Run tests (always runs first)
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -80,7 +80,7 @@ jobs:
   test-build:
     if: github.event_name != 'release'
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
     strategy:
       matrix:
         target: 
@@ -106,8 +106,6 @@ jobs:
         if: matrix.target.native == false
         run: |
           sudo dpkg --add-architecture ${{ matrix.target.arch }}
-          # Fix source list to find arm64 packages
-          sudo sed -i 's/^deb http/deb [arch=amd64,${{ matrix.target.arch }}] http/' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ${{ matrix.target.gcc_package }} \
@@ -182,7 +180,7 @@ jobs:
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04 # Changed from ubuntu-latest to a stable LTS version
     strategy:
       matrix:
         target: 
@@ -208,8 +206,6 @@ jobs:
         if: matrix.target.native == false
         run: |
           sudo dpkg --add-architecture ${{ matrix.target.arch }}
-          # Fix source list to find arm64 packages
-          sudo sed -i 's/^deb http/deb [arch=amd64,${{ matrix.target.arch }}] http/' /etc/apt/sources.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             ${{ matrix.target.gcc_package }} \
