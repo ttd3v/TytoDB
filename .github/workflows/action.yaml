@@ -160,7 +160,7 @@ jobs:
           
           [env]
           PKG_CONFIG_ALLOW_CROSS = "1"
-          PKG_CONFIG_PATH_${{ matrix.target.rust_target | replace("-", "_") }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
+          PKG_CONFIG_PATH_${{ matrix.target.rust_target }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
           EOF
       
       - name: Build native
