@@ -1,7 +1,14 @@
 #include <stdint.h>
 #include <stdio.h>
-#include <liburing.h>
 #include <unistd.h>
+
+#include "liburing.h"
+#include "queue.c"
+#include "setup.c"
+#include "register.c"
+#include "syscall.c"
+#include "version.c"
+
 
 typedef struct {
     const unsigned char* buffer;
