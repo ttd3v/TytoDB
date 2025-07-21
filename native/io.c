@@ -2,7 +2,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#include "liburing.h"
+#include "liburing/io_uring.h"
+
 #include "queue.c"
 #include "setup.c"
 #include "register.c"
