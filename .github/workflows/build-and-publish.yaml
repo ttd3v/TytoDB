@@ -3,6 +3,8 @@ name: Build and Publish TytoDB
 on:
   release:
     types: [published]
+  push:
+    branches: [master]
 
 jobs:
   build:
