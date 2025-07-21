@@ -1,11 +1,10 @@
-# .github/workflows/release.yml
 name: Build and Publish TytoDB
+
 on:
   release:
     types: [published]
 
 jobs:
-  # Job for building all Linux targets
   build-linux:
     runs-on: ubuntu-latest
     strategy:
@@ -19,25 +18,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         
-      - name: Set up Rust
+      - name: Install Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           target: ${{ matrix.target }}
           override: true
-          
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          profile: minimal
           
       - name: Install cross
-        run: |
-          cargo install cross --git https://github.com/cross-rs/cross || cargo install cross
+        run: cargo install cross
         
       - name: Create Cross.toml for Linux dependencies
         run: |
@@ -61,11 +51,14 @@ jobs:
       - name: Package the binary
         run: |
           mkdir -p dist
-          # Handle different binary extensions and naming
           if [ -f "target/${{ matrix.target }}/release/tytodb" ]; then
             cp "target/${{ matrix.target }}/release/tytodb" "dist/tytodb-${{ matrix.target }}"
           elif [ -f "target/${{ matrix.target }}/release/tytodb.exe" ]; then
             cp "target/${{ matrix.target }}/release/tytodb.exe" "dist/tytodb-${{ matrix.target }}.exe"
+          else
+            echo "Binary not found!"
+            ls -la "target/${{ matrix.target }}/release/"
+            exit 1
           fi
           
       - name: Upload artifact
@@ -75,7 +68,6 @@ jobs:
           path: dist/
           retention-days: 1
 
-  # This job runs only after the Linux builds are successful
   publish-release:
     name: Publish Release
     runs-on: ubuntu-latest
@@ -94,10 +86,11 @@ jobs:
           for dir in artifacts/tytodb-binary-*; do
             if [ -d "$dir" ]; then
               target_name=$(basename "$dir" | sed 's/tytodb-binary-//')
-              # Create a properly named archive for each target
+              echo "Processing target: $target_name"
               (cd "$dir" && tar -czf "../../release-assets/tytodb-${target_name}.tar.gz" *)
             fi
           done
+          echo "Created assets:"
           ls -la release-assets/
         
       - name: Upload assets to release
