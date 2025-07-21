@@ -833,8 +833,8 @@ pub async fn connect() -> Result<Database, Error>{
 }
 
 
-use tytodb_conn::{commands::Commands as commands, db_response::{DBResponse, Row as NetRow}, logical_operators::LogicalOperator};
-use tytodb_conn::types::AlbaTypes as NetworkAlbaTypes;
+use tytodb_client::{commands::Commands as commands, db_response::{DBResponse, Row as NetRow}, logical_operators::LogicalOperator};
+use tytodb_client::types::AlbaTypes as NetworkAlbaTypes;
 
 fn ab_from_nat(a : NetworkAlbaTypes) -> AlbaTypes{
     match a{
@@ -882,7 +882,7 @@ fn query_to_bytes(q : Query) -> Vec<u8>{
     a
 }
 
-fn row_list_to_bytes(a : Vec<tytodb_conn::db_response::Row>) -> Vec<u8>{
+fn row_list_to_bytes(a : Vec<tytodb_client::db_response::Row>) -> Vec<u8>{
    DBResponse::new(a).encode()
 }
 

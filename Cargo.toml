@@ -17,8 +17,8 @@ aes-gcm = "0.10.3"
 lazy_static = "1.5.0"
 base64 = "0.22.1"
 num_cpus = "1.16.0"
-tytodb-conn = {path = "/home/theo/Documents/coding/TytoDB-ConnHandler/", version="0.1.0",default-features = false, features=["tokio"] }
-falcotcp = {path = "/home/theo/Documents/coding/FalcoTCP/", features=["tokio-runtime"],default-features = false, version="0.1.2"}
+tytodb-client = {path = "/home/theo/Documents/coding/TytoDB-RustClient/", version="0.1.0",default-features = false, features=["tokio"] }
+falcotcp = {features=["tokio-runtime"],default-features = false, version="0.1.3"}
 tokio = {version="1.45.1",features=["full"]}
 blake3 = "1.8.2"
 rand = "0.9.1"

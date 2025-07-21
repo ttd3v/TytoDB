@@ -246,17 +246,9 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "falcotcp"
-version = "0.1.2"
-dependencies = [
- "aes-gcm",
- "tokio",
-]
-
-[[package]]
-name = "falcotcp"
-version = "0.1.2"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7d2b4dab50b56deb25c7935133706ac5a26a77f88fe6e2f21d6336904b3c66"
+checksum = "8a5a222af2c42998a660b663090ed0b9c7c8dd83d475fc2d7a1c5893dfe754b3"
 dependencies = [
  "aes-gcm",
  "tokio",
@@ -895,7 +887,7 @@ dependencies = [
  "blake3",
  "cc",
  "chrono",
- "falcotcp 0.1.2",
+ "falcotcp",
  "futures",
  "lazy_static",
  "num_cpus",
@@ -904,14 +896,14 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tokio",
- "tytodb-conn",
+ "tytodb-client",
 ]
 
 [[package]]
-name = "tytodb-conn"
-version = "0.1.0"
+name = "tytodb-client"
+version = "0.1.1"
 dependencies = [
- "falcotcp 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "falcotcp",
  "tokio",
 ]
 
