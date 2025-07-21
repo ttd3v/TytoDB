@@ -12,12 +12,14 @@ jobs:
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: actions/setup-rust@v1.7.0
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          target: ${{ matrix.target }}
+          cache: true # Enable caching for dependencies
 
       - name: Install cross
         run: cargo install cross
@@ -25,14 +27,13 @@ jobs:
       - name: Build TytoDB
         run: cross build --release --target ${{ matrix.target }}
 
-      - name: Create wheel artifact
+      - name: Package the binary
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/tytodb dist/
 
-      - name: Upload wheel artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tyto-db-wheel-${{ matrix.target }}
+          name: tytodb-binary-${{ matrix.target }}
           path: dist/
-
