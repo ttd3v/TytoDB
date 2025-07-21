@@ -26,20 +26,14 @@ jobs:
       run: cargo build --verbose
     
     - name: Run tests
-      id: tests
       run: |
-        # Run tests and capture output
-        if cargo test --verbose > test_output.txt 2>&1; then
-          echo "tests_passed=true" >> $GITHUB_OUTPUT
-        else
-          echo "tests_passed=false" >> $GITHUB_OUTPUT
-        fi
-        # Display the output
-        cat test_output.txt
+        # Run tests and tee the output to a file.
+        # If cargo test fails, this step will fail, correctly stopping the workflow.
+        cargo test --verbose 2>&1 | tee test_output.txt
     
     # Send success notification
     - name: Send Discord notification (Success)
-      if: success() && steps.tests.outputs.tests_passed == 'true' && vars.DISCORD_WEBHOOK_URL != ''
+      if: success() && vars.DISCORD_WEBHOOK_URL != ''
       run: |
         curl -H "Content-Type: application/json" \
              -d '{
@@ -48,21 +42,9 @@ jobs:
                  "description": "All tests passed successfully for `${{ github.repository }}`",
                  "color": 65280,
                  "fields": [
-                   {
-                     "name": "Branch",
-                     "value": "${{ github.ref_name }}",
-                     "inline": true
-                   },
-                   {
-                     "name": "Commit",
-                     "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})",
-                     "inline": true
-                   },
-                   {
-                     "name": "Author",
-                     "value": "${{ github.actor }}",
-                     "inline": true
-                   }
+                   { "name": "Branch", "value": "${{ github.ref_name }}", "inline": true },
+                   { "name": "Commit", "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})", "inline": true },
+                   { "name": "Author", "value": "${{ github.actor }}", "inline": true }
                  ],
                  "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                }]
@@ -71,7 +53,7 @@ jobs:
     
     # Send failure notification
     - name: Send Discord notification (Failure)
-      if: failure() || steps.tests.outputs.tests_passed == 'false'
+      if: failure()
       run: |
         # Get the last few lines of test output for the notification
         tail -20 test_output.txt > short_output.txt 2>/dev/null || echo "No test output available" > short_output.txt
@@ -84,30 +66,15 @@ jobs:
                  "description": "Tests failed for `${{ github.repository }}`",
                  "color": 16711680,
                  "fields": [
-                   {
-                     "name": "Branch",
-                     "value": "${{ github.ref_name }}",
-                     "inline": true
-                   },
-                   {
-                     "name": "Commit",
-                     "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})",
-                     "inline": true
-                   },
-                   {
-                     "name": "Author",
-                     "value": "${{ github.actor }}",
-                     "inline": true
-                   },
-                   {
-                     "name": "Error Output",
-                     "value": "```\n'"$TEST_OUTPUT"'\n```"
-                   }
+                   { "name": "Branch", "value": "${{ github.ref_name }}", "inline": true },
+                   { "name": "Commit", "value": "[${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})", "inline": true },
+                   { "name": "Author", "value": "${{ github.actor }}", "inline": true },
+                   { "name": "Error Output", "value": "```\n'"$TEST_OUTPUT"'\n```" }
                  ],
                  "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                }]
              }' \
-                            ${{ secrets.DISCORD_WEBHOOK_URL }}
+             ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   # Test build job: Build for multiple targets on push/PR (no upload)
   test-build:
@@ -125,6 +92,7 @@ jobs:
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
             gcc_package: gcc-aarch64-linux-gnu
+            gcc_triplet: aarch64-linux-gnu
             cross_compiler: aarch64-linux-gnu-gcc
             native: false
     
@@ -141,7 +109,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.target.gcc_package }} pkg-config
-          # Add architecture and install cross-compiled libraries
           sudo dpkg --add-architecture ${{ matrix.target.arch }}
           sudo apt-get update
           sudo apt-get install -y liburing-dev:${{ matrix.target.arch }}
@@ -154,13 +121,9 @@ jobs:
         if: matrix.target.native == false
         run: |
           mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
+          cat > .cargo/config.toml <<EOF
           [target.${{ matrix.target.rust_target }}]
           linker = "${{ matrix.target.cross_compiler }}"
-          
-          [env]
-          PKG_CONFIG_ALLOW_CROSS = "1"
-          PKG_CONFIG_PATH_${{ matrix.target.rust_target }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
           EOF
       
       - name: Build native
@@ -169,6 +132,9 @@ jobs:
       
       - name: Build cross-compiled
         if: matrix.target.native == false
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+          PKG_CONFIG_PATH: /usr/lib/${{ matrix.target.gcc_triplet }}/pkgconfig
         run: cargo build --release --target ${{ matrix.target.rust_target }}
         
       # Send build success notification
@@ -227,6 +193,7 @@ jobs:
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
             gcc_package: gcc-aarch64-linux-gnu
+            gcc_triplet: aarch64-linux-gnu
             cross_compiler: aarch64-linux-gnu-gcc
             native: false
     
@@ -243,7 +210,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.target.gcc_package }} pkg-config
-          # Add architecture and install cross-compiled libraries
           sudo dpkg --add-architecture ${{ matrix.target.arch }}
           sudo apt-get update
           sudo apt-get install -y liburing-dev:${{ matrix.target.arch }}
@@ -256,13 +222,9 @@ jobs:
         if: matrix.target.native == false
         run: |
           mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
+          cat > .cargo/config.toml <<EOF
           [target.${{ matrix.target.rust_target }}]
           linker = "${{ matrix.target.cross_compiler }}"
-          
-          [env]
-          PKG_CONFIG_ALLOW_CROSS = "1"
-          PKG_CONFIG_PATH_${{ matrix.target.rust_target }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
           EOF
       
       - name: Build native
@@ -271,6 +233,9 @@ jobs:
       
       - name: Build cross-compiled
         if: matrix.target.native == false
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+          PKG_CONFIG_PATH: /usr/lib/${{ matrix.target.gcc_triplet }}/pkgconfig
         run: cargo build --release --target ${{ matrix.target.rust_target }}
         
       - name: Package binary (native)
