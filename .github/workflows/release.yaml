@@ -1,0 +1,56 @@
+name: Build and Publish TytoDB
+
+on:
+  release:
+    types: [published]
+  push:
+    branches: [master]
+jobs:
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+      
+      - name: Build
+        run: cargo build --release
+        
+      - name: Package
+        run: tar -czf tytodb-x86_64-linux.tar.gz -C target/release tytodb
+        
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tytodb-x86_64-linux.tar.gz
+
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update 
+          sudo apt-get install -y gcc-aarch64-linux-gnu liburing-dev
+      
+      - name: Install Rust and target
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          rustup target add aarch64-unknown-linux-gnu
+      
+      - name: Build for ARM64
+        run: |
+          source ~/.cargo/env
+          export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          cargo build --release --target aarch64-unknown-linux-gnu
+        
+      - name: Package
+        run: tar -czf tytodb-arm64-linux.tar.gz -C target/aarch64-unknown-linux-gnu/release tytodb
+        
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tytodb-arm64-linux.tar.gz
