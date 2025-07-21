@@ -1,106 +1,100 @@
-name: Rust
+name: Build and Publish TytoDB
 
 on:
-  push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
-
-env:
-  CARGO_TERM_COLOR: always
+  release:
+    types: [published]
 
 jobs:
-  build:
+  build-linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - i686-unknown-linux-gnu
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install liburing-dev
-      run: sudo apt-get update && sudo apt-get install -y liburing-dev
-    
-    - name: Build
-      run: cargo build --verbose
-    
-    - name: Run tests
-      id: tests
-      run: |
-        # Run tests and capture output
-        if cargo test --verbose > test_output.txt 2>&1; then
-          echo "tests_passed=true" >> $GITHUB_OUTPUT
-        else
-          echo "tests_passed=false" >> $GITHUB_OUTPUT
-        fi
-        # Also display the output
-        cat test_output.txt
-    
-    # Send success notification
-    - name: Send Discord notification (Success)
-      if: steps.tests.outputs.tests_passed == 'true'
-      run: |
-        curl -H "Content-Type: application/json" \
-             -d '{
-               "embeds": [{
-                 "title": "✅ Tests Passed",
-                 "description": "All tests passed successfully for `'${{ github.repository }}'`",
-                 "color": 65280,
-                 "fields": [
-                   {
-                     "name": "Branch",
-                     "value": "'${{ github.ref_name }}'",
-                     "inline": true
-                   },
-                   {
-                     "name": "Commit",
-                     "value": "['${{ github.sha }}']('${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}')",
-                     "inline": true
-                   },
-                   {
-                     "name": "Author",
-                     "value": "'${{ github.actor }}'",
-                     "inline": true
-                   }
-                 ],
-                 "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
-               }]
-             }' \
-             ${{ secrets.DISCORD_WEBHOOK_URL }}
-    
-    # Send failure notification
-    - name: Send Discord notification (Failure)
-      if: steps.tests.outputs.tests_passed == 'false' || failure()
-      run: |
-        # Get the last few lines of test output for the notification
-        tail -20 test_output.txt > short_output.txt 2>/dev/null || echo "No test output available" > short_output.txt
-        TEST_OUTPUT=$(cat short_output.txt | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+      - name: Checkout code
+        uses: actions/checkout@v4
         
-        curl -H "Content-Type: application/json" \
-             -d '{
-               "embeds": [{
-                 "title": "❌ Tests Failed",
-                 "description": "Tests failed for `'${{ github.repository }}'`",
-                 "color": 16711680,
-                 "fields": [
-                   {
-                     "name": "Branch",
-                     "value": "'${{ github.ref_name }}'",
-                     "inline": true
-                   },
-                   {
-                     "name": "Commit",
-                     "value": "['${{ github.sha }}']('${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}')",
-                     "inline": true
-                   },
-                   {
-                     "name": "Author",
-                     "value": "'${{ github.actor }}'",
-                     "inline": true
-                   },
-                   {
-                     "name": "Error Output",
-                     "value": "```\n'"$TEST_OUTPUT"'\n```"
-                   }
-                 ],
-                 "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'"
-               }]
-             }' \
-             ${{ secrets.DISCORD_WEBHOOK_URL }}
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+          
+      - name: Install cross
+        run: cargo install cross
+        
+      - name: Create Cross.toml for Linux dependencies
+        run: |
+          cat <<EOF > Cross.toml
+          [target.aarch64-unknown-linux-gnu]
+          pre-build = ["apt-get update && apt-get install -y --no-install-recommends liburing-dev"]
+          
+          [target.x86_64-unknown-linux-gnu]
+          pre-build = ["apt-get update && apt-get install -y --no-install-recommends liburing-dev"]
+          
+          [target.armv7-unknown-linux-gnueabihf]
+          pre-build = ["apt-get update && apt-get install -y --no-install-recommends liburing-dev"]
+          
+          [target.i686-unknown-linux-gnu]
+          pre-build = ["apt-get update && apt-get install -y --no-install-recommends liburing-dev"]
+          EOF
+          
+      - name: Build with cross
+        run: cross build --release --target ${{ matrix.target }}
+        
+      - name: Package the binary
+        run: |
+          mkdir -p dist
+          if [ -f "target/${{ matrix.target }}/release/tytodb" ]; then
+            cp "target/${{ matrix.target }}/release/tytodb" "dist/tytodb-${{ matrix.target }}"
+          elif [ -f "target/${{ matrix.target }}/release/tytodb.exe" ]; then
+            cp "target/${{ matrix.target }}/release/tytodb.exe" "dist/tytodb-${{ matrix.target }}.exe"
+          else
+            echo "Binary not found!"
+            ls -la "target/${{ matrix.target }}/release/"
+            exit 1
+          fi
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tytodb-binary-${{ matrix.target }}
+          path: dist/
+          retention-days: 1
+
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [build-linux]
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          for dir in artifacts/tytodb-binary-*; do
+            if [ -d "$dir" ]; then
+              target_name=$(basename "$dir" | sed 's/tytodb-binary-//')
+              echo "Processing target: $target_name"
+              (cd "$dir" && tar -czf "../../release-assets/tytodb-${target_name}.tar.gz" *)
+            fi
+          done
+          echo "Created assets:"
+          ls -la release-assets/
+        
+      - name: Upload assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
