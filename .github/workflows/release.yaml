@@ -16,7 +16,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      run: |
+        git clone https://github.com/${{ github.repository }}.git .
+        git checkout ${{ github.sha }}
     
     - name: Install liburing-dev
       run: sudo apt-get update && sudo apt-get install -y liburing-dev
@@ -73,108 +76,100 @@ jobs:
       env:
         DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-  # Job 2: Build x86_64 release (native build)
-  build-x86_64:
+  # Matrix job: Build releases for multiple targets
+  build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: 
+          - arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            gcc_package: ""
+            cross_compiler: ""
+            native: true
+          - arch: arm64
+            rust_target: aarch64-unknown-linux-gnu
+            gcc_package: gcc-aarch64-linux-gnu
+            cross_compiler: aarch64-linux-gnu-gcc
+            native: false
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        run: |
+          git clone https://github.com/${{ github.repository }}.git .
+          git checkout ${{ github.sha }}
       
-      - name: Install dependencies
+      - name: Install dependencies (native)
+        if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
       
-      - name: Build x86_64
-        run: cargo build --release
-        
-      - name: Package x86_64
-        run: tar -czf tytodb-x86_64-linux.tar.gz -C target/release tytodb
-        
-      - name: Upload x86_64 to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: tytodb-x86_64-linux.tar.gz
-
-  # Job 3: Build ARM64 release (using bare cargo with cross-compilation)
-  build-arm64:
-    if: github.event_name == 'release' && github.event.action == 'published'
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install cross-compilation toolchain and dependencies
+      - name: Install cross-compilation dependencies
+        if: matrix.target.native == false
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config
-          # Add arm64 architecture and install arm64 version of liburing-dev
-          sudo dpkg --add-architecture arm64
+          sudo apt-get install -y ${{ matrix.target.gcc_package }} pkg-config
+          # Add architecture and install cross-compiled libraries
+          sudo dpkg --add-architecture ${{ matrix.target.arch }}
           sudo apt-get update
-          sudo apt-get install -y liburing-dev:arm64
+          sudo apt-get install -y liburing-dev:${{ matrix.target.arch }}
       
-      - name: Add ARM64 target
-        run: rustup target add aarch64-unknown-linux-gnu
+      - name: Add Rust target
+        if: matrix.target.native == false
+        run: rustup target add ${{ matrix.target.rust_target }}
         
       - name: Create Cargo config for cross-compilation
+        if: matrix.target.native == false
         run: |
           mkdir -p .cargo
           cat > .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
+          [target.${{ matrix.target.rust_target }}]
+          linker = "${{ matrix.target.cross_compiler }}"
           
           [env]
           PKG_CONFIG_ALLOW_CROSS = "1"
-          PKG_CONFIG_PATH_aarch64-unknown-linux-gnu = "/usr/lib/aarch64-linux-gnu/pkgconfig"
+          PKG_CONFIG_PATH_${{ matrix.target.rust_target | replace("-", "_") }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
           EOF
-          
-      - name: Build ARM64
-        run: cargo build --release --target aarch64-unknown-linux-gnu
-          
-      - name: Package ARM64
-        run: tar -czf tytodb-arm64-linux.tar.gz -C target/aarch64-unknown-linux-gnu/release tytodb
+      
+      - name: Build native
+        if: matrix.target.native == true
+        run: cargo build --release
+      
+      - name: Build cross-compiled
+        if: matrix.target.native == false
+        run: cargo build --release --target ${{ matrix.target.rust_target }}
         
-      - name: Upload ARM64 to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: tytodb-arm64-linux.tar.gz
+      - name: Package binary (native)
+        if: matrix.target.native == true
+        run: tar -czf tytodb-${{ matrix.target.arch }}-linux.tar.gz -C target/release tytodb
         
-      # Send build success notification for ARM64
-      - name: Send Discord build notification (ARM64 Success)
+      - name: Package binary (cross-compiled)
+        if: matrix.target.native == false
+        run: tar -czf tytodb-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tytodb
+        
+      - name: Upload to release
+        run: |
+          curl -L \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/octet-stream" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tytodb-${{ matrix.target.arch }}-linux.tar.gz" \
+            --data-binary "@tytodb-${{ matrix.target.arch }}-linux.tar.gz"
+        
+      # Send build success notification
+      - name: Send Discord build notification (Success)
         if: success() && env.DISCORD_WEBHOOK_URL != ''
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
-                   "title": "🚀 ARM64 Release Built",
-                   "description": "Binary `tytodb-arm64-linux.tar.gz` built and uploaded for release `'${{ github.event.release.tag_name }}'`",
+                   "title": "🚀 ${{ matrix.target.arch }} Release Built",
+                   "description": "Binary `tytodb-${{ matrix.target.arch }}-linux.tar.gz` built and uploaded for release `'${{ github.event.release.tag_name }}'`",
                    "color": 3447003,
                    "fields": [
-                     {"name": "Target", "value": "aarch64-unknown-linux-gnu", "inline": true},
-                     {"name": "Release", "value": "'${{ github.event.release.tag_name }}'", "inline": true}
-                   ]
-                 }]
-               }' \
-               ${{ secrets.DISCORD_WEBHOOK_URL }}
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-
-  # Send build success notification for x86_64 (moved to separate job)
-  notify-x86_64:
-    if: github.event_name == 'release' && github.event.action == 'published'
-    needs: build-x86_64
-    runs-on: ubuntu-latest
-    steps:
-      - name: Send Discord build notification (x86_64 Success)
-        if: env.DISCORD_WEBHOOK_URL != ''
-        run: |
-          curl -H "Content-Type: application/json" \
-               -d '{
-                 "embeds": [{
-                   "title": "🚀 x86_64 Release Built",
-                   "description": "Binary `tytodb-x86_64-linux.tar.gz` built and uploaded for release `'${{ github.event.release.tag_name }}'`",
-                   "color": 3447003,
-                   "fields": [
-                     {"name": "Target", "value": "x86_64-unknown-linux-gnu", "inline": true},
+                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
                      {"name": "Release", "value": "'${{ github.event.release.tag_name }}'", "inline": true}
                    ]
                  }]
