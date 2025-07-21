@@ -107,7 +107,109 @@ jobs:
                  "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                }]
              }' \
-             ${{ secrets.DISCORD_WEBHOOK_URL }}
+                            ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+  # Test build job: Build for multiple targets on push/PR (no upload)
+  test-build:
+    if: github.event_name != 'release'
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: 
+          - arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            gcc_package: ""
+            cross_compiler: ""
+            native: true
+          - arch: arm64
+            rust_target: aarch64-unknown-linux-gnu
+            gcc_package: gcc-aarch64-linux-gnu
+            cross_compiler: aarch64-linux-gnu-gcc
+            native: false
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies (native)
+        if: matrix.target.native == true
+        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+      
+      - name: Install cross-compilation dependencies
+        if: matrix.target.native == false
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.target.gcc_package }} pkg-config
+          # Add architecture and install cross-compiled libraries
+          sudo dpkg --add-architecture ${{ matrix.target.arch }}
+          sudo apt-get update
+          sudo apt-get install -y liburing-dev:${{ matrix.target.arch }}
+      
+      - name: Add Rust target
+        if: matrix.target.native == false
+        run: rustup target add ${{ matrix.target.rust_target }}
+        
+      - name: Create Cargo config for cross-compilation
+        if: matrix.target.native == false
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.${{ matrix.target.rust_target }}]
+          linker = "${{ matrix.target.cross_compiler }}"
+          
+          [env]
+          PKG_CONFIG_ALLOW_CROSS = "1"
+          PKG_CONFIG_PATH_${{ matrix.target.rust_target }} = "/usr/lib/${{ matrix.target.rust_target }}/pkgconfig"
+          EOF
+      
+      - name: Build native
+        if: matrix.target.native == true
+        run: cargo build --release
+      
+      - name: Build cross-compiled
+        if: matrix.target.native == false
+        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        
+      # Send build success notification
+      - name: Send Discord build notification (Success)
+        if: success() && vars.DISCORD_WEBHOOK_URL != ''
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d '{
+                 "embeds": [{
+                   "title": "🔨 ${{ matrix.target.arch }} Test Build Complete",
+                   "description": "Test build successful for `${{ github.repository }}` on `${{ github.ref_name }}`",
+                   "color": 3447003,
+                   "fields": [
+                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Branch", "value": "${{ github.ref_name }}", "inline": true},
+                     {"name": "Author", "value": "${{ github.actor }}", "inline": true}
+                   ],
+                   "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+                 }]
+               }' \
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
+      
+      # Send build failure notification
+      - name: Send Discord build notification (Failure)
+        if: failure()
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d '{
+                 "embeds": [{
+                   "title": "💥 ${{ matrix.target.arch }} Test Build Failed",
+                   "description": "Test build failed for `${{ github.repository }}` on `${{ github.ref_name }}`",
+                   "color": 16711680,
+                   "fields": [
+                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Branch", "value": "${{ github.ref_name }}", "inline": true},
+                     {"name": "Author", "value": "${{ github.actor }}", "inline": true}
+                   ],
+                   "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
+                 }]
+               }' \
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   # Matrix job: Build releases for multiple targets (only on release)
   build-release:
