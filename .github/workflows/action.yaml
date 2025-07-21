@@ -12,24 +12,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Job 1: Run tests (always runs first)
   test:
     runs-on: ubuntu-22.04
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    
+
     - name: Install liburing-dev
       run: sudo apt-get update && sudo apt-get install -y liburing-dev
-    
+
     - name: Build
       run: cargo build --verbose
-    
+
     - name: Run tests
       run: |
         cargo test --verbose 2>&1 | tee test_output.txt
-    
-    # Success notification
+
     - name: Send Discord notification (Success)
       if: success() && vars.DISCORD_WEBHOOK_URL != ''
       run: |
@@ -48,8 +46,7 @@ jobs:
                }]
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
-    
-    # Failure notification
+
     - name: Send Discord notification (Failure)
       if: failure()
       run: |
@@ -72,10 +69,31 @@ jobs:
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-  # Test build job: Build for multiple targets on push/PR (no upload)
+  # Build a custom cross image for aarch64 with liburing-dev
+  build-cross-image:
+    runs-on: ubuntu-22.04
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Write custom Dockerfile
+        run: |
+          cat <<EOF > cross.Dockerfile
+          FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+          RUN apt-get update && apt-get install -y liburing-dev
+          EOF
+
+      - name: Build custom image
+        id: meta
+        run: |
+          docker build -t cross-aarch64-liburing -f cross.Dockerfile .
+          echo "image=cross-aarch64-liburing" >> $GITHUB_OUTPUT
+
   test-build:
     if: github.event_name != 'release'
-    needs: test
+    needs: [test, build-cross-image]
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -86,28 +104,30 @@ jobs:
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
             native: false
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
-      
+
       - name: Install cross (for arm64)
         if: matrix.target.native == false
         run: cargo install cross
-      
+
       - name: Build (x86_64 native)
         if: matrix.target.native == true
         run: cargo build --release
-      
+
       - name: Build (arm64 cross)
         if: matrix.target.native == false
+        env:
+          CROSS_CONTAINER_ENGINE: docker
+          CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
         run: cross build --release --target ${{ matrix.target.rust_target }}
-        
-      # Success notification
+
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
         run: |
@@ -126,8 +146,7 @@ jobs:
                  }]
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
-      
-      # Failure notification
+
       - name: Send Discord build notification (Failure)
         if: failure()
         run: |
@@ -147,10 +166,9 @@ jobs:
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-  # Matrix job: Build releases for multiple targets (only on release)
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
-    needs: test
+    needs: [test, build-cross-image]
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -161,35 +179,38 @@ jobs:
           - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
             native: false
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
-      
+
       - name: Install cross (for arm64)
         if: matrix.target.native == false
         run: cargo install cross
-      
+
       - name: Build (x86_64 native)
         if: matrix.target.native == true
         run: cargo build --release
-      
+
       - name: Build (arm64 cross)
         if: matrix.target.native == false
+        env:
+          CROSS_CONTAINER_ENGINE: docker
+          CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
         run: cross build --release --target ${{ matrix.target.rust_target }}
-        
+
       - name: Package binary (native)
         if: matrix.target.native == true
         run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/release tyto-db
-        
+
       - name: Package binary (cross-compiled)
         if: matrix.target.native == false
         run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
-        
+
       - name: Upload to release
         run: |
           curl -L \
@@ -199,8 +220,7 @@ jobs:
             -H "Content-Type: application/octet-stream" \
             "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-${{ matrix.target.arch }}-linux.tar.gz" \
             --data-binary "@tyto-db-${{ matrix.target.arch }}-linux.tar.gz"
-        
-      # Success notification
+
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
         run: |
@@ -218,8 +238,7 @@ jobs:
                  }]
                }' \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
-      
-      # Failure notification
+
       - name: Send Discord build notification (Failure)
         if: failure()
         run: |
