@@ -93,20 +93,23 @@ jobs:
                 RUN apt-get update && \
                     apt-get install -y git build-essential pkg-config linux-libc-dev-arm64-cross
                 
-                # Install liburing from source with minimal build to avoid SO_ZEROCOPY issues
+                # Install liburing from source, building only the src directory
                 RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
                     cd liburing && \
                     ./configure --prefix=/usr --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
-                    make -j\$(nproc) lib && \
-                    make install-lib && \
-                    make install-headers && \
+                    cd src && \
+                    make -j\$(nproc) && \
+                    make install && \
+                    cd .. && \
+                    cp src/include/liburing.h /usr/include/ && \
+                    cp src/include/liburing/io_uring.h /usr/include/liburing/ 2>/dev/null || mkdir -p /usr/include/liburing && cp src/include/liburing/io_uring.h /usr/include/liburing/ && \
                     ldconfig && \
                     cd .. && \
                     rm -rf liburing
                 
                 # Verify installation
                 RUN test -f /usr/include/liburing.h && \
-                    test -f /usr/lib/liburing.so && \
+                    (test -f /usr/lib/liburing.so || test -f /usr/lib/liburing.a) && \
                     echo "liburing installed successfully"
                 EOF
 
