@@ -89,14 +89,21 @@ jobs:
         run: |
           cat <<EOF > cross.Dockerfile
           FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+          # Set build-time environment variables that cc-rs and the linker will use.
+          # This correctly configures the environment inside the container.
+          ENV CFLAGS="-I/usr/include" \
+              RUSTFLAGS="-L/usr/lib"
+          # Install build dependencies and liburing from source
           RUN apt-get update && \
               apt-get install -y git build-essential && \
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
               ./configure && \
               make install && \
+              # Verify the files were installed correctly
               test -f /usr/include/liburing.h && \
               test -f /usr/lib/liburing.a && \
+              # Cleanup
               cd .. && \
               rm -rf liburing
           EOF
@@ -145,25 +152,13 @@ jobs:
         if: matrix.target.native == true
         run: cargo build --release
 
-      - name: Configure and Build (arm64 cross)
+      - name: Build (arm64 cross)
         if: matrix.target.native == false
         env:
+          # Tell cross to use our custom-built image
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-        run: |
-          mkdir -p .cargo
-          cat <<EOF > .cargo/config.toml
-          # Specify build flags for the aarch64 target
-          [target.aarch64-unknown-linux-gnu]
-          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
-          rustflags = ["-L", "native=/usr/lib"]
-          # Configure build-script environment for the cc crate.
-          [build]
-          # The cc-rs crate looks for this target-specific CFLAGS variable.
-          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
-          EOF
-          # Now run the build. cross will automatically use the .cargo/config.toml file.
-          cross build --release --target ${{ matrix.target.rust_target }}
+        run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -241,25 +236,13 @@ jobs:
         if: matrix.target.native == true
         run: cargo build --release
 
-      - name: Configure and Build (arm64 cross)
+      - name: Build (arm64 cross)
         if: matrix.target.native == false
         env:
+          # Tell cross to use our custom-built image
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-        run: |
-          mkdir -p .cargo
-          cat <<EOF > .cargo/config.toml
-          # Specify build flags for the aarch64 target
-          [target.aarch64-unknown-linux-gnu]
-          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
-          rustflags = ["-L", "native=/usr/lib"]
-          # Configure build-script environment for the cc crate.
-          [build]
-          # The cc-rs crate looks for this target-specific CFLAGS variable.
-          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
-          EOF
-          # Now run the build. cross will automatically use the .cargo/config.toml file.
-          cross build --release --target ${{ matrix.target.rust_target }}
+        run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
         if: matrix.target.native == true
@@ -313,4 +296,4 @@ jobs:
                    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
-               ${{ secrets.DISCORD_WEBHOOK_URL }}```
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
