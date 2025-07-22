@@ -78,35 +78,34 @@ jobs:
              ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   build-cross-image:
-    runs-on: ubuntu-22.04
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  runs-on: ubuntu-22.04
+  outputs:
+    image: ${{ steps.meta.outputs.image }}
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Write custom Dockerfile
-        run: |
-          cat <<EOF > cross.Dockerfile
-          FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
-          RUN apt-get update && \\
-              apt-get install -y git build-essential pkg-config liburing-dev && \\
-              git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \\
-              cd liburing && \\
-              ./configure --prefix=/usr && \\
-              make -C src && \\
-              make install && \\
-              ldconfig && \\
-              cd .. && \\
-              rm -rf liburing
-          EOF
+    - name: Write custom Dockerfile
+      run: |
+        cat <<EOF > cross.Dockerfile
+        FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+        
+        # First install basic dependencies
+        RUN apt-get update && \
+            apt-get install -y git build-essential pkg-config liburing-dev
+        
+        # Verify installation
+        RUN test -f /usr/include/liburing.h && \
+            test -f /usr/lib/aarch64-linux-gnu/liburing.so && \
+            echo "liburing installed successfully"
+        EOF
 
-      - name: Build custom image
-        id: meta
-        run: |
-          docker build -t cross-aarch64-liburing -f cross.Dockerfile .
-          echo "image=cross-aarch64-liburing" >> $GITHUB_OUTPUT
-
+    - name: Build custom image
+      id: meta
+      run: |
+        docker build -t cross-aarch64-liburing -f cross.Dockerfile .
+        echo "image=cross-aarch64-liburing" >> $GITHUB_OUTPUT
+        
   test-build:
     if: github.event_name != 'release'
     needs: [test, build-cross-image]
