@@ -94,7 +94,7 @@ jobs:
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
               ./configure && make install && \
-              ls /usr/local/include/liburing.h || (echo "liburing.h not found in /usr/local/include" && exit 1) && \
+              ls /usr/include/liburing.h || (echo "liburing.h not found in /usr/include" && exit 1) && \
               cd .. && rm -rf liburing
           EOF
 
@@ -147,7 +147,6 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: /usr/local/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -231,7 +230,6 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: /usr/local/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
