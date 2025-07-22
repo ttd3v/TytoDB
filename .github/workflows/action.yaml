@@ -69,7 +69,6 @@ jobs:
              }' \
              ${{ secrets.DISCORD_WEBHOOK_URL }}
 
-  # Build a custom cross image for aarch64 with liburing built from source
   build-cross-image:
     runs-on: ubuntu-22.04
     outputs:
@@ -89,17 +88,6 @@ jobs:
               ./configure && make && make install && \
               cd .. && rm -rf liburing
           EOF
-      - name: Write custom Dockerfile
-        run: |
-            cat <<EOF > cross.Dockerfile
-            FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
-            RUN apt-get update && \
-                apt-get install -y git build-essential && \
-                git clone https://github.com/axboe/liburing.git && \
-                cd liburing && \
-                ./configure && make install && \
-                cd .. && rm -rf liburing
-            EOF
 
       - name: Build custom image
         id: meta
@@ -142,6 +130,7 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
+          C_INCLUDE_PATH: /usr/local/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -217,6 +206,7 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
+          C_INCLUDE_PATH: /usr/local/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
