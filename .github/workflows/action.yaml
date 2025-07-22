@@ -24,7 +24,7 @@ jobs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
 
     - name: Install liburing-dev
       run: sudo apt-get update && sudo apt-get install -y liburing-dev
@@ -99,7 +99,6 @@ jobs:
               ldconfig && \
               cd .. && \
               rm -rf liburing && \
-              # Verify installation
               test -f /usr/include/liburing.h && \
               test -f /usr/lib/liburing.a && \
               echo "liburing installed successfully"
@@ -135,7 +134,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
 
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
@@ -230,7 +229,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
