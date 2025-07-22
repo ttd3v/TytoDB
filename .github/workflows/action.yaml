@@ -91,7 +91,7 @@ jobs:
           FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
           RUN apt-get update && \
               apt-get install -y git build-essential && \
-              git clone --branch v2.3 https://github.com/axboe/liburing.git && \
+              git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
               ./configure && make install && \
               ls /usr/local/include/liburing.h || (echo "liburing.h not found in /usr/local/include" && exit 1) && \
