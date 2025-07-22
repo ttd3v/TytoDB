@@ -257,14 +257,20 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
+          CFLAGS_aarch64_unknown_linux_gnu: "-I/usr/aarch64-linux-gnu/include"
+          CFLAGS_aarch64-unknown-linux-gnu: "-I/usr/aarch64-linux-gnu/include"
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
           [target.aarch64-unknown-linux-gnu]
           rustflags = [
-              "-L", "native=/usr/lib",
+              "-L", "native=/usr/aarch64-linux-gnu/lib",
               "-l", "uring"
           ]
+          
+          [env]
+          CFLAGS_aarch64_unknown_linux_gnu = "-I/usr/aarch64-linux-gnu/include"
+          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/aarch64-linux-gnu/include"
           EOF
 
           cross build --release --target ${{ matrix.target.rust_target }}
