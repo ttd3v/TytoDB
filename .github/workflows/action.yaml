@@ -86,85 +86,61 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Write custom Dockerfile
-        run: |
-          cat <<'EOF' > cross.Dockerfile
-          FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
-          
-          # Update package list and install build dependencies
-          RUN dpkg --add-architecture arm64 && \
-              apt-get update && \
-              apt-get install -y \
-                git \
-                build-essential \
-                pkg-config \
-                autoconf \
-                automake \
-                libtool \
-                curl \
-                wget
-          
-          # Install liburing from source with proper cross-compilation
-          RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
-            cd liburing && \
-            export CC=aarch64-linux-gnu-gcc && \
-            export CXX=aarch64-linux-gnu-g++ && \
-            export AR=aarch64-linux-gnu-ar && \
-            export RANLIB=aarch64-linux-gnu-ranlib && \
-            export CFLAGS="-fPIC" && \
-            ./configure --prefix=/usr/aarch64-linux-gnu && \
-            make -j$(nproc) liburing.a && \
-            mkdir -p /usr/aarch64-linux-gnu/lib && \
-            cp -v liburing.a /usr/aarch64-linux-gnu/lib/ && \
-            mkdir -p /usr/aarch64-linux-gnu/include/liburing && \
-            cp -v src/include/liburing.h /usr/aarch64-linux-gnu/include/ && \
-            cp -v src/include/liburing/*.h /usr/aarch64-linux-gnu/include/liburing/ && \
-            cd .. && \
-            rm -rf liburing
-          
-          # Create pkg-config file for liburing
-          RUN mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig && \
-              cat > /usr/aarch64-linux-gnu/lib/pkgconfig/liburing.pc <<'PKGEOF'
-          prefix=/usr/aarch64-linux-gnu
-          exec_prefix=${prefix}
-          libdir=${exec_prefix}/lib
-          includedir=${prefix}/include
-          
-          Name: liburing
-          Description: Linux io_uring library
-          Version: 2.3
-          Libs: -L${libdir} -luring
-          Cflags: -I${includedir}
-          PKGEOF
-          
-          # Verify liburing installation
-          RUN ls -la /usr/aarch64-linux-gnu/include/liburing.h && \
-              ls -la /usr/aarch64-linux-gnu/lib/liburing.a && \
-              echo "liburing successfully installed for aarch64"
-          
-          # Set up comprehensive environment for cross-compilation
-          ENV PKG_CONFIG_ALLOW_CROSS=1
-          ENV PKG_CONFIG_PATH="/usr/aarch64-linux-gnu/lib/pkgconfig"
-          ENV PKG_CONFIG_SYSROOT_DIR="/usr/aarch64-linux-gnu"
-          ENV SYSROOT="/usr/aarch64-linux-gnu"
-          
-          # Rust/Cargo specific environment variables
-          ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
-          ENV CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
-          ENV CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"
-          ENV AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
-          ENV STRIP_aarch64_unknown_linux_gnu="aarch64-linux-gnu-strip"
-          ENV RANLIB_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ranlib"
-          
-          # Additional C/C++ flags for proper compilation
-          ENV CFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
-          ENV CXXFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
-          ENV LDFLAGS_aarch64_unknown_linux_gnu="-L/usr/aarch64-linux-gnu/lib"
-          ENV RUSTFLAGS_aarch64_unknown_linux_gnu="-C link-arg=-Wl,-rpath-link,/usr/aarch64-linux-gnu/lib"
-          
-          # Verify pkg-config works
-          RUN PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --exists liburing && \
-              PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --cflags --libs liburing
-          EOF
+          run: |
+            cat <<'EOF' > cross.Dockerfile
+            FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+            
+            # Update package list and install build dependencies
+            RUN dpkg --add-architecture arm64 && \
+                apt-get update && \
+                apt-get install -y \
+                  git \
+                  build-essential \
+                  pkg-config \
+                  autoconf \
+                  automake \
+                  libtool \
+                  curl \
+                  wget
+            
+            # Install liburing from source with proper cross-compilation
+            RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
+              cd liburing && \
+              export CC=aarch64-linux-gnu-gcc && \
+              export CXX=aarch64-linux-gnu-g++ && \
+              export AR=aarch64-linux-gnu-ar && \
+              export RANLIB=aarch64-linux-gnu-ranlib && \
+              export CFLAGS="-fPIC" && \
+              ./configure --prefix=/usr/aarch64-linux-gnu --disable-shared && \
+              make -j$(nproc) && \
+              make install && \
+              cd .. && \
+              rm -rf liburing
+            
+            # Set up comprehensive environment for cross-compilation
+            ENV PKG_CONFIG_ALLOW_CROSS=1
+            ENV PKG_CONFIG_PATH="/usr/aarch64-linux-gnu/lib/pkgconfig"
+            ENV PKG_CONFIG_SYSROOT_DIR="/usr/aarch64-linux-gnu"
+            ENV SYSROOT="/usr/aarch64-linux-gnu"
+            
+            # Rust/Cargo specific environment variables
+            ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
+            ENV CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+            ENV CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"
+            ENV AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
+            ENV STRIP_aarch64_unknown_linux_gnu="aarch64-linux-gnu-strip"
+            ENV RANLIB_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ranlib"
+            
+            # Additional C/C++ flags for proper compilation
+            ENV CFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
+            ENV CXXFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
+            ENV LDFLAGS_aarch64_unknown_linux_gnu="-L/usr/aarch64-linux-gnu/lib"
+            ENV RUSTFLAGS_aarch64_unknown_linux_gnu="-C link-arg=-Wl,-rpath-link,/usr/aarch64-linux-gnu/lib"
+            
+            # Verify pkg-config works
+            RUN PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --exists liburing && \
+                PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --cflags --libs liburing
+            EOF
 
       - name: Build and tag custom image
         id: meta
