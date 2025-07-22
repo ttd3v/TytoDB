@@ -230,7 +230,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
