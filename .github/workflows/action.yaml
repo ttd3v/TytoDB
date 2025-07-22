@@ -93,10 +93,13 @@ jobs:
               apt-get install -y git build-essential && \
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
-              ./configure && make install && \
-              # Verify the header and library are in the correct standard locations and then cleanup
-              test -f /usr/include/liburing.h && test -f /usr/lib/liburing.a && \
-              cd .. && rm -rf liburing
+              ./configure && \
+              make install && \
+              # Verify the header and library are in the correct locations and then cleanup
+              test -f /usr/include/liburing.h && \
+              test -f /usr/lib/liburing.a && \
+              cd .. && \
+              rm -rf liburing
           EOF
 
       - name: Build custom image
@@ -153,14 +156,13 @@ jobs:
           cat <<EOF > .cargo/config.toml
           # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
-          # Pass flags to rustc for the linker
           rustflags = ["-L", "native=/usr/lib"]
-          # Pass CFLAGS for the target to the cc-rs build-script
+          # Configure build-script environment
           [build]
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
           # Now run the build. cross will automatically use the config file.
-          cross build --release --target \${{ matrix.target.rust_target }}
+          cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -251,7 +253,7 @@ jobs:
           [build]
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
-          cross build --release --target \${{ matrix.target.rust_target }}
+          cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
         if: matrix.target.native == true
@@ -259,7 +261,7 @@ jobs:
 
       - name: Package binary (cross-compiled)
         if: matrix.target.native == false
-        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/\${{ matrix.target.rust_target }}/release tyto-db
+        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
 
       - name: Upload to release
         run: |
