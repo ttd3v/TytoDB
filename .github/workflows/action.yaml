@@ -91,41 +91,17 @@ jobs:
           FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
           
           RUN apt-get update && \
-              apt-get install -y git build-essential pkg-config linux-libc-dev-arm64-cross autoconf
+              apt-get install -y git build-essential pkg-config linux-libc-dev-arm64-cross
           
           # Install liburing from source for ARM64
-          RUN git clone https://github.com/axboe/liburing.git
-          
-          WORKDIR /liburing
-          
-          # Configure and build liburing for ARM64
-          RUN git checkout liburing-2.3 && \
-              ./configure --prefix=/usr/aarch64-linux-gnu \
-                         --cc=aarch64-linux-gnu-gcc \
-                         --cxx=aarch64-linux-gnu-g++ \
-                         --host=aarch64-linux-gnu && \
+          RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
+              cd liburing && \
+              ./configure --prefix=/usr/aarch64-linux-gnu --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
               make -j\$(nproc) && \
-              make install
-          
-          # Create pkg-config file for liburing
-          RUN mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig && \
-              cat > /usr/aarch64-linux-gnu/lib/pkgconfig/liburing.pc << 'PKGCONFIG'
-          prefix=/usr/aarch64-linux-gnu
-          exec_prefix=\${prefix}
-          libdir=\${exec_prefix}/lib
-          includedir=\${prefix}/include
-          
-          Name: liburing
-          Description: Linux-native io_uring I/O access library
-          Version: 2.3
-          Libs: -L\${libdir} -luring
-          Cflags: -I\${includedir}
-          PKGCONFIG
-          
-          WORKDIR /
-          
-          # Clean up
-          RUN rm -rf /liburing
+              make install && \
+              ldconfig && \
+              cd .. && \
+              rm -rf liburing
           
           # Verify installation
           RUN test -f /usr/aarch64-linux-gnu/include/liburing.h && \
