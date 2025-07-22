@@ -96,20 +96,22 @@ jobs:
                 # Install liburing from source, building only the src directory
                 RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
                     cd liburing && \
-                    ./configure --prefix=/usr --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
+                    ./configure --prefix=/usr/aarch64-linux-gnu --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
                     cd src && \
                     make -j\$(nproc) && \
                     make install && \
                     cd .. && \
-                    cp src/include/liburing.h /usr/include/ && \
-                    cp src/include/liburing/io_uring.h /usr/include/liburing/ 2>/dev/null || mkdir -p /usr/include/liburing && cp src/include/liburing/io_uring.h /usr/include/liburing/ && \
+                    mkdir -p /usr/aarch64-linux-gnu/include/liburing && \
+                    cp src/include/liburing.h /usr/aarch64-linux-gnu/include/ && \
+                    cp src/include/liburing/io_uring.h /usr/aarch64-linux-gnu/include/liburing/ && \
+                    cp src/include/liburing/*.h /usr/aarch64-linux-gnu/include/liburing/ 2>/dev/null || true && \
                     ldconfig && \
                     cd .. && \
                     rm -rf liburing
                 
                 # Verify installation
-                RUN test -f /usr/include/liburing.h && \
-                    (test -f /usr/lib/liburing.so || test -f /usr/lib/liburing.a) && \
+                RUN test -f /usr/aarch64-linux-gnu/include/liburing.h && \
+                    (test -f /usr/aarch64-linux-gnu/lib/liburing.so || test -f /usr/aarch64-linux-gnu/lib/liburing.a) && \
                     echo "liburing installed successfully"
                 EOF
 
@@ -167,7 +169,7 @@ jobs:
           cat <<EOF > .cargo/config.toml
           [target.aarch64-unknown-linux-gnu]
           rustflags = [
-              "-L", "native=/usr/lib",
+              "-L", "native=/usr/aarch64-linux-gnu/lib",
               "-l", "uring"
           ]
           EOF
