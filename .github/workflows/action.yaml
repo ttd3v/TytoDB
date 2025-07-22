@@ -111,7 +111,7 @@ jobs:
               export CFLAGS="-fPIC" && \
               ./configure --prefix=/usr/aarch64-linux-gnu && \
               make -j$(nproc) && \
-              make install && \
+              make install_headers install_libs && \
               cd .. && \
               rm -rf liburing
             
