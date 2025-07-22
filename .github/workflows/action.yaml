@@ -147,6 +147,7 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
+          C_INCLUDE_PATH: /usr/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -230,6 +231,7 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
+          C_INCLUDE_PATH: /usr/include
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
