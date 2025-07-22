@@ -78,48 +78,101 @@ jobs:
              ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   build-cross-image:
-          runs-on: ubuntu-22.04
-          outputs:
-            image: ${{ steps.meta.outputs.image }}
-          steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+    runs-on: ubuntu-22.04
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            - name: Write custom Dockerfile
-              run: |
-                cat <<EOF > cross.Dockerfile
-                FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
-                
-                RUN apt-get update && \
-                    apt-get install -y git build-essential pkg-config linux-libc-dev-arm64-cross
-                
-                # Install liburing from source, building only the src directory
-                RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
-                    cd liburing && \
-                    ./configure --prefix=/usr/aarch64-linux-gnu --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
-                    cd src && \
-                    make -j\$(nproc) && \
-                    make install && \
-                    cd .. && \
-                    mkdir -p /usr/aarch64-linux-gnu/include/liburing && \
-                    cp src/include/liburing.h /usr/aarch64-linux-gnu/include/ && \
-                    cp src/include/liburing/io_uring.h /usr/aarch64-linux-gnu/include/liburing/ && \
-                    cp src/include/liburing/*.h /usr/aarch64-linux-gnu/include/liburing/ 2>/dev/null || true && \
-                    ldconfig && \
-                    cd .. && \
-                    rm -rf liburing
-                
-                # Verify installation
-                RUN test -f /usr/aarch64-linux-gnu/include/liburing.h && \
-                    (test -f /usr/aarch64-linux-gnu/lib/liburing.so || test -f /usr/aarch64-linux-gnu/lib/liburing.a) && \
-                    echo "liburing installed successfully"
-                EOF
+      - name: Write custom Dockerfile
+        run: |
+          cat <<'EOF' > cross.Dockerfile
+          FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+          
+          # Update package list and install build dependencies
+          RUN dpkg --add-architecture arm64 && \
+              apt-get update && \
+              apt-get install -y \
+                git \
+                build-essential \
+                pkg-config \
+                autoconf \
+                automake \
+                libtool \
+                curl \
+                wget
+          
+          # Install liburing from source with proper cross-compilation
+          RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
+              cd liburing && \
+              export CC=aarch64-linux-gnu-gcc && \
+              export CXX=aarch64-linux-gnu-g++ && \
+              export AR=aarch64-linux-gnu-ar && \
+              export STRIP=aarch64-linux-gnu-strip && \
+              export RANLIB=aarch64-linux-gnu-ranlib && \
+              export CFLAGS="-fPIC" && \
+              export CXXFLAGS="-fPIC" && \
+              ./configure \
+                --host=aarch64-linux-gnu \
+                --prefix=/usr/aarch64-linux-gnu \
+                --enable-shared=no \
+                --enable-static=yes && \
+              make -j$(nproc) && \
+              make install && \
+              cd .. && \
+              rm -rf liburing
+          
+          # Create pkg-config file for liburing
+          RUN mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig && \
+              cat > /usr/aarch64-linux-gnu/lib/pkgconfig/liburing.pc <<'PKGEOF'
+          prefix=/usr/aarch64-linux-gnu
+          exec_prefix=${prefix}
+          libdir=${exec_prefix}/lib
+          includedir=${prefix}/include
+          
+          Name: liburing
+          Description: Linux io_uring library
+          Version: 2.3
+          Libs: -L${libdir} -luring
+          Cflags: -I${includedir}
+          PKGEOF
+          
+          # Verify liburing installation
+          RUN ls -la /usr/aarch64-linux-gnu/include/liburing.h && \
+              ls -la /usr/aarch64-linux-gnu/lib/liburing.a && \
+              echo "liburing successfully installed for aarch64"
+          
+          # Set up comprehensive environment for cross-compilation
+          ENV PKG_CONFIG_ALLOW_CROSS=1
+          ENV PKG_CONFIG_PATH="/usr/aarch64-linux-gnu/lib/pkgconfig"
+          ENV PKG_CONFIG_SYSROOT_DIR="/usr/aarch64-linux-gnu"
+          ENV SYSROOT="/usr/aarch64-linux-gnu"
+          
+          # Rust/Cargo specific environment variables
+          ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-linux-gnu-gcc"
+          ENV CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+          ENV CXX_aarch64_unknown_linux_gnu="aarch64-linux-gnu-g++"
+          ENV AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
+          ENV STRIP_aarch64_unknown_linux_gnu="aarch64-linux-gnu-strip"
+          ENV RANLIB_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ranlib"
+          
+          # Additional C/C++ flags for proper compilation
+          ENV CFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
+          ENV CXXFLAGS_aarch64_unknown_linux_gnu="-I/usr/aarch64-linux-gnu/include -fPIC"
+          ENV LDFLAGS_aarch64_unknown_linux_gnu="-L/usr/aarch64-linux-gnu/lib"
+          ENV RUSTFLAGS_aarch64_unknown_linux_gnu="-C link-arg=-Wl,-rpath-link,/usr/aarch64-linux-gnu/lib"
+          
+          # Verify pkg-config works
+          RUN PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --exists liburing && \
+              PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig pkg-config --cflags --libs liburing
+          EOF
 
-            - name: Build custom image
-              id: meta
-              run: |
-                docker build -t cross-aarch64-liburing -f cross.Dockerfile .
-                echo "image=cross-aarch64-liburing" >> $GITHUB_OUTPUT
+      - name: Build and tag custom image
+        id: meta
+        run: |
+          docker build -t cross-aarch64-liburing -f cross.Dockerfile .
+          echo "image=cross-aarch64-liburing" >> $GITHUB_OUTPUT
         
   test-build:
     if: github.event_name != 'release'
@@ -161,19 +214,42 @@ jobs:
 
       - name: Configure and Build (arm64 cross)
         if: matrix.target.native == false
-        env:
-          CROSS_CONTAINER_ENGINE: docker
-          CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
         run: |
-          mkdir -p .cargo
-          cat <<EOF > .cargo/config.toml
+          # Create Cross.toml configuration
+          cat <<'EOF' > Cross.toml
+          [build]
+          default-target = "aarch64-unknown-linux-gnu"
+          
           [target.aarch64-unknown-linux-gnu]
-          rustflags = [
-              "-L", "native=/usr/aarch64-linux-gnu/lib",
-              "-l", "uring"
+          dockerfile = "./cross.Dockerfile"
+          image = "${{ needs.build-cross-image.outputs.image }}"
+          
+          [target.aarch64-unknown-linux-gnu.env]
+          passthrough = [
+              "PKG_CONFIG_ALLOW_CROSS",
+              "PKG_CONFIG_PATH",
+              "PKG_CONFIG_SYSROOT_DIR",
+              "SYSROOT"
           ]
           EOF
           
+          # Create .cargo/config.toml for proper linking
+          mkdir -p .cargo
+          cat <<'EOF' > .cargo/config.toml
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          rustflags = [
+            "-C", "link-arg=-Wl,-rpath-link,/usr/aarch64-linux-gnu/lib",
+            "-C", "target-feature=+crt-static"
+          ]
+          
+          [env]
+          PKG_CONFIG_ALLOW_CROSS = { value = "1", relative = false }
+          PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu = { value = "/usr/aarch64-linux-gnu", relative = false }
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu = { value = "/usr/aarch64-linux-gnu/lib/pkgconfig", relative = false }
+          EOF
+          
+          # Build with cross using the custom image
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -254,25 +330,42 @@ jobs:
 
       - name: Configure and Build (arm64 cross)
         if: matrix.target.native == false
-        env:
-          CROSS_CONTAINER_ENGINE: docker
-          CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          CFLAGS_aarch64_unknown_linux_gnu: "-I/usr/aarch64-linux-gnu/include"
-          CFLAGS_aarch64-unknown-linux-gnu: "-I/usr/aarch64-linux-gnu/include"
         run: |
-          mkdir -p .cargo
-          cat <<EOF > .cargo/config.toml
+          # Create Cross.toml configuration
+          cat <<'EOF' > Cross.toml
+          [build]
+          default-target = "aarch64-unknown-linux-gnu"
+          
           [target.aarch64-unknown-linux-gnu]
+          dockerfile = "./cross.Dockerfile"
+          image = "${{ needs.build-cross-image.outputs.image }}"
+          
+          [target.aarch64-unknown-linux-gnu.env]
+          passthrough = [
+              "PKG_CONFIG_ALLOW_CROSS",
+              "PKG_CONFIG_PATH",
+              "PKG_CONFIG_SYSROOT_DIR",
+              "SYSROOT"
+          ]
+          EOF
+          
+          # Create .cargo/config.toml for proper linking
+          mkdir -p .cargo
+          cat <<'EOF' > .cargo/config.toml
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
           rustflags = [
-              "-L", "native=/usr/aarch64-linux-gnu/lib",
-              "-l", "uring"
+            "-C", "link-arg=-Wl,-rpath-link,/usr/aarch64-linux-gnu/lib",
+            "-C", "target-feature=+crt-static"
           ]
           
           [env]
-          CFLAGS_aarch64_unknown_linux_gnu = "-I/usr/aarch64-linux-gnu/include"
-          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/aarch64-linux-gnu/include"
+          PKG_CONFIG_ALLOW_CROSS = { value = "1", relative = false }
+          PKG_CONFIG_SYSROOT_DIR_aarch64_unknown_linux_gnu = { value = "/usr/aarch64-linux-gnu", relative = false }
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu = { value = "/usr/aarch64-linux-gnu/lib/pkgconfig", relative = false }
           EOF
-
+          
+          # Build with cross using the custom image
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
