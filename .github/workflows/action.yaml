@@ -90,15 +90,19 @@ jobs:
           cat <<EOF > cross.Dockerfile
           FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
           RUN apt-get update && \
-              apt-get install -y git build-essential && \
+              apt-get install -y git build-essential pkg-config && \
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
-              ./configure && \
+              ./configure --prefix=/usr && \
+              make && \
               make install && \
+              ldconfig && \
+              cd .. && \
+              rm -rf liburing && \
+              # Verify installation
               test -f /usr/include/liburing.h && \
               test -f /usr/lib/liburing.a && \
-              cd .. && \
-              rm -rf liburing
+              echo "liburing installed successfully"
           EOF
 
       - name: Build custom image
@@ -153,18 +157,15 @@ jobs:
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
-          # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
-          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
-          rustflags = ["-L", "native=/usr/lib"]
+          rustflags = ["-L", "native=/usr/lib", "-l", "uring"]
 
-          # Configure build-script environment for the cc crate.
           [build]
-          # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
+          LDFLAGS_aarch64-unknown-linux-gnu = "-L/usr/lib"
+          PKG_CONFIG_PATH_aarch64-unknown-linux-gnu = "/usr/lib/pkgconfig"
           EOF
           
-          # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -229,7 +230,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
@@ -251,18 +252,15 @@ jobs:
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
-          # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
-          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
-          rustflags = ["-L", "native=/usr/lib"]
-          
-          # Configure build-script environment for the cc crate.
+          rustflags = ["-L", "native=/usr/lib", "-l", "uring"]
+
           [build]
-          # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
+          LDFLAGS_aarch64-unknown-linux-gnu = "-L/usr/lib"
+          PKG_CONFIG_PATH_aarch64-unknown-linux-gnu = "/usr/lib/pkgconfig"
           EOF
 
-          # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
