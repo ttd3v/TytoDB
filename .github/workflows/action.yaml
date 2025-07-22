@@ -108,7 +108,7 @@ jobs:
               export AR=aarch64-linux-gnu-ar && \
               export RANLIB=aarch64-linux-gnu-ranlib && \
               export CFLAGS="-fPIC" && \
-              ./configure --prefix=/usr/aarch64-linux-gnu --disable-shared && \
+              ./configure --prefix=/usr/aarch64-linux-gnu && \
               make -j$(nproc) && \
               make install && \
               cd .. && \
