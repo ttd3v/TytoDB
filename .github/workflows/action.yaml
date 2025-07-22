@@ -18,6 +18,11 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Install Nightly Toolchain
+      run: |
+        rustup toolchain install nightly
+        rustup default nightly
+
     - name: Cache cargo registry
       uses: actions/cache@v4
       with:
@@ -109,7 +114,7 @@ jobs:
               export AR=aarch64-linux-gnu-ar && \
               export RANLIB=aarch64-linux-gnu-ranlib && \
               export CFLAGS="-fPIC" && \
-              ./configure --prefix=/usr/aarch64-linux-gnu NO_TEST=1 && \
+              ./configure --prefix=/usr/aarch64-linux-gnu --disable-tests && \
               make -j$(nproc) && \
               make install_headers install_libs && \
               cd .. && \
@@ -159,6 +164,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Nightly Toolchain
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -275,6 +285,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Nightly Toolchain
+        run: |
+          rustup toolchain install nightly
+          rustup default nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
