@@ -165,7 +165,7 @@ jobs:
           EOF
           
           # Now run the build. cross will automatically use the .cargo/config.toml file.
-          cross build --release --target \${{ matrix.target.rust_target }}
+          cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -184,7 +184,7 @@ jobs:
                    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
-               \${{ secrets.DISCORD_WEBHOOK_URL }}
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
 
       - name: Send Discord build notification (Failure)
         if: failure()
@@ -203,7 +203,7 @@ jobs:
                    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
-               \${{ secrets.DISCORD_WEBHOOK_URL }}
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
 
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
@@ -261,8 +261,9 @@ jobs:
           # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
+
           # Now run the build. cross will automatically use the .cargo/config.toml file.
-          cross build --release --target \${{ matrix.target.rust_target }}
+          cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
         if: matrix.target.native == true
@@ -270,7 +271,7 @@ jobs:
 
       - name: Package binary (cross-compiled)
         if: matrix.target.native == false
-        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/\${{ matrix.target.rust_target }}/release tyto-db
+        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
 
       - name: Upload to release
         run: |
@@ -298,7 +299,7 @@ jobs:
                    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
-               \${{ secrets.DISCORD_WEBHOOK_URL }}
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
 
       - name: Send Discord build notification (Failure)
         if: failure()
@@ -316,4 +317,4 @@ jobs:
                    "timestamp": "'"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"'"
                  }]
                }' \
-               \${{ secrets.DISCORD_WEBHOOK_URL }}
+               ${{ secrets.DISCORD_WEBHOOK_URL }}
