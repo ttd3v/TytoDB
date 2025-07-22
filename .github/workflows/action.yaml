@@ -91,14 +91,15 @@ jobs:
                 FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
                 
                 RUN apt-get update && \
-                    apt-get install -y git build-essential pkg-config
+                    apt-get install -y git build-essential pkg-config linux-libc-dev-arm64-cross
                 
-                # Install liburing from source
+                # Install liburing from source with minimal build to avoid SO_ZEROCOPY issues
                 RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
                     cd liburing && \
-                    ./configure --prefix=/usr && \
-                    make -j$(nproc) && \
-                    make install && \
+                    ./configure --prefix=/usr --cc=aarch64-linux-gnu-gcc --cxx=aarch64-linux-gnu-g++ && \
+                    make -j\$(nproc) lib && \
+                    make install-lib && \
+                    make install-headers && \
                     ldconfig && \
                     cd .. && \
                     rm -rf liburing
@@ -158,19 +159,13 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: "/usr/include/aarch64-linux-gnu"
-          LIBRARY_PATH: "/usr/lib/aarch64-linux-gnu"
-          CFLAGS: "-I/usr/include/aarch64-linux-gnu"
-          LDFLAGS: "-L/usr/lib/aarch64-linux-gnu -luring"
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
           [target.aarch64-unknown-linux-gnu]
           rustflags = [
-              "-L", "native=/usr/lib/aarch64-linux-gnu",
-              "-l", "uring",
-              "-C", "link-arg=-L/usr/lib/aarch64-linux-gnu",
-              "-C", "link-arg=-luring"
+              "-L", "native=/usr/lib",
+              "-l", "uring"
           ]
           EOF
           
@@ -257,19 +252,13 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: "/usr/include/aarch64-linux-gnu"
-          LIBRARY_PATH: "/usr/lib/aarch64-linux-gnu"
-          CFLAGS: "-I/usr/include/aarch64-linux-gnu"
-          LDFLAGS: "-L/usr/lib/aarch64-linux-gnu -luring"
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
           [target.aarch64-unknown-linux-gnu]
           rustflags = [
-              "-L", "native=/usr/lib/aarch64-linux-gnu",
-              "-l", "uring",
-              "-C", "link-arg=-L/usr/lib/aarch64-linux-gnu",
-              "-C", "link-arg=-luring"
+              "-L", "native=/usr/lib",
+              "-l", "uring"
           ]
           EOF
 
