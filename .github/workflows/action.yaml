@@ -94,9 +94,8 @@ jobs:
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
               ./configure && make install && \
-              # Verify the header and library are in the correct standard locations
-              test -f /usr/include/liburing.h && \
-              test -f /usr/lib/liburing.a && \
+              # Verify the header and library are in the correct standard locations and then cleanup
+              test -f /usr/include/liburing.h && test -f /usr/lib/liburing.a && \
               cd .. && rm -rf liburing
           EOF
 
@@ -112,7 +111,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        target: 
+        target:
           - arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
             native: true
@@ -150,22 +149,18 @@ jobs:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
         run: |
-          # Create a local Cargo config file to be picked up by cross
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
           # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
-          # Pass environment variables into the build container for the cc crate
-          [build]
-          # This is the correct way to pass CFLAGS for the target to cc-rs
-          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           # Pass flags to rustc for the linker
-          rustflags = [
-            "-L", "native=/usr/lib"
-          ]
+          rustflags = ["-L", "native=/usr/lib"]
+          # Pass CFLAGS for the target to the cc-rs build-script
+          [build]
+          CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
           # Now run the build. cross will automatically use the config file.
-          cross build --release --target ${{ matrix.target.rust_target }}
+          cross build --release --target \${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -211,7 +206,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        target: 
+        target:
           - arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
             native: true
@@ -252,13 +247,11 @@ jobs:
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
           [target.aarch64-unknown-linux-gnu]
+          rustflags = ["-L", "native=/usr/lib"]
           [build]
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
-          rustflags = [
-            "-L", "native=/usr/lib"
-          ]
           EOF
-          cross build --release --target ${{ matrix.target.rust_target }}
+          cross build --release --target \${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
         if: matrix.target.native == true
@@ -266,7 +259,7 @@ jobs:
 
       - name: Package binary (cross-compiled)
         if: matrix.target.native == false
-        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
+        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/\${{ matrix.target.rust_target }}/release tyto-db
 
       - name: Upload to release
         run: |
