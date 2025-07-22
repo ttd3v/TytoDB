@@ -104,13 +104,12 @@ jobs:
             
             RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
-              rm -rf test && \
               export CC=aarch64-linux-gnu-gcc && \
               export CXX=aarch64-linux-gnu-g++ && \
               export AR=aarch64-linux-gnu-ar && \
               export RANLIB=aarch64-linux-gnu-ranlib && \
               export CFLAGS="-fPIC" && \
-              ./configure --prefix=/usr/aarch64-linux-gnu && \
+              ./configure --prefix=/usr/aarch64-linux-gnu NO_TEST=1 && \
               make -j$(nproc) && \
               make install_headers install_libs && \
               cd .. && \
