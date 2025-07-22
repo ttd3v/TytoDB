@@ -147,7 +147,10 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: /usr/include
+          # CFLAGS tells the C compiler (gcc) where to find header files.
+          CFLAGS: "-I/usr/include"
+          # RUSTFLAGS tells the Rust compiler (rustc) where to find libraries to link.
+          RUSTFLAGS: "-L /usr/lib"
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -231,7 +234,10 @@ jobs:
         env:
           CROSS_CONTAINER_ENGINE: docker
           CROSS_CUSTOM_IMAGE: ${{ needs.build-cross-image.outputs.image }}
-          C_INCLUDE_PATH: /usr/include
+          # CFLAGS tells the C compiler (gcc) where to find header files.
+          CFLAGS: "-I/usr/include"
+          # RUSTFLAGS tells the Rust compiler (rustc) where to find libraries to link.
+          RUSTFLAGS: "-L /usr/lib"
         run: cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
