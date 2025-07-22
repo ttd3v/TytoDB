@@ -94,7 +94,7 @@ jobs:
               git clone --branch liburing-2.3 https://github.com/axboe/liburing.git && \
               cd liburing && \
               ./configure --prefix=/usr && \
-              make && \
+              make -C src && \
               make install && \
               ldconfig && \
               cd .. && \
