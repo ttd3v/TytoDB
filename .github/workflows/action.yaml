@@ -104,24 +104,24 @@ jobs:
                 wget
           
           # Install liburing from source with proper cross-compilation
+          # Install liburing from source with proper cross-compilation
           RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
-              cd liburing && \
-              export CC=aarch64-linux-gnu-gcc && \
-              export CXX=aarch64-linux-gnu-g++ && \
-              export AR=aarch64-linux-gnu-ar && \
-              export STRIP=aarch64-linux-gnu-strip && \
-              export RANLIB=aarch64-linux-gnu-ranlib && \
-              export CFLAGS="-fPIC" && \
-              export CXXFLAGS="-fPIC" && \
-              ./configure \
-                --host=aarch64-linux-gnu \
-                --prefix=/usr/aarch64-linux-gnu \
-                --enable-shared=no \
-                --enable-static=yes && \
-              make -j$(nproc) && \
-              make install && \
-              cd .. && \
-              rm -rf liburing
+            cd liburing && \
+            export CC=aarch64-linux-gnu-gcc && \
+            export CXX=aarch64-linux-gnu-g++ && \
+            export AR=aarch64-linux-gnu-ar && \
+            export STRIP=aarch64-linux-gnu-strip && \
+            export RANLIB=aarch64-linux-gnu-ranlib && \
+            export CFLAGS="-fPIC" && \
+            export CXXFLAGS="-fPIC" && \
+            ./configure \
+              --prefix=/usr/aarch64-linux-gnu \
+              --enable-shared=no \
+              --enable-static=yes && \
+            make -j$(nproc) && \
+            make install && \
+            cd .. && \
+            rm -rf liburing
           
           # Create pkg-config file for liburing
           RUN mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig && \
