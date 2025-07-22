@@ -157,11 +157,13 @@ jobs:
           [target.aarch64-unknown-linux-gnu]
           # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
           rustflags = ["-L", "native=/usr/lib"]
+
           # Configure build-script environment for the cc crate.
           [build]
           # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
+          
           # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
@@ -253,11 +255,13 @@ jobs:
           [target.aarch64-unknown-linux-gnu]
           # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
           rustflags = ["-L", "native=/usr/lib"]
+          
           # Configure build-script environment for the cc crate.
           [build]
           # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
+
           # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
