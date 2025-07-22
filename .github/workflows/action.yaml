@@ -95,7 +95,6 @@ jobs:
               cd liburing && \
               ./configure && \
               make install && \
-              # Verify the header and library are in the correct locations and then cleanup
               test -f /usr/include/liburing.h && \
               test -f /usr/lib/liburing.a && \
               cd .. && \
@@ -156,12 +155,14 @@ jobs:
           cat <<EOF > .cargo/config.toml
           # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
+          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
           rustflags = ["-L", "native=/usr/lib"]
-          # Configure build-script environment
+          # Configure build-script environment for the cc crate.
           [build]
+          # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
-          # Now run the build. cross will automatically use the config file.
+          # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Send Discord build notification (Success)
@@ -248,11 +249,16 @@ jobs:
         run: |
           mkdir -p .cargo
           cat <<EOF > .cargo/config.toml
+          # Specify build flags for the aarch64 target
           [target.aarch64-unknown-linux-gnu]
+          # Pass flags to rustc for the linker. 'native=' tells it where to find native libs.
           rustflags = ["-L", "native=/usr/lib"]
+          # Configure build-script environment for the cc crate.
           [build]
+          # The cc-rs crate looks for this target-specific CFLAGS variable.
           CFLAGS_aarch64-unknown-linux-gnu = "-I/usr/include"
           EOF
+          # Now run the build. cross will automatically use the .cargo/config.toml file.
           cross build --release --target ${{ matrix.target.rust_target }}
 
       - name: Package binary (native)
