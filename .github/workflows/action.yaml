@@ -18,6 +18,14 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
     - name: Install liburing-dev
       run: sudo apt-get update && sudo apt-get install -y liburing-dev
 
@@ -83,9 +91,10 @@ jobs:
           FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
           RUN apt-get update && \
               apt-get install -y git build-essential && \
-              git clone https://github.com/axboe/liburing.git && \
+              git clone --branch v2.1 https://github.com/axboe/liburing.git && \
               cd liburing && \
-              ./configure && make && make install && \
+              ./configure && make install && \
+              ls /usr/local/include/liburing.h || (echo "liburing.h not found in /usr/local/include" && exit 1) && \
               cd .. && rm -rf liburing
           EOF
 
@@ -113,13 +122,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
 
       - name: Install cross (for arm64)
         if: matrix.target.native == false
-        run: cargo install cross
+        run: cargo install cross --version 0.2.5
 
       - name: Build (x86_64 native)
         if: matrix.target.native == true
@@ -189,13 +206,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install dependencies (x86_64 native)
         if: matrix.target.native == true
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
 
       - name: Install cross (for arm64)
         if: matrix.target.native == false
-        run: cargo install cross
+        run: cargo install cross --version 0.2.5
 
       - name: Build (x86_64 native)
         if: matrix.target.native == true
