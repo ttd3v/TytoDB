@@ -104,22 +104,20 @@ jobs:
                 wget
           
           # Install liburing from source with proper cross-compilation
-          # Install liburing from source with proper cross-compilation
           RUN git clone --depth 1 --branch liburing-2.3 https://github.com/axboe/liburing.git && \
             cd liburing && \
             export CC=aarch64-linux-gnu-gcc && \
             export CXX=aarch64-linux-gnu-g++ && \
             export AR=aarch64-linux-gnu-ar && \
-            export STRIP=aarch64-linux-gnu-strip && \
             export RANLIB=aarch64-linux-gnu-ranlib && \
             export CFLAGS="-fPIC" && \
-            export CXXFLAGS="-fPIC" && \
-            ./configure \
-              --prefix=/usr/aarch64-linux-gnu \
-              --enable-shared=no \
-              --enable-static=yes && \
-            make -j$(nproc) && \
-            make install && \
+            ./configure --prefix=/usr/aarch64-linux-gnu && \
+            make -j$(nproc) liburing.a && \
+            mkdir -p /usr/aarch64-linux-gnu/lib && \
+            cp -v liburing.a /usr/aarch64-linux-gnu/lib/ && \
+            mkdir -p /usr/aarch64-linux-gnu/include/liburing && \
+            cp -v src/include/liburing.h /usr/aarch64-linux-gnu/include/ && \
+            cp -v src/include/liburing/*.h /usr/aarch64-linux-gnu/include/liburing/ && \
             cd .. && \
             rm -rf liburing
           
