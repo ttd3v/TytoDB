@@ -1,0 +1,47 @@
+name: Testing & Benchmarking
+
+on: 
+  push:
+    branches: [ "master" ]
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  testing:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Nightly Toolchain
+      run: |
+        rustup toolchain install nightly
+        rustup default nightly
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
+
+    - name: Install liburing-dev
+      run: sudo apt-get update && sudo apt-get install -y liburing-dev
+
+    - name: Run database and then run testing program
+      run: |
+        # Clone the testing repository
+        git clone https://github.com/FeatheredSystems/TytoDB-Testing ~/testing-program
+
+        # Start the database in the background
+        { cargo run --release; } &
+
+        DB_PID=$!
+        sleep 5
+
+        # Run the testing program
+        cd ~/testing-program
+        cargo run --release
+
+        # Stop the database
+        kill $DB_PID
