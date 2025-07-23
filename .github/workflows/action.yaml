@@ -42,7 +42,9 @@ jobs:
         cargo test --verbose 2>&1 | tee test_output.txt
 
     - name: Send Discord notification (Success)
-      if: success() && secrets.DISCORD_WEBHOOK_URL != ''
+      if: success() && env.DISCORD_WEBHOOK_URL != ''
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
         curl -H "Content-Type: application/json" \
              -d '{
@@ -61,7 +63,9 @@ jobs:
              ${{ secrets.DISCORD_WEBHOOK_URL }}
 
     - name: Send Discord notification (Failure)
-      if: failure()
+      if: failure() && env.DISCORD_WEBHOOK_URL != ''
+      env:
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
         tail -20 test_output.txt > short_output.txt 2>/dev/null || echo "No test output available" > short_output.txt
         TEST_OUTPUT=$(cat short_output.txt | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
@@ -114,7 +118,9 @@ jobs:
         run: cargo build --release
 
       - name: Send Discord build notification (Success)
-        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
+        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
@@ -133,7 +139,9 @@ jobs:
                ${{ secrets.DISCORD_WEBHOOK_URL }}
 
       - name: Send Discord build notification (Failure)
-        if: failure()
+        if: failure() && env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
@@ -182,21 +190,58 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Debug - List release directory
+        run: |
+          echo "Contents of target/release:"
+          ls -la target/release/
+          echo "Looking for tyto-db binary..."
+          if [ -f target/release/tyto-db ]; then
+            echo "✅ tyto-db binary found"
+            file target/release/tyto-db
+          else
+            echo "❌ tyto-db binary not found"
+            echo "Available binaries:"
+            find target/release -type f -executable -not -name "*.so" -not -name ".*"
+          fi
+
       - name: Package binary
-        run: tar -czf tyto-db-x86_64-linux.tar.gz -C target/release tyto-db
+        run: |
+          if [ ! -f target/release/tyto-db ]; then
+            echo "Error: tyto-db binary not found!"
+            exit 1
+          fi
+          tar -czf tyto-db-x86_64-linux.tar.gz -C target/release tyto-db
+          echo "Package created:"
+          ls -la tyto-db-x86_64-linux.tar.gz
 
       - name: Upload to release
         run: |
-          curl -L \
+          echo "Uploading to release ID: ${{ github.event.release.id }}"
+          echo "Release tag: ${{ github.event.release.tag_name }}"
+          
+          RESPONSE=$(curl -L \
             -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
             "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-x86_64-linux.tar.gz" \
-            --data-binary "@tyto-db-x86_64-linux.tar.gz"
+            --data-binary "@tyto-db-x86_64-linux.tar.gz" \
+            -w "HTTP_CODE:%{http_code}")
+          
+          echo "Upload response: $RESPONSE"
+          
+          # Extract HTTP code
+          HTTP_CODE=$(echo "$RESPONSE" | grep -o "HTTP_CODE:[0-9]*" | cut -d: -f2)
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "Upload failed with HTTP code: $HTTP_CODE"
+            exit 1
+          fi
+          echo "✅ Upload successful!"
 
       - name: Send Discord build notification (Success)
-        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
+        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
@@ -214,7 +259,9 @@ jobs:
                ${{ secrets.DISCORD_WEBHOOK_URL }}
 
       - name: Send Discord build notification (Failure)
-        if: failure()
+        if: failure() && env.DISCORD_WEBHOOK_URL != ''
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
