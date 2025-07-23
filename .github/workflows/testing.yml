@@ -1,4 +1,4 @@
-name: Testing & Benchmarking
+name: Testing
 
 on: 
   push:
@@ -41,6 +41,7 @@ jobs:
         for i in {1..20}; do
           if nc -z localhost 4287; then  # substitua 1234 pela porta do seu banco
             echo "Database is ready!"
+            sleep 30
             break
           fi
           echo "Waiting for DB to start..."
