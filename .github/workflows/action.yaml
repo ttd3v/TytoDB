@@ -85,15 +85,8 @@ jobs:
   test-build:
     if: github.event_name != 'release'
     needs: [test]
-    name: Test Build for ${{ matrix.target.arch }}
-    runs-on: ubuntu-22.04  # Use x86_64 runner for all builds
-    strategy:
-      matrix:
-        target:
-          - arch: x86_64
-            rust_target: x86_64-unknown-linux-gnu
-          - arch: arm64
-            rust_target: aarch64-unknown-linux-gnu
+    name: Test Build for x86_64
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -103,7 +96,6 @@ jobs:
         run: |
           rustup toolchain install nightly
           rustup default nightly
-          rustup target add ${{ matrix.target.rust_target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -116,20 +108,10 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          if [ "${{ matrix.target.arch }}" = "arm64" ]; then
-            # Install cross-compilation tools for ARM64
-            sudo apt-get install -y gcc-aarch64-linux-gnu liburing-dev:arm64
-            # Set up cross-compilation environment
-            echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-            echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-            echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          else
-            sudo apt-get install -y liburing-dev
-          fi
+          sudo apt-get install -y liburing-dev
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        run: cargo build --release
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -137,11 +119,11 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
-                   "title": "🔨 ${{ matrix.target.arch }} Test Build Complete",
+                   "title": "🔨 x86_64 Test Build Complete",
                    "description": "Test build successful for `${{ github.repository }}` on `${{ github.ref_name }}`",
                    "color": 3447003,
                    "fields": [
-                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Target", "value": "x86_64-unknown-linux-gnu", "inline": true},
                      {"name": "Branch", "value": "${{ github.ref_name }}", "inline": true},
                      {"name": "Author", "value": "${{ github.actor }}", "inline": true}
                    ],
@@ -156,11 +138,11 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
-                   "title": "💥 ${{ matrix.target.arch }} Test Build Failed",
+                   "title": "💥 x86_64 Test Build Failed",
                    "description": "Test build failed for `${{ github.repository }}` on `${{ github.ref_name }}`",
                    "color": 16711680,
                    "fields": [
-                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Target", "value": "x86_64-unknown-linux-gnu", "inline": true},
                      {"name": "Branch", "value": "${{ github.ref_name }}", "inline": true},
                      {"name": "Author", "value": "${{ github.actor }}", "inline": true}
                    ],
@@ -172,15 +154,8 @@ jobs:
   build-release:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: [test]
-    name: Release Build for ${{ matrix.target.arch }}
-    runs-on: ubuntu-22.04  # Use x86_64 runner for all builds
-    strategy:
-      matrix:
-        target:
-          - arch: x86_64
-            rust_target: x86_64-unknown-linux-gnu
-          - arch: arm64
-            rust_target: aarch64-unknown-linux-gnu
+    name: Release Build for x86_64
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout code
@@ -190,7 +165,6 @@ jobs:
         run: |
           rustup toolchain install nightly
           rustup default nightly
-          rustup target add ${{ matrix.target.rust_target }}
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -203,23 +177,13 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          if [ "${{ matrix.target.arch }}" = "arm64" ]; then
-            # Install cross-compilation tools for ARM64
-            sudo apt-get install -y gcc-aarch64-linux-gnu liburing-dev:arm64
-            # Set up cross-compilation environment
-            echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-            echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-            echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          else
-            sudo apt-get install -y liburing-dev
-          fi
+          sudo apt-get install -y liburing-dev
 
       - name: Build
-        run: cargo build --release --target ${{ matrix.target.rust_target }}
+        run: cargo build --release
 
       - name: Package binary
-        run: tar -czf tyto-db-${{ matrix.target.arch }}-linux.tar.gz -C target/${{ matrix.target.rust_target }}/release tyto-db
+        run: tar -czf tyto-db-x86_64-linux.tar.gz -C target/release tyto-db
 
       - name: Upload to release
         run: |
@@ -228,8 +192,8 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
-            "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-${{ matrix.target.arch }}-linux.tar.gz" \
-            --data-binary "@tyto-db-${{ matrix.target.arch }}-linux.tar.gz"
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ github.event.release.id }}/assets?name=tyto-db-x86_64-linux.tar.gz" \
+            --data-binary "@tyto-db-x86_64-linux.tar.gz"
 
       - name: Send Discord build notification (Success)
         if: success() && vars.DISCORD_WEBHOOK_URL != ''
@@ -237,11 +201,11 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
-                   "title": "🚀 ${{ matrix.target.arch }} Release Built",
-                   "description": "Binary `tyto-db-${{ matrix.target.arch }}-linux.tar.gz` built and uploaded for release `${{ github.event.release.tag_name }}`",
+                   "title": "🚀 x86_64 Release Built",
+                   "description": "Binary `tyto-db-x86_64-linux.tar.gz` built and uploaded for release `${{ github.event.release.tag_name }}`",
                    "color": 3447003,
                    "fields": [
-                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Target", "value": "x86_64-unknown-linux-gnu", "inline": true},
                      {"name": "Release", "value": "${{ github.event.release.tag_name }}", "inline": true}
                    ],
                    "timestamp": "'""$(date -u +%Y-%m-%dT%H:%M:%S.000Z)""'"
@@ -255,11 +219,11 @@ jobs:
           curl -H "Content-Type: application/json" \
                -d '{
                  "embeds": [{
-                   "title": "💥 ${{ matrix.target.arch }} Build Failed",
+                   "title": "💥 x86_64 Build Failed",
                    "description": "Failed to build binary for release `${{ github.event.release.tag_name }}`",
                    "color": 16711680,
                    "fields": [
-                     {"name": "Target", "value": "${{ matrix.target.rust_target }}", "inline": true},
+                     {"name": "Target", "value": "x86_64-unknown-linux-gnu", "inline": true},
                      {"name": "Release", "value": "${{ github.event.release.tag_name }}", "inline": true}
                    ],
                    "timestamp": "'""$(date -u +%Y-%m-%dT%H:%M:%S.000Z)""'"
