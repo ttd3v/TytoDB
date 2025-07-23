@@ -42,7 +42,7 @@ jobs:
         cargo test --verbose 2>&1 | tee test_output.txt
 
     - name: Send Discord notification (Success)
-      if: success() && vars.DISCORD_WEBHOOK_URL != ''
+      if: success() && secrets.DISCORD_WEBHOOK_URL != ''
       run: |
         curl -H "Content-Type: application/json" \
              -d '{
@@ -114,7 +114,7 @@ jobs:
         run: cargo build --release
 
       - name: Send Discord build notification (Success)
-        if: success() && vars.DISCORD_WEBHOOK_URL != ''
+        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
@@ -196,7 +196,7 @@ jobs:
             --data-binary "@tyto-db-x86_64-linux.tar.gz"
 
       - name: Send Discord build notification (Success)
-        if: success() && vars.DISCORD_WEBHOOK_URL != ''
+        if: success() && secrets.DISCORD_WEBHOOK_URL != ''
         run: |
           curl -H "Content-Type: application/json" \
                -d '{
