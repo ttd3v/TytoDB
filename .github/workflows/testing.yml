@@ -35,23 +35,51 @@ jobs:
         git clone https://github.com/FeatheredSystems/TytoDB-Testing ~/testing-program
 
         # Start the database in the background
-        { cargo run --release; } &
-
+        cargo run --release &
         DB_PID=$!
-        for i in {1..20}; do
-          if nc -z localhost 4287; then  # substitua 1234 pela porta do seu banco
+
+        # Wait for database to be ready
+        echo "Waiting for database to start..."
+        for i in {1..30}; do
+          if nc -z localhost 4287; then
             echo "Database is ready!"
-            sleep 30
             break
           fi
-          echo "Waiting for DB to start..."
-          sleep 10
+          echo "Attempt $i/30: Waiting for DB to start..."
+          sleep 5
         done
 
+        # Verify database is still running
+        if ! kill -0 $DB_PID 2>/dev/null; then
+          echo "ERROR: Database process has died!"
+          exit 1
+        fi
+
+        # Give database a moment to fully initialize
+        sleep 5
 
         # Run the testing program
+        echo "Starting test suite..."
         cd ~/testing-program
-        cargo run --release
+        
+        # Run tests and capture exit code
+        if cargo run --release; then
+          echo "Tests completed successfully"
+          TEST_EXIT_CODE=0
+        else
+          echo "Tests failed"
+          TEST_EXIT_CODE=1
+        fi
 
-        # Stop the database
-        kill $DB_PID
+        # Stop the database gracefully
+        echo "Shutting down database..."
+        if kill -0 $DB_PID 2>/dev/null; then
+          kill $DB_PID
+          # Wait for graceful shutdown
+          sleep 5
+          # Force kill if still running
+          kill -9 $DB_PID 2>/dev/null || true
+        fi
+
+        # Exit with test result
+        exit $TEST_EXIT_CODE
