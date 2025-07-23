@@ -86,15 +86,13 @@ jobs:
     if: github.event_name != 'release'
     needs: [test]
     name: Test Build for ${{ matrix.target.arch }}
-    runs-on: ${{ matrix.target.os }}
+    runs-on: ubuntu-22.04  # Use x86_64 runner for all builds
     strategy:
       matrix:
         target:
-          - os: ubuntu-22.04
-            arch: x86_64
+          - arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest-arm64
-            arch: arm64
+          - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
 
     steps:
@@ -116,7 +114,19 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.target.arch }}" = "arm64" ]; then
+            # Install cross-compilation tools for ARM64
+            sudo apt-get install -y gcc-aarch64-linux-gnu liburing-dev:arm64
+            # Set up cross-compilation environment
+            echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+            echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+            echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          else
+            sudo apt-get install -y liburing-dev
+          fi
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target.rust_target }}
@@ -163,15 +173,13 @@ jobs:
     if: github.event_name == 'release' && github.event.action == 'published'
     needs: [test]
     name: Release Build for ${{ matrix.target.arch }}
-    runs-on: ${{ matrix.target.os }}
+    runs-on: ubuntu-22.04  # Use x86_64 runner for all builds
     strategy:
       matrix:
         target:
-          - os: ubuntu-22.04
-            arch: x86_64
+          - arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest-arm64
-            arch: arm64
+          - arch: arm64
             rust_target: aarch64-unknown-linux-gnu
 
     steps:
@@ -193,7 +201,19 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y liburing-dev
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.target.arch }}" = "arm64" ]; then
+            # Install cross-compilation tools for ARM64
+            sudo apt-get install -y gcc-aarch64-linux-gnu liburing-dev:arm64
+            # Set up cross-compilation environment
+            echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+            echo "CXX=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+            echo "AR=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          else
+            sudo apt-get install -y liburing-dev
+          fi
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target.rust_target }}
