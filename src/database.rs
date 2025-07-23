@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, os::{raw::c_int, unix::fs::FileExt}, path::PathBuf, pin::Pin, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use serde_yaml;
-use crate::{alba_types::AlbaTypes, container::{Container,MvccState}, gerr, logerr, query::{search, Query, SearchArguments}, query_conditions::QueryConditions, row::Row, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback, AstSearch, Token, AST};
+
+use crate::{alba_types::AlbaTypes, container::Container, gerr, logerr, query::{search, Query, SearchArguments, ActionType, search_with_action}, query_conditions::QueryConditions, row::Row, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback, AstSearch, Token, AST};
 use rand::{rngs::OsRng, Rng, TryRngCore};
 use tokio::sync::Mutex;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
@@ -645,27 +645,7 @@ impl Database{
                         conditions: QueryConditions::from_primitive_conditions(structure.conditions,&col_prop,pk)?
                     }
                 };
-                let mut rows = search(container.clone(), sa).await?;
-
-                let c = container.lock().await;
-                let mut indexes = Vec::new();
-                for i in structure.col_nam.iter().enumerate(){
-                    for j in c.headers.iter().enumerate(){
-                        if *j.1.0 == *i.1{
-                            indexes.push((j.0,structure.col_val[i.0].clone()));
-                        }
-                    }
-                }
-
-                for i in rows.0.iter_mut(){
-                    for j in indexes.iter(){
-                        i.data[j.0] = j.1.clone();
-                    }
-                }
-                for i in rows.0.iter().zip(rows.1.iter()){
-                    c.mvcc.lock().await.0.insert(*i.1, (MvccState::Edit,i.0.data.clone()));
-                }
-                
+                search_with_action(container.clone(),sa,ActionType::Edit((structure.col_nam,structure.col_val))).await?;                 
                 return Ok(Query { rows: (vec![],vec![]) })
             },
             AST::DeleteRow(structure) => {
@@ -694,12 +674,7 @@ impl Database{
                     }
                 };
                 
-                let (values,indexes) = search(container.clone(), sa).await?;
-                let container = container.lock().await;
-                let mut mvcc = container.mvcc.lock().await;
-                for (i,val) in indexes.into_iter().zip(values){
-                    mvcc.0.insert(i,(MvccState::Delete,vec![val.data[0].clone()]));
-                }
+                search_with_action(container.clone(),sa,ActionType::Delete).await?;                
                 return Ok(Query{rows:(Vec::new(),Vec::new())})
             },
             AST::DeleteContainer(structure) => {
