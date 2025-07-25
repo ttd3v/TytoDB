@@ -32,7 +32,7 @@ jobs:
         key: "${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}"
 
     - name: Install liburing-dev
-      run: sudo apt-get update && sudo apt-get install -y liburing-dev && cd ~ && git clone https://github.com/axboe/liburing && cd liburing && ./configure --disable-shared --enable-static && make && sudo make install
+      run: sudo apt-get update && sudo apt-get install -y liburing-dev && cd ~ && git clone https://github.com/axboe/liburing && cd liburing && ./configure --enable-static && make && sudo make install
 
 
     - name: Build
