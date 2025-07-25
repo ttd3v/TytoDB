@@ -117,7 +117,7 @@ jobs:
           cd ~ && git clone https://github.com/axboe/liburing && cd liburing && ./configure && make && sudo make install
 
       - name: Build
-        run: cargo build --release
+        run: RUSTFLAGS="-C target-feature=+crt-static" && cargo build --release
 
       - name: Send Discord build notification (Success)
         if: success() && env.DISCORD_WEBHOOK_URL != ''
@@ -191,7 +191,7 @@ jobs:
           cd ~ && git clone https://github.com/axboe/liburing && cd liburing && ./configure && make && sudo make install
 
       - name: Build
-        run: cargo build --release
+        run: RUSTFLAGS="-C target-feature=+crt-static" && cargo build --release
 
       - name: Debug - List release directory
         run: |
