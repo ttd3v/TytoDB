@@ -25,5 +25,5 @@ void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value);
 void u64hashmap_rebucket(U64Hashmap *self);
 void remove_u64hashmap(U64Hashmap *self, u64 key, u64 value);
 hash_cell get_u64hashmap(U64Hashmap *self, u64 key);
-
+void destroy_u64hashmap(U64Hashmap *self); 
 #endif

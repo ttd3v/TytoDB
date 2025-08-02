@@ -1,116 +1,153 @@
 #include <stdint.h>
+#include <stdlib.h>
 #include "lib.h"
 
 typedef uint64_t u64;
-
 const u64 HASHMAP_CELL_SIZE = 4;
 
-typedef struct {
-    uint8_t exist;
-    u64 key;
-    u64 value;
-} hash_cell;
-
-typedef struct{
-    u64 bucket_size;
-    u64 len;
-    hash_cell* array;
-} U64Hashmap;
-
 U64Hashmap new_u64hashmap(){
-    hash_cell array[12];
-    return (
-        (U64Hashmap){12,0,array}
-    );
+    hash_cell *array = malloc(12 * sizeof(hash_cell));
+    if (!array) {
+        return (U64Hashmap){0, 0, NULL};
+    }
+    
+    for (u64 i = 0; i < 12; i++) {
+        array[i] = (hash_cell){0, 0, 0};
+    }
+    
+    return (U64Hashmap){12, 0, array};
 }
 
-void insert_u64hashmap(U64Hashmap *self,u64 key,u64 value);
+void destroy_u64hashmap(U64Hashmap *self) {
+    if (self && self->array) {
+        free(self->array);
+        self->array = NULL;
+        self->bucket_size = 0;
+        self->len = 0;
+    }
+}
+
+void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value);
 
 void u64hashmap_rebucket(U64Hashmap *self){
-    u64 bs = self->bucket_size*2;
-    hash_cell array[bs];
-    U64Hashmap tmp = (U64Hashmap){bs,0,array};
+    if (!self || !self->array) return;
     
-    for (u64 i = 0; i < self->len; i++){
-        hash_cell c = self->array[i];
-        if (c.exist) insert_u64hashmap(&tmp,c.key,c.value);
+    u64 old_bucket_size = self->bucket_size;
+    u64 new_bucket_size = self->bucket_size * 2;
+    
+    
+    hash_cell *new_array = realloc(self->array, new_bucket_size * sizeof(hash_cell));
+    if (!new_array) {
+        return;
     }
-
-    self->array = array;
-    self->bucket_size *= 2;
+    
+    for (u64 i = old_bucket_size; i < new_bucket_size; i++) {
+        new_array[i] = (hash_cell){0, 0, 0};
+    }
+    
+    hash_cell *old_array = malloc(old_bucket_size * sizeof(hash_cell));
+    if (!old_array) {
+        return;
+    }
+    
+    for (u64 i = 0; i < old_bucket_size; i++) {
+        old_array[i] = new_array[i];
+        new_array[i] = (hash_cell){0, 0, 0}; 
+    }
+    
+    self->array = new_array;
+    self->bucket_size = new_bucket_size;
+    u64 old_len = self->len;
+    self->len = 0;
+    
+    
+    for (u64 i = 0; i < old_bucket_size; i++){
+        hash_cell c = old_array[i];
+        if (c.exist) {
+            insert_u64hashmap(self, c.key, c.value);
+        }
+    }
+    
+    free(old_array);
 }
-void insert_u64hashmap(U64Hashmap *self,u64 key,u64 value){
+
+void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value){
+    if (!self || !self->array) return;
+    
     u64 digestedkey = 0;
     digestedkey = digestedkey ^ key;
-    digestedkey = digestedkey << key;
+    digestedkey = digestedkey << (key % 32); 
     digestedkey = digestedkey << 10;
-    digestedkey = digestedkey ^ (digestedkey >> key << 1);
-
-    u64 pointer = (digestedkey % self->len/HASHMAP_CELL_SIZE);
-    hash_cell cell[HASHMAP_CELL_SIZE];
-    for (u64 i = 0; i<HASHMAP_CELL_SIZE; i++){
-        cell[i] = self->array[pointer+i]; 
-    } 
+    digestedkey = digestedkey ^ (digestedkey >> ((key % 32) << 1));
+    
+    u64 pointer = (digestedkey % (self->bucket_size / HASHMAP_CELL_SIZE)) * HASHMAP_CELL_SIZE;
+    
     int rebucket = 0;
     for (u64 i = 0; i < HASHMAP_CELL_SIZE; i++){
-        if(cell[i].exist){
-            if(cell[i].key == key){
-                self->array[pointer+i] = (hash_cell){1,key,value};
+        hash_cell *cell = &self->array[pointer + i];
+        
+        if(cell->exist){
+            if(cell->key == key){
+                cell->value = value;
                 return;
             }
-        }else{
-            self->array[pointer+i] = (hash_cell){1,key,value};
+        } else {
+            *cell = (hash_cell){1, key, value};
             self->len++;
-            if((i*10) / HASHMAP_CELL_SIZE >= 8) rebucket = 1;
-            break;
+            
+            
+            if((self->len * 10) / self->bucket_size >= 8) {
+                u64hashmap_rebucket(self);
+            }
+            return;
+        }
+    }
+    
+        u64hashmap_rebucket(self);
+    insert_u64hashmap(self, key, value); }
+
+void remove_u64hashmap(U64Hashmap *self, u64 key){
+    if (!self || !self->array) return;
+    
+    u64 digestedkey = 0;
+    digestedkey = digestedkey ^ key;
+    digestedkey = digestedkey << (key % 32);
+    digestedkey = digestedkey << 10;
+    digestedkey = digestedkey ^ (digestedkey >> ((key % 32) << 1));
+    
+    u64 pointer = (digestedkey % (self->bucket_size / HASHMAP_CELL_SIZE)) * HASHMAP_CELL_SIZE;
+    
+    for (u64 i = 0; i < HASHMAP_CELL_SIZE; i++){
+        hash_cell *cell = &self->array[pointer + i];
+        
+        if(cell->exist && cell->key == key){
+            *cell = (hash_cell){0, 0, 0};
+            self->len--;
+            return;
         }
     }
 }
-void remove_u64hashmap(U64Hashmap *self,u64 key,u64 value){
+
+hash_cell get_u64hashmap(U64Hashmap *self, u64 key){
+    if (!self || !self->array) {
+        return (hash_cell){0, 0, 0};
+    }
+    
     u64 digestedkey = 0;
     digestedkey = digestedkey ^ key;
-    digestedkey = digestedkey << key;
+    digestedkey = digestedkey << (key % 32);
     digestedkey = digestedkey << 10;
-    digestedkey = digestedkey ^ (digestedkey >> key << 1);
-
-    u64 pointer = (digestedkey % self->len/HASHMAP_CELL_SIZE);
-    hash_cell cell[HASHMAP_CELL_SIZE];
-    for (u64 i = 0; i<HASHMAP_CELL_SIZE; i++){
-        cell[i] = self->array[pointer+i]; 
-    } 
-    int rebucket = 0;
+    digestedkey = digestedkey ^ (digestedkey >> ((key % 32) << 1));
+    
+    u64 pointer = (digestedkey % (self->bucket_size / HASHMAP_CELL_SIZE)) * HASHMAP_CELL_SIZE;
+    
     for (u64 i = 0; i < HASHMAP_CELL_SIZE; i++){
-        if(cell[i].exist){
-            if(cell[i].key == key){
-                self->array[pointer+i] = (hash_cell){0,0,0};
-                self->len--;
-                return;
-            }
+        hash_cell *cell = &self->array[pointer + i];
+        
+        if(cell->exist && cell->key == key){
+            return *cell;
         }
     }
-}
-
-
-hash_cell get_u64hashmap(U64Hashmap *self,u64 key){
-
-    u64 digestedkey = 0;
-    digestedkey = digestedkey ^ key;
-    digestedkey = digestedkey << key;
-    digestedkey = digestedkey << 10;
-    digestedkey = digestedkey ^ (digestedkey >> key << 1);
-
-    u64 pointer = (digestedkey % self->len/HASHMAP_CELL_SIZE);
-    hash_cell cell[HASHMAP_CELL_SIZE];
-    for (u64 i = 0; i<HASHMAP_CELL_SIZE; i++){
-        cell[i] = self->array[pointer+i]; 
-    } 
-    int rebucket = 0;
-    for (u64 i = 0; i < HASHMAP_CELL_SIZE; i++){
-        if(cell[i].exist){
-            if(cell[i].key == key){
-                return cell[i];
-            }
-        }
-    }
-    return (hash_cell){0,0,0};
+    
+    return (hash_cell){0, 0, 0};
 }

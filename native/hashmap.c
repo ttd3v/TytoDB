@@ -1,6 +1,7 @@
 #include "lib.h"
 #include <liburing.h>
 #include <liburing/io_uring.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,6 +129,7 @@ struct WriteInput{
     uint32_t count;
     uint64_t *key;
     uint64_t *value;
+    uint8_t *exists;
 };
 
 
@@ -266,6 +268,7 @@ int push_vector_cell(vector_cell *value,Cell val){
 
 
 typedef uint64_t u64;
+typedef size_t usize;
 
 int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
     struct GetOutput output = (struct GetOutput){0,0,(OptionUINT64*)malloc(entry->count)};
@@ -275,6 +278,9 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     for (uint64_t i=0;i<entry->count;i++){
         u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
         insert_u64hashmap(&hm, a,a);
+    }
+    for (u64 i =0 ;i<hm.bucket_size;i++){
+        if(hm.array[i].exist){ if (push_vector(&blocks, hm.array[i].value) == -1){ return -1; }; };
     }
 
     struct io_uring ring;
@@ -294,7 +300,6 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     vector_cell existing_cells;
     new_vector_cell(&existing_cells);
     for (uint64_t i = 0; i < blocks.count; i++){
-        Cell vec_cel[HASHMAP_BLOCK_SIZE];
         for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE*sizeof(Cell); j++){
             Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
             if(v.exists){
@@ -306,7 +311,7 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     for (uint64_t i = 0; i < entry->count; i++){
         OptionUINT64 a;
         a.some = -1;
-        for (u64 j = 0; j < existing_cells.count; i++){
+        for (u64 j = 0; j < existing_cells.count; j++){
             Cell v = existing_cells.values[j];
             if(v.exists){
                 a.some = 1;
@@ -318,5 +323,65 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     }
 
     *foreign_output = output;
+    return 0;
+}
+
+typedef struct{
+    usize count;
+    u64 ptr;
+    vector_cell cells;
+} hmchunk;
+
+int hashmap_write(struct Hashmap *self, struct WriteInput *entry){
+    vector blocks;
+    if (new_vector(&blocks)==-1) return -1;
+    U64Hashmap hm = new_u64hashmap();
+    for (uint64_t i=0;i<entry->count;i++){
+        u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
+        insert_u64hashmap(&hm, a,a);
+    }
+    for (u64 i =0 ;i<hm.bucket_size;i++){
+        if(hm.array[i].exist){ if (push_vector(&blocks, hm.array[i].value) == -1){ return -1; }; };
+    }
+
+    struct io_uring ring;
+    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) return -1;
+    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+
+    unsigned char buffers[blocks.count][sizeof(Cell)*HASHMAP_BLOCK_SIZE];
+    for (uint64_t i = 0; i < blocks.count; i++){
+        io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
+    }
+    if (io_uring_submit(&ring) == -1) return -1;
+    struct io_uring_cqe *cqe;
+    if (io_uring_wait_cqe(&ring, &cqe) == -1) return -1;
+    if (cqe->res < 0) return -1;
+    free(blocks.values);
+
+
+    hmchunk *chunks = (hmchunk*)malloc(blocks.count * sizeof(hmchunk) );
+    
+
+    if (chunks == NULL) return -1;
+    for (uint64_t i = 0; i < blocks.count; i++){
+        chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
+        new_vector_cell(&chunks->cells);
+        for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE*sizeof(Cell); j++){
+            Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
+            if(push_vector_cell(&chunks->cells, v)==-1) return -1;
+        }
+    }
+
+    u64 *customers = (u64*)malloc(sizeof(u64)*entry->count);
+    u64 remaining_customers = entry->count;
+    for (u64 i = 0; i < entry->count; i++){customers[i] = i;};
+
+    int rebucket = 0;
+    while(remaining_customers > 0){
+        U64Hashmap hm = new_u64hashmap();
+
+    }
+
+
     return 0;
 }
