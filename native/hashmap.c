@@ -6,10 +6,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
+#include "error.h"
 
 const unsigned long BUCKET_SIZE_MARGIN = 25;
 const unsigned long DEFAULT_BUCKET_SIZE = 240;
 const unsigned long HASHMAP_BLOCK_SIZE = 240;
+
 
 struct Hashmap{
     int file;
@@ -22,6 +24,12 @@ typedef struct {
     uint64_t key;
     uint64_t value;
 } Cell;
+typedef struct {
+    unsigned char exists;
+    uint64_t key;
+    uint64_t value;
+    uint64_t ptr;
+} CellPtr;
 typedef struct{
     uint64_t bucket_size;
     uint64_t len;
@@ -84,11 +92,11 @@ HashmapMetadata deserialize_hashmapmetadata(unsigned char*const buffer){
 
 /// Hashmap_draw_defaults
 ///     Sets the file layout of a hashmap file
-int hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
+ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
     unsigned char *buffer = (unsigned char *)malloc(bucket_size*sizeof(Cell));
     int success = fwrite(buffer, sizeof(unsigned char), bucket_size*sizeof(Cell), file);
     if (success == -1){
-        return success;
+        return -3;
     }
     free(buffer);
 
@@ -99,7 +107,7 @@ int hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
     success = fwrite(meta_buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
 
     if (success == -1){
-        return success;
+        return -3;
     }
     free(meta_buffer);
     fflush(file);
@@ -151,13 +159,16 @@ int hashmap_new(char *path,struct Hashmap *hashmap){
     }
 
     if(exists == -1){
-        if (hashmap_draw_defaults(file,DEFAULT_BUCKET_SIZE) == -1){
-            return -1;
+        ExecutionProduct r = hashmap_draw_defaults(file,DEFAULT_BUCKET_SIZE) < 0;
+        if (r){
+            return r;
+
         }
     }
 
     fseek(file,-sizeof(HashmapMetadata),SEEK_END);
     unsigned char *buffer = (unsigned char *)malloc(sizeof(HashmapMetadata));
+    if (buffer == NULL) return -2; 
     fread(buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
     fseek(file, 0, SEEK_SET); 
     
@@ -176,11 +187,11 @@ typedef struct{
     uint64_t *values;
 } vector;
 
-int new_vector(vector *value){
+ExecutionProduct new_vector(vector *value){
     value->values = (uint64_t*)malloc(10*sizeof(uint64_t));
     value->capacity = 10;
     if (value->values == NULL){
-        return -1;
+        return -2;
     }
     value->capacity = 10;
     value->count = 0;
@@ -193,7 +204,7 @@ int push_vector(vector *value,uint64_t val){
     }else{
         void *temp = realloc(value->values, value->capacity*sizeof(uint64_t)*2);
         if (temp == NULL){
-            return -1;
+            return -2;
         }else{
             value->values=temp;
             value->capacity*=2;
@@ -238,24 +249,24 @@ typedef struct{
     Cell *values;
 } vector_cell;
 
-int new_vector_cell(vector_cell *value){
+ExecutionProduct new_vector_cell(vector_cell *value){
     value->values = (Cell*)malloc(2*sizeof(Cell));
     value->capacity = 2;
     if (value->values == NULL){
-        return -1;
+        return -2;
     }
     value->capacity = 2;
     value->count = 0;
     return 0;
 }
-int push_vector_cell(vector_cell *value,Cell val){
+ExecutionProduct push_vector_cell(vector_cell *value,Cell val){
     if (value->count < value->capacity){
         value->values[value->count] = val;
         value->count++;
     }else{
         void *temp = realloc(value->values, value->capacity*sizeof(Cell)*2);
         if (temp == NULL){
-            return -1;
+            return -2;
         }else{
             value->values=temp;
             value->capacity*=2;
@@ -263,17 +274,67 @@ int push_vector_cell(vector_cell *value,Cell val){
         }
     }
     return 0;
-} 
+}
 
+
+typedef struct{
+    uint64_t count;
+    uint64_t capacity;
+    CellPtr *values;
+} vector_cellptr;
+
+ExecutionProduct new_vector_cellptr(vector_cellptr *value){
+    value->values = (CellPtr*)malloc(2*sizeof(CellPtr));
+    value->capacity = 2;
+    if (value->values == NULL){
+        return -2;
+    }
+    value->capacity = 2;
+    value->count = 0;
+    return 0;
+}
+ExecutionProduct push_vector_cellptr(vector_cellptr *value,CellPtr val){
+    if (value->count < value->capacity){
+        value->values[value->count] = val;
+        value->count++;
+    }else{
+        void *temp = realloc(value->values, value->capacity*sizeof(CellPtr)*2);
+        if (temp == NULL){
+            return -2;
+        }else{
+            value->values=temp;
+            value->capacity*=2;
+            return push_vector_cellptr(value, val);
+        }
+    }
+    return 0;
+}
+ExecutionProduct remove_cell(vector_cellptr *value, uint64_t index) { 
+    if (value == NULL || value->count == 0) {
+        return -2;
+    }
+    
+    if (index >= value->count) {
+        return -1;
+    }
+    
+    for (uint64_t i = index; i < value->count - 1; i++) {
+        value->values[i] = value->values[i + 1];
+    }
+    
+    value->count--;
+    
+    return 0;
+}
 
 
 typedef uint64_t u64;
 typedef size_t usize;
 
-int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
+ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
     struct GetOutput output = (struct GetOutput){0,0,(OptionUINT64*)malloc(entry->count)};
     vector blocks;
-    if (new_vector(&blocks)==-1) return -1;
+    if (new_vector(&blocks)==-1) return -2;
     U64Hashmap hm = new_u64hashmap();
     for (uint64_t i=0;i<entry->count;i++){
         u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
@@ -284,17 +345,20 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     }
 
     struct io_uring ring;
-    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) return -1;
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-
-    unsigned char buffers[blocks.count][sizeof(Cell)*HASHMAP_BLOCK_SIZE];
+    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) return -6;
+    
+    unsigned char **buffers = malloc(blocks.count * sizeof(Cell) * HASHMAP_BLOCK_SIZE * sizeof(unsigned char*));
+    if (!buffers) return -2;
     for (uint64_t i = 0; i < blocks.count; i++){
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
-    if (io_uring_submit(&ring) == -1) return -1;
-    struct io_uring_cqe *cqe;
-    if (io_uring_wait_cqe(&ring, &cqe) == -1) return -1;
-    if (cqe->res < 0) return -1;
+    if (io_uring_submit(&ring) < 0) return -6;
+    for(usize i = 0; i < blocks.count; i++){
+        struct io_uring_cqe *cqe;
+        if (io_uring_wait_cqe(&ring, &cqe) < 0) return -10;
+        if (cqe->res < 0) return -10;
+    }
     free(blocks.values);
 
     vector_cell existing_cells;
@@ -325,6 +389,33 @@ int hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *
     *foreign_output = output;
     return 0;
 }
+typedef struct {
+    u64 *indices;
+    u64 count;
+    u64 capacity;
+} customer_list;
+
+ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
+    list->indices = malloc(sizeof(u64) * initial_count);
+    if (!list->indices) return -2;
+    
+    list->capacity = initial_count;
+    list->count = initial_count;
+    
+    // Initialize with all customer indices
+    for (u64 i = 0; i < initial_count; i++) {
+        list->indices[i] = i;
+    }
+    return 0;
+}
+
+void remove_customer(customer_list *list, u64 position) {
+    // Shift remaining customers left
+    for (u64 i = position; i < list->count - 1; i++) {
+        list->indices[i] = list->indices[i + 1];
+    }
+    list->count--;
+}
 
 typedef struct{
     usize count;
@@ -332,56 +423,123 @@ typedef struct{
     vector_cell cells;
 } hmchunk;
 
-int hashmap_write(struct Hashmap *self, struct WriteInput *entry){
+ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     vector blocks;
-    if (new_vector(&blocks)==-1) return -1;
+    if (new_vector(&blocks)<0) return -2;
     U64Hashmap hm = new_u64hashmap();
     for (uint64_t i=0;i<entry->count;i++){
         u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
         insert_u64hashmap(&hm, a,a);
     }
     for (u64 i =0 ;i<hm.bucket_size;i++){
-        if(hm.array[i].exist){ if (push_vector(&blocks, hm.array[i].value) == -1){ return -1; }; };
+        if(hm.array[i].exist){ if (push_vector(&blocks, hm.array[i].value) == -1){ free(blocks.values);destroy_u64hashmap(&hm);return -1; }; };
     }
 
     struct io_uring ring;
-    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) return -1;
-    struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) free(blocks.values);destroy_u64hashmap(&hm);return -1;
 
-    unsigned char buffers[blocks.count][sizeof(Cell)*HASHMAP_BLOCK_SIZE];
+
+    unsigned char **buffers = malloc(blocks.count * sizeof(Cell) * HASHMAP_BLOCK_SIZE * sizeof(unsigned char*));
+    if (!buffers) return -2;
     for (uint64_t i = 0; i < blocks.count; i++){
+        struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
-    if (io_uring_submit(&ring) == -1) return -1;
-    struct io_uring_cqe *cqe;
-    if (io_uring_wait_cqe(&ring, &cqe) == -1) return -1;
-    if (cqe->res < 0) return -1;
-    free(blocks.values);
+    if (io_uring_submit(&ring) == -1) free(blocks.values);destroy_u64hashmap(&hm);free(buffers); return -13;
+    for (usize _i = 0; _i<blocks.count;_i++){
+        struct io_uring_cqe *cqe;
+        if (io_uring_wait_cqe(&ring, &cqe) == -1) return -6;
+        if (cqe->res < 0) return -6;
+    }
 
 
-    hmchunk *chunks = (hmchunk*)malloc(blocks.count * sizeof(hmchunk) );
-    
+    vector_cellptr cells;
+    if (new_vector_cellptr(&cells) == -1) return -2;
 
-    if (chunks == NULL) return -1;
     for (uint64_t i = 0; i < blocks.count; i++){
-        chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
-        new_vector_cell(&chunks->cells);
+        //chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
+        //new_vector_cell(&chunks->cells);
         for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE*sizeof(Cell); j++){
             Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
-            if(push_vector_cell(&chunks->cells, v)==-1) return -1;
+            CellPtr y = {v.exists,v.key,v.value,blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell)};
+            if(push_vector_cellptr(&cells, y)==-1) return -2;
+        }
+    }
+    free(blocks.values);
+
+    customer_list *customers;
+    init_customer_list(customers, entry->count);
+    for (u64 i = 0; i < entry->count; i++){customers->indices[i] = i;};
+
+    int rebucket = 0;
+    U64Hashmap hmap = new_u64hashmap();
+    destroy_u64hashmap(&hm); 
+    free(buffers);
+
+    unsigned char **writing_buffers = malloc(cells.count * sizeof(unsigned char*));
+    if (!writing_buffers) return -2;
+
+    for(u64 i = customers->count; i > 0; i--){
+        u64 k = entry->key[0+customers->count-i];
+        u64 v = entry->value[0+customers->count-i];
+        uint8_t e = entry->exists[0+customers->count-i]; 
+        for(u64 j = 0; j < cells.count; j++){
+            if (cells.values[j].exists && cells.values[j].key == k){ 
+                serialize_cell(&(Cell){entry->exists[i],k,v}, writing_buffers[j]);
+                struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+                if (sqe == NULL) free(writing_buffers); return -2;
+
+                io_uring_prep_write(sqe, self->file, writing_buffers[j], sizeof(Cell), cells.values[j].ptr);
+                remove_customer(customers, i);
+                remove_cell(&cells, j);
+                break;
+            }
+        }
+    }
+    for(u64 i = customers->count; i > 0; i--){
+        u64 k = entry->key[0+customers->count-i];
+        u64 v = entry->value[0+customers->count-i];
+        uint8_t e = entry->exists[0+customers->count-i];
+        u64 j =0;
+        for(j = 0; j < cells.count; j++){
+            if (!cells.values[j].exists){ 
+                serialize_cell(&(Cell){entry->exists[i],k,v}, writing_buffers[j]);
+                struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+                if (sqe == NULL) free(writing_buffers); return -1;
+
+                io_uring_prep_write(sqe, self->file, writing_buffers[j], sizeof(Cell), cells.values[j].ptr);
+                remove_customer(customers, j); 
+                self->len++;
+                remove_cell(&cells, i);
+                break;
+            }
+        }
+        if (j == cells.count){
+            rebucket = 1; break;
         }
     }
 
-    u64 *customers = (u64*)malloc(sizeof(u64)*entry->count);
-    u64 remaining_customers = entry->count;
-    for (u64 i = 0; i < entry->count; i++){customers[i] = i;};
+    struct io_uring_sqe *fsync_sqe = io_uring_get_sqe(&ring); 
+    if (fsync_sqe == NULL) free(writing_buffers);return -1;
+    io_uring_prep_fsync(fsync_sqe, self->file, 0);
 
-    int rebucket = 0;
-    while(remaining_customers > 0){
-        U64Hashmap hm = new_u64hashmap();
-
+    for(u64 i = 0; i < entry->count-customers->count; i++){
+        struct io_uring_cqe *cqe;
+        io_uring_wait_cqe(&ring, &cqe);
+        if (cqe->res < 0) free(writing_buffers);return -1; 
     }
 
+    free(writing_buffers);
+    if(rebucket == 1){
+        struct WriteInput pr_input;
+        pr_input.count = customers->count;
+        for(usize i = 0; i < pr_input.count; i++){
+            pr_input.value[i] = entry->value[customers->indices[i]];
+            pr_input.key[i] = entry->key[customers->indices[i]];
+            pr_input.exists[i] = entry->exists[customers->indices[i]];
+        }
+        //hashmap_rebucket(self,);
+    }
 
     return 0;
 }
