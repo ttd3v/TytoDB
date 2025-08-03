@@ -10,13 +10,16 @@
 
 const unsigned long BUCKET_SIZE_MARGIN = 25;
 const unsigned long DEFAULT_BUCKET_SIZE = 240;
-const unsigned long HASHMAP_BLOCK_SIZE = 240;
+const unsigned long HASHMAP_BLOCK_SIZE = 8;
+const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 8;
 
 
 struct Hashmap{
     int file;
     uint64_t bucket_size;
     uint64_t len;
+    char *path;
+    char *temp_path;
 };
 
 typedef struct {
@@ -149,8 +152,8 @@ struct WriteInput{
 ///     0 -> Success
 ///     -1 -> failed to open file
 ///
-int hashmap_new(char *path,struct Hashmap *hashmap){
-
+int hashmap_new(struct Hashmap *hashmap){
+    char *path = hashmap->path;
     FILE *existence = fopen(path,"r");
     int exists = -1;
     FILE *file;
@@ -538,7 +541,15 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     destroy_u64hashmap(&hm); 
 
     unsigned char **writing_buffers = malloc(cells.count * sizeof(unsigned char*));
-    if (!writing_buffers) io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);return -2;
+    writing_buffers_cleanup:{
+        io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);
+    };
+    if (!writing_buffers) { goto writing_buffers_cleanup;return -2; }
+    for (uint64_t i = 0; i < cells.count; i++) {
+        writing_buffers[i] = malloc(sizeof(Cell) * HASHMAP_BLOCK_SIZE);
+        if (!writing_buffers[i]) {goto writing_buffers_cleanup;return -2; }
+    }
+
     for (u64 j = 0; j < cells.count; j++) {
         writing_buffers[j] = (unsigned char*)malloc(sizeof(Cell));
         if (writing_buffers[j] == NULL){
@@ -622,5 +633,102 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         //hashmap_rebucket(self,);
     }
     io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);
+    return 0;
+}
+
+
+const u64 READ_CHUNK = 8192;
+
+u64 max(u64 m, u64 n) {return m>n?m:n;}
+u64 min(u64 m, u64 n) {return m<n?m:n;}
+u64 clamp(u64 m, u64 n, u64 w){
+    if(m >= n && m <= w){
+        return m;
+    }
+    return m < n?n:w;  
+}
+
+
+ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries) {
+    FILE* temp = fopen(self->temp_path, "wb");
+    if (temp == NULL){
+        return -5;
+    }
+
+    struct Hashmap temphm = {
+        .bucket_size = self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR,
+        .path = self->temp_path,
+        .file = fileno(temp),
+        .len = 0,
+        .temp_path = "./.temp"
+    };
+
+    hashmap_draw_defaults(temp, self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR);
+    
+    unsigned char *buffer;
+    cleanup:{
+        free(buffer);
+        remove(self->temp_path);
+        fclose(temp);
+    };
+
+    u64 processed = 0;
+    while(processed < self->bucket_size){
+        u64 csize = clamp(self->bucket_size-processed,1,READ_CHUNK/sizeof(Cell));
+        buffer = malloc(csize*sizeof(Cell));
+        if(buffer == NULL){
+            goto cleanup;
+            return -2;
+        }
+        fread(&buffer, sizeof(Cell), csize, temp);
+        fseek(temp, csize*sizeof(Cell), SEEK_CUR);
+
+        struct WriteInput a = {
+            .exists = malloc(csize),
+            .count = csize,
+            .key = malloc(csize * sizeof(u64)),
+            .value = malloc(csize * sizeof(u64))
+        };
+        if(a.exists == NULL){
+            goto cleanup;
+            return -2;
+        }
+        if(a.key == NULL){
+            goto cleanup;
+            free(a.exists);
+            return -2;
+        }
+        if(a.value == NULL){
+            goto cleanup;
+            free(a.exists);
+            free(a.key);
+            return -2;
+        }
+
+        for(u64 i = 0; i < csize; i++){
+            unsigned char b[sizeof(Cell)];
+    
+            for(u64 j = 0; j < sizeof(Cell); j++){
+                b[j] = buffer[i*sizeof(Cell)+j];
+            }
+
+            Cell ce = deserialize_cell(b);
+            if(ce.exists){
+                a.key[i]=ce.key;
+                a.value[i]=ce.value;
+                a.exists[1]=ce.exists;
+            }
+        }
+
+        ExecutionProduct res = hashmap_write(&temphm, &a);
+        if (res < 0){
+            goto cleanup;
+            free(a.exists);
+            free(a.key);
+            free(a.value);
+            return res;
+        }
+    };
+
     return 0;
 }
