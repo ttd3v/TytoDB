@@ -541,34 +541,77 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 //*
 //
 //
-    vector blocks;
-    if (new_vector(&blocks)<0) return -2;
-    U64Hashmap hm = new_u64hashmap();
+    ExecutionProduct product = -1;
+    int ring_initialized = -1;
+
+    // All cycles
+    struct io_uring ring;
+
+    // Read cycle
+    vector blocks = {0};
+    U64Hashmap hm = new_u64hashmap(); 
+    unsigned char **buffers = NULL;
+    vector_cellptr cells = {0};
+    customer_list *customers = &(customer_list){
+        .count = 0,
+        .indices = NULL,
+        .capacity = 0
+    };
+    
+    // Write cycle
+    U64Hashmap hmap = {0};
+    unsigned char **writing_buffers = NULL;
+
+
+
+    clean:
+        if(blocks.values != NULL) free(blocks.values);
+        if(hm.array != NULL) destroy_u64hashmap(&hm);
+        if(ring_initialized >= 0) io_uring_queue_exit(&ring); 
+        if(buffers != NULL){
+            for(u64 j = 0; j < blocks.count; j++) {
+                if(buffers[j] == NULL) free(buffers[j]);
+            }
+            free(buffers);
+        }
+        if(cells.values != NULL) free(cells.values);
+        if(customers->indices != NULL) free(customers->indices);
+        if(hmap.array != NULL) free(hmap.array);
+        if(writing_buffers != NULL){
+            for(u64 j = 0; j<cells.count; j++) if(writing_buffers[j] != NULL) {free(writing_buffers[j]);};
+        }
+        return product;
+
+    if (new_vector(&blocks)<0) product = -2; goto clean;
     for (uint64_t i=0;i<entry->count;i++){
         u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
         insert_u64hashmap(&hm, a,a);
     }
     for (u64 i =0 ;i<hm.bucket_size;i++){
-        if(hm.array[i].exist){ if (push_vector(&blocks, hm.array[i].value) == -1){ free(blocks.values);destroy_u64hashmap(&hm);return -1; }; };
+        if(hm.array[i].exist){ 
+            if (push_vector(&blocks, hm.array[i].value) < 0){ 
+                product = -2; 
+                goto clean; 
+            }; 
+        };
     }
 
-    struct io_uring ring;
-    if (io_uring_queue_init(blocks.count, &ring, 0) < 0) free(blocks.values);destroy_u64hashmap(&hm);return -1;
+    if (io_uring_queue_init(blocks.count, &ring, 0) < 0){
+        product = -6;
+        goto clean;
+    };
+    ring_initialized = 1;
 
-    unsigned char **buffers = malloc(blocks.count * sizeof(unsigned char*));
-    if (!buffers) free(blocks.values);destroy_u64hashmap(&hm);io_uring_queue_exit(&ring);free(buffers) ;return -2;
+    if (!buffers) product = -2; goto clean;
+    #pragma GCC unroll 4
+    for (u64 j = 0; j < blocks.count; j++){
+        buffers[j] = NULL;
+    }   
     for (u64 i = 0; i < blocks.count; i++){
         buffers[i] = malloc(sizeof(Cell)*HASHMAP_BLOCK_SIZE);
         if (!buffers[i]){
-            for (u64 j = 0; j < i; j++){
-                if (buffers[j]) free(buffers[j]);    
-            }
-            free(buffers);
-            free(blocks.values);
-            destroy_u64hashmap(&hm);
-            io_uring_queue_exit(&ring);
-            free(buffers);
-            return -2;
+            product = -2;
+            goto clean;
         }
     }
 
@@ -576,17 +619,16 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
-    if (io_uring_submit(&ring) == -1) free(blocks.values);destroy_u64hashmap(&hm);free(buffers);io_uring_queue_exit(&ring); return -13;
+    if (io_uring_submit(&ring) < 0) product = -13; goto clean;
     for (usize _i = 0; _i<blocks.count;_i++){
         struct io_uring_cqe *cqe;
-        if (io_uring_wait_cqe(&ring, &cqe) == -1) free(blocks.values);destroy_u64hashmap(&hm);free(buffers);io_uring_queue_exit(&ring);return -6;
+        if (io_uring_wait_cqe(&ring, &cqe) < 0) product = -6; goto clean;
         io_uring_cqe_seen(&ring, cqe);
-        if (cqe->res < 0) free(blocks.values);destroy_u64hashmap(&hm);free(buffers);io_uring_queue_exit(&ring);return -6;
+        if (cqe->res < 0) product = -6; goto clean;
     }
 
 
-    vector_cellptr cells;
-    if (new_vector_cellptr(&cells) == -1) free(blocks.values);destroy_u64hashmap(&hm);free(buffers);io_uring_queue_exit(&ring);return -2;
+    if (new_vector_cellptr(&cells) < 0) product = -6; goto clean;
 
     for (uint64_t i = 0; i < blocks.count; i++){
         //chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
@@ -594,74 +636,71 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE*sizeof(Cell); j++){
             Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
             CellPtr y = {v.exists,v.key,v.value,blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell)};
-            if(push_vector_cellptr(&cells, y)==-1) free(blocks.values);destroy_u64hashmap(&hm);free(buffers);io_uring_queue_exit(&ring);free(cells.values);return -2;
+            if(push_vector_cellptr(&cells, y)<0) product = -2; goto clean;
         }
     }
-    free(blocks.values);destroy_u64hashmap(&hm);
+        
+
+    // ->> Memory cleaning
+
+    for (u64 j = 0; j < blocks.count; j++){
+        if(buffers[j] != NULL) free(buffers[j]);
+    } 
+    free(buffers);
+    buffers = NULL;
+
+    destroy_u64hashmap(&hm);
+    hm.array = NULL;
+
     
-//
-//
-//     __      __             __                            
-//    /\ \  __/\ \         __/\ \__  __                     
-//    \ \ \/\ \ \ \  _ __ /\_\ \ ,_\/\_\    ___      __     
-//     \ \ \ \ \ \ \/\`'__\/\ \ \ \/\/\ \ /' _ `\  /'_ `\
-//      \ \ \_/ \_\ \ \ \/ \ \ \ \ \_\ \ \/\ \/\ \/\ \L\ \
-//       \ `\___x___/\ \_\  \ \_\ \__\\ \_\ \_\ \_\ \____ \
-//       '\/__//__/  \/_/   \/_/\/__/ \/_/\/_/\/_/\/___L\ \
-//                                                  /\____/
-//                                                  \_/__/
-//
-//
 
+    //
+    //
+    //     __      __             __                            
+    //    /\ \  __/\ \         __/\ \__  __                     
+    //    \ \ \/\ \ \ \  _ __ /\_\ \ ,_\/\_\    ___      __     
+    //     \ \ \ \ \ \ \/\`'__\/\ \ \ \/\/\ \ /' _ `\  /'_ `\
+    //      \ \ \_/ \_\ \ \ \/ \ \ \ \ \_\ \ \/\ \/\ \/\ \L\ \
+    //       \ `\___x___/\ \_\  \ \_\ \__\\ \_\ \_\ \_\ \____ \
+    //       '\/__//__/  \/_/   \/_/\/__/ \/_/\/_/\/_/\/___L\ \
+    //                                                  /\____/
+    //                                                  \_/__/
+    //
+    //
 
-    customer_list *customers = &(customer_list){
-        .count = 0,
-        .indices = NULL,
-        .capacity = 0
-    };
+    
     if (init_customer_list(customers, entry->count)<0){
-        io_uring_queue_exit(&ring);
-        free(cells.values);
-        return -2;
+        product = -2;
+        goto clean;
     };
     for (u64 i = 0; i < entry->count; i++){customers->indices[i] = i;};
-
+    hmap = new_u64hashmap();
     int rebucket = 0;
-    U64Hashmap hmap = new_u64hashmap();
-    destroy_u64hashmap(&hm); 
+    
 
-    unsigned char **writing_buffers = malloc(cells.count * sizeof(unsigned char*));
+    writing_buffers = malloc(cells.count * sizeof(unsigned char*));
     
     if (!writing_buffers) {
-        io_uring_queue_exit(&ring);
-        free(cells.values);
-        destroy_u64hashmap(&hmap);
-        free(customers->indices);
-        return -2;
+        product = -2;
+        goto clean;
     }
+
+    #pragma GCC unroll 4 
+    for(u64 j = 0; j < cells.count; j++) writing_buffers[j] = NULL;
+
     for (uint64_t i = 0; i < cells.count; i++) {
         writing_buffers[i] = malloc(sizeof(Cell) * HASHMAP_BLOCK_SIZE);
         if (!writing_buffers[i]) {
-            io_uring_queue_exit(&ring);
-            free(cells.values);
-            destroy_u64hashmap(&hmap);
-            free(customers->indices);
-            for (u64 j = 0; j < i; j++){
-                if (writing_buffers[j]) free(writing_buffers[j]);    
-            }
-            free(buffers);
-            return -2;
+            product = -2;
+            goto clean; 
         }
     }
 
     for (u64 j = 0; j < cells.count; j++) {
         writing_buffers[j] = (unsigned char*)malloc(sizeof(Cell));
         if (writing_buffers[j] == NULL){
-            io_uring_queue_exit(&ring);
-            free(cells.values);
-            destroy_u64hashmap(&hmap);
-            free(customers->indices);
-            return -2;
+            product = -2;
+            goto clean; 
         }
     }
 
@@ -674,13 +713,8 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
                 serialize_cell(&(Cell){entry->exists[i],k,v}, writing_buffers[j]);
                 struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
                 if (sqe == NULL) {
-                    free(writing_buffers); 
-                    io_uring_queue_exit(&ring);
-                    free(cells.values);
-                    destroy_u64hashmap(&hmap);
-                    free(customers->indices);
-                    free(writing_buffers);
-                    return -2;
+                    product = -7; 
+                    goto clean;
                 }
 
                 io_uring_prep_write(sqe, self->file, writing_buffers[j], sizeof(Cell), cells.values[j].ptr);
@@ -700,12 +734,8 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
                 serialize_cell(&(Cell){entry->exists[i],k,v}, writing_buffers[j]);
                 struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
                 if (sqe == NULL){ 
-                    free(writing_buffers);
-                    io_uring_queue_exit(&ring);
-                    free(cells.values);
-                    destroy_u64hashmap(&hmap);
-                    free(customers->indices);
-                    return -1;
+                    product = -7;
+                    goto clean;
                 }
 
                 io_uring_prep_write(sqe, self->file, writing_buffers[j], sizeof(Cell), cells.values[j].ptr);
@@ -722,22 +752,14 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 
     struct io_uring_sqe *fsync_sqe = io_uring_get_sqe(&ring); 
     if (fsync_sqe == NULL){
-        free(writing_buffers);
-        io_uring_queue_exit(&ring);
-        free(cells.values);
-        destroy_u64hashmap(&hmap);
-        free(customers->indices);
-        return -1;
+        product = -7;
+        goto clean;
     }
     io_uring_prep_fsync(fsync_sqe, self->file, 0);
 
     if (io_uring_submit(&ring) < 0){
-        free(writing_buffers);
-        io_uring_queue_exit(&ring);
-        free(cells.values);
-        destroy_u64hashmap(&hmap);
-        free(customers->indices);
-        return -1;
+        product = -13;
+        goto clean;
     };
 
     for(u64 i = 0; i < entry->count-customers->count; i++){
@@ -745,16 +767,11 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         io_uring_wait_cqe(&ring, &cqe);
         io_uring_cqe_seen(&ring, cqe);
         if (cqe->res < 0){
-            free(writing_buffers);
-            io_uring_queue_exit(&ring);
-            free(cells.values);
-            destroy_u64hashmap(&hmap);
-            free(customers->indices);
-            return -1;
+            product = -8;
+            goto clean; 
         }
     }
 
-    free(writing_buffers);
     if(rebucket == 1){
         struct WriteInput pr_input;
         pr_input.count = customers->count;
@@ -763,15 +780,14 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
             pr_input.key[i] = entry->key[customers->indices[i]];
             pr_input.exists[i] = entry->exists[customers->indices[i]];
         }
-        if (hashmap_rebucket(self,&pr_input) < 0){
-            io_uring_queue_exit(&ring);
-            free(cells.values);
-            destroy_u64hashmap(&hmap);
-            free(customers->indices);
+        ExecutionProduct rebucket_product = hashmap_rebucket(self,&pr_input);
+        if (rebucket_product < 0){
+            product = rebucket_product;
+            goto clean;
         };
     }
-    io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);
-    return 0;
+    product = 0;
+    goto clean;
 }
 
 
