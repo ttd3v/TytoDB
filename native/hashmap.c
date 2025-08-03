@@ -414,7 +414,7 @@ typedef struct {
     u64 count;
     u64 capacity;
 } customer_list;
-
+ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries);
 ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
     list->indices = malloc(sizeof(u64) * initial_count);
     if (!list->indices) return -2;
@@ -630,7 +630,9 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
             pr_input.key[i] = entry->key[customers->indices[i]];
             pr_input.exists[i] = entry->exists[customers->indices[i]];
         }
-        //hashmap_rebucket(self,);
+        if (hashmap_rebucket(self,&pr_input) < 0){
+            io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);
+        };
     }
     io_uring_queue_exit(&ring);free(cells.values);destroy_u64hashmap(&hmap);free(customers->indices);
     return 0;
@@ -649,86 +651,112 @@ u64 clamp(u64 m, u64 n, u64 w){
 }
 
 
+
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries) {
     FILE* temp = fopen(self->temp_path, "wb");
-    if (temp == NULL){
-        return -5;
-    }
-
+    if (temp == NULL) return -5;
+    
     struct Hashmap temphm = {
-        .bucket_size = self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR,
+        .bucket_size = self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR,
         .path = self->temp_path,
         .file = fileno(temp),
         .len = 0,
         .temp_path = "./.temp"
     };
-
-    hashmap_draw_defaults(temp, self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR);
+    hashmap_draw_defaults(temp, self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR);
     
-    unsigned char *buffer;
-    cleanup:{
-        free(buffer);
-        remove(self->temp_path);
+    unsigned char *buffer = NULL;
+    FILE *f = fdopen(self->file, "r+b");
+    
+    if(f == NULL){
         fclose(temp);
-    };
-
+        remove(self->temp_path);
+        return -1;
+    }
+    
     u64 processed = 0;
     while(processed < self->bucket_size){
-        u64 csize = clamp(self->bucket_size-processed,1,READ_CHUNK/sizeof(Cell));
-        buffer = malloc(csize*sizeof(Cell));
+        u64 csize = clamp(self->bucket_size-processed, 1, READ_CHUNK/sizeof(Cell));
+        buffer = malloc(csize * sizeof(Cell));
         if(buffer == NULL){
-            goto cleanup;
+            fclose(f);
+            fclose(temp);
+            remove(self->temp_path);
             return -2;
         }
-        fread(&buffer, sizeof(Cell), csize, temp);
-        fseek(temp, csize*sizeof(Cell), SEEK_CUR);
-
+        
+        if(fread(buffer, sizeof(Cell), csize, f) != csize) {
+            free(buffer);
+            fclose(f);
+            fclose(temp);
+            remove(self->temp_path);
+            return -3;
+        }
+        
         struct WriteInput a = {
             .exists = malloc(csize),
-            .count = csize,
+            .count = 0,  
             .key = malloc(csize * sizeof(u64)),
             .value = malloc(csize * sizeof(u64))
         };
-        if(a.exists == NULL){
-            goto cleanup;
-            return -2;
-        }
-        if(a.key == NULL){
-            goto cleanup;
+        
+        if(!a.exists || !a.key || !a.value) {
+            free(buffer);
             free(a.exists);
+            free(a.key); 
+            free(a.value);
+            fclose(f);
+            fclose(temp);
+            remove(self->temp_path);
             return -2;
         }
-        if(a.value == NULL){
-            goto cleanup;
-            free(a.exists);
-            free(a.key);
-            return -2;
-        }
-
+        
+        
+        u64 valid_count = 0;
         for(u64 i = 0; i < csize; i++){
-            unsigned char b[sizeof(Cell)];
-    
-            for(u64 j = 0; j < sizeof(Cell); j++){
-                b[j] = buffer[i*sizeof(Cell)+j];
-            }
-
-            Cell ce = deserialize_cell(b);
+            Cell ce = *(Cell*)(buffer + i * sizeof(Cell)); 
             if(ce.exists){
-                a.key[i]=ce.key;
-                a.value[i]=ce.value;
-                a.exists[1]=ce.exists;
+                a.key[valid_count] = ce.key;     
+                a.value[valid_count] = ce.value;
+                a.exists[valid_count] = ce.exists;
+                valid_count++;
             }
         }
+        a.count = valid_count;  
 
         ExecutionProduct res = hashmap_write(&temphm, &a);
+        
+        free(a.exists);
+        free(a.key);
+        free(a.value);
+        free(buffer);
+        buffer = NULL;
+        
         if (res < 0){
-            goto cleanup;
-            free(a.exists);
-            free(a.key);
-            free(a.value);
+            fclose(f);
+            fclose(temp);
+            remove(self->temp_path);
             return res;
         }
-    };
+        
+        processed += csize;
+    }
+    
+    fclose(f);
+    fclose(temp);
+    
+    remove(self->path);
+    rename(self->temp_path, self->path);
+    
+    FILE* fi = fopen(self->path, "r+b");
+    if(fi == NULL) return -5;      
+    self->file = fileno(fi); 
+    self->bucket_size *= HASHMAP_REBUCKET_GROWTH_FACTOR;
+    
+    if (remaining_entries->count > 0){
+        ExecutionProduct a = hashmap_write(self, remaining_entries);
+        if (a < 0){return a;};
+    }
 
     return 0;
 }
