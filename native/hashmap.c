@@ -1,4 +1,5 @@
 #include "lib.h"
+#include "hashmap.h"
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <stddef.h>
@@ -8,35 +9,12 @@
 #include <sys/types.h>
 #include "error.h"
 
+
 const unsigned long BUCKET_SIZE_MARGIN = 25;
 const unsigned long DEFAULT_BUCKET_SIZE = 240;
 const unsigned long HASHMAP_BLOCK_SIZE = 8;
 const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 8;
 
-
-struct Hashmap{
-    int file;
-    uint64_t bucket_size;
-    uint64_t len;
-    char *path;
-    char *temp_path;
-};
-
-typedef struct {
-    unsigned char exists;
-    uint64_t key;
-    uint64_t value;
-} Cell;
-typedef struct {
-    unsigned char exists;
-    uint64_t key;
-    uint64_t value;
-    uint64_t ptr;
-} CellPtr;
-typedef struct{
-    uint64_t bucket_size;
-    uint64_t len;
-} HashmapMetadata;
 
 void serialize_cell(Cell *const value, unsigned char* buffer){ 
     buffer[0] = (value->exists & 0xFF);
@@ -123,39 +101,11 @@ ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
     return 0;
 }
 
-typedef struct {
-    int8_t some;
-    int64_t value;
-} OptionUINT64;
 
-struct GetInput{
-    uint32_t count;
-    uint64_t *key;
-};
-struct GetOutput{
-    int8_t success;
-    uint32_t count;
-    OptionUINT64 *value;
-};
-
-struct WriteInput{
-    uint32_t count;
-    uint64_t *key;
-    uint64_t *value;
-    uint8_t *exists;
-};
-
-
-/// Hashmap_new
-///     Creates a new file and a hashmap structure
-/// Errors
-///     0 -> Success
-///     -1 -> failed to open file
-///
 int hashmap_new(struct Hashmap *hashmap){
     char *path = hashmap->path;
     FILE *existence = fopen(path,"r");
-    int exists = -1;
+    int exists = existence == NULL?-1:0;
     FILE *file;
     if (exists == -1) {
         file = fopen(path, "w+b");
@@ -187,11 +137,6 @@ int hashmap_new(struct Hashmap *hashmap){
     return 0; 
 }
 
-typedef struct{
-    uint64_t count;
-    uint64_t capacity;
-    uint64_t *values;
-} vector;
 
 ExecutionProduct new_vector(vector *value){
     value->values = (uint64_t*)malloc(10*sizeof(uint64_t));
@@ -249,11 +194,6 @@ void sort_vector(vector *value){
 
 
 
-typedef struct{
-    uint64_t count;
-    uint64_t capacity;
-    Cell *values;
-} vector_cell;
 
 ExecutionProduct new_vector_cell(vector_cell *value){
     value->values = (Cell*)malloc(2*sizeof(Cell));
@@ -283,11 +223,6 @@ ExecutionProduct push_vector_cell(vector_cell *value,Cell val){
 }
 
 
-typedef struct{
-    uint64_t count;
-    uint64_t capacity;
-    CellPtr *values;
-} vector_cellptr;
 
 ExecutionProduct new_vector_cellptr(vector_cellptr *value){
     value->values = (CellPtr*)malloc(2*sizeof(CellPtr));
@@ -481,11 +416,6 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
     product = 0;
     goto clean;
 }
-typedef struct {
-    u64 *indices;
-    u64 count;
-    u64 capacity;
-} customer_list;
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries);
 ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
     list->indices = malloc(sizeof(u64) * initial_count);
@@ -509,38 +439,34 @@ void remove_customer(customer_list *list, u64 position) {
     list->count--;
 }
 
-typedef struct{
-    usize count;
-    u64 ptr;
-    vector_cell cells;
-} hmchunk;
 
 ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 
-//
-//
-//  This specific part of the codebase is very long and might be considered bad in coding readability and maintainability scores,
-//  the objective of keeping this as/is instead of creating a helper functions is to allow me to benefit from the different data 
-//  flows of both functions, since they use the readen data in different ways.
-//  
-//  I undestand that this is a bad practice, functions shouldn't be long; But at least on the moment in time I am writing this note,
-//  that decision is reasonable.
-//
-//  Best regards, ttd3v.
-//
-//*
-//*   ____                        __                          
-//*  /\  _`\                     /\ \  __                     
-//*  \ \ \L\ \     __     __     \_\ \/\_\    ___      __     
-//*   \ \ ,  /   /'__`\ /'__`\   /'_` \/\ \ /' _ `\  /'_ `\
-//*    \ \ \\ \ /\  __//\ \L\.\_/\ \L\ \ \ \/\ \/\ \/\ \L\ \
-//*     \ \_\ \_\ \____\ \__/.\_\ \___,_\ \_\ \_\ \_\ \____ \
-//*      \/_/\/ /\/____/\/__/\/_/\/__,_ /\/_/\/_/\/_/\/___L\ \
-//*                                                    /\____/
-//*                                                    \_/__/ 
-//*
-//
-//
+    //
+    //
+    //  This specific part of the codebase is very long and might be considered bad in coding readability and maintainability scores,
+    //  the objective of keeping this as/is instead of creating a helper functions is to allow me to benefit from the different data 
+    //  flows of both functions, since they use the readen data in different ways.
+    //  
+    //  I undestand that this is a bad practice, functions shouldn't be long; But at least on the moment in time I am writing this note,
+    //  that decision is reasonable.
+    //
+    //  Best regards, ttd3v.
+    //
+    //*
+    //*   ____                        __                          
+    //*  /\  _`\                     /\ \  __                     
+    //*  \ \ \L\ \     __     __     \_\ \/\_\    ___      __     
+    //*   \ \ ,  /   /'__`\ /'__`\   /'_` \/\ \ /' _ `\  /'_ `\
+    //*    \ \ \\ \ /\  __//\ \L\.\_/\ \L\ \ \ \/\ \/\ \/\ \L\ \
+    //*     \ \_\ \_\ \____\ \__/.\_\ \___,_\ \_\ \_\ \_\ \____ \
+    //*      \/_/\/ /\/____/\/__/\/_/\/__,_ /\/_/\/_/\/_/\/___L\ \
+    //*                                                    /\____/
+    //*                                                    \_/__/ 
+    //*
+    //
+    //
+    
     ExecutionProduct product = -1;
     int ring_initialized = -1;
 
@@ -563,6 +489,11 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     unsigned char **writing_buffers = NULL;
 
 
+    ///     CLEAN CLEAN CLEAN
+    ///     CLEAN CLEAN CLEAN
+    ///     CLEAN CLEAN CLEAN
+    ///     CLEAN CLEAN CLEAN
+
 
     clean:
         if(blocks.values != NULL) free(blocks.values);
@@ -570,19 +501,26 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         if(ring_initialized >= 0) io_uring_queue_exit(&ring); 
         if(buffers != NULL){
             for(u64 j = 0; j < blocks.count; j++) {
-                if(buffers[j] == NULL) free(buffers[j]);
+                if(buffers[j] != NULL) free(buffers[j]);
             }
             free(buffers);
         }
         if(cells.values != NULL) free(cells.values);
         if(customers->indices != NULL) free(customers->indices);
-        if(hmap.array != NULL) free(hmap.array);
+        if(hmap.array != NULL) destroy_u64hashmap(&hmap); 
         if(writing_buffers != NULL){
             for(u64 j = 0; j<cells.count; j++) if(writing_buffers[j] != NULL) {free(writing_buffers[j]);};
+            free(writing_buffers);
         }
         return product;
+    
 
-    if (new_vector(&blocks)<0) product = -2; goto clean;
+    ///
+    ///
+    ///
+    ///
+
+    if (new_vector(&blocks)<0){ product = -2; goto clean;}
     for (uint64_t i=0;i<entry->count;i++){
         u64 a = entry->key[i]%(self->bucket_size/HASHMAP_BLOCK_SIZE);
         insert_u64hashmap(&hm, a,a);
@@ -602,7 +540,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     };
     ring_initialized = 1;
 
-    if (!buffers) product = -2; goto clean;
+    if (!buffers){ product = -2; goto clean; }
     #pragma GCC unroll 4
     for (u64 j = 0; j < blocks.count; j++){
         buffers[j] = NULL;
@@ -619,24 +557,24 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
-    if (io_uring_submit(&ring) < 0) product = -13; goto clean;
+    if (io_uring_submit(&ring) < 0){ product = -13; goto clean;}
     for (usize _i = 0; _i<blocks.count;_i++){
         struct io_uring_cqe *cqe;
-        if (io_uring_wait_cqe(&ring, &cqe) < 0) product = -6; goto clean;
+        if (io_uring_wait_cqe(&ring, &cqe) < 0){ product = -6; goto clean;}
         io_uring_cqe_seen(&ring, cqe);
-        if (cqe->res < 0) product = -6; goto clean;
+        if (cqe->res < 0){ product = -6; goto clean;}
     }
 
 
-    if (new_vector_cellptr(&cells) < 0) product = -6; goto clean;
+    if (new_vector_cellptr(&cells) < 0){ product = -6; goto clean;}
 
     for (uint64_t i = 0; i < blocks.count; i++){
         //chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
         //new_vector_cell(&chunks->cells);
-        for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE*sizeof(Cell); j++){
+        for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE; j++){
             Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
             CellPtr y = {v.exists,v.key,v.value,blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell)};
-            if(push_vector_cellptr(&cells, y)<0) product = -2; goto clean;
+            if(push_vector_cellptr(&cells, y)<0){ product = -2; goto clean;}
         }
     }
         
@@ -696,13 +634,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         }
     }
 
-    for (u64 j = 0; j < cells.count; j++) {
-        writing_buffers[j] = (unsigned char*)malloc(sizeof(Cell));
-        if (writing_buffers[j] == NULL){
-            product = -2;
-            goto clean; 
-        }
-    }
+    
 
     for(u64 i = customers->count; i > 0; i--){
         u64 k = entry->key[0+customers->count-i];
@@ -774,6 +706,15 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 
     if(rebucket == 1){
         struct WriteInput pr_input;
+        pr_input.key = malloc(pr_input.count * sizeof(uint64_t));
+        pr_input.value = malloc(pr_input.count * sizeof(uint64_t));
+        pr_input.exists = malloc(pr_input.count * sizeof(uint8_t));
+
+        product = -2;
+        if (!pr_input.key) {free(pr_input.key);goto clean;}
+        if (!pr_input.value) {free(pr_input.key);free(pr_input.value);goto clean;}
+        if (!pr_input.exists) {free(pr_input.key);free(pr_input.value);free(pr_input.exists);goto clean;}
+
         pr_input.count = customers->count;
         for(usize i = 0; i < pr_input.count; i++){
             pr_input.value[i] = entry->value[customers->indices[i]];
@@ -781,6 +722,9 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
             pr_input.exists[i] = entry->exists[customers->indices[i]];
         }
         ExecutionProduct rebucket_product = hashmap_rebucket(self,&pr_input);
+        free(pr_input.exists);
+        free(pr_input.value);
+        free(pr_input.key);
         if (rebucket_product < 0){
             product = rebucket_product;
             goto clean;
