@@ -1,10 +1,9 @@
-use std::{collections::HashMap, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, os::{raw::c_int, unix::fs::FileExt}, path::PathBuf, pin::Pin, sync::Arc};
+use std::{collections::HashMap, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, os::{raw::c_int, unix::fs::FileExt}, path::PathBuf, sync::{Arc,Mutex},thread};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{alba_types::AlbaTypes, container::Container, gerr, logerr, query::{search, Query, SearchArguments, ActionType, search_with_action}, query_conditions::QueryConditions, row::Row, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback, AstSearch, Token, AST};
 use rand::{rngs::OsRng, Rng, TryRngCore};
-use tokio::sync::Mutex;
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
 
 
@@ -246,7 +245,7 @@ unsafe extern "C" {
 //     }
 // }
 
-pub async fn batch_write_data(entries: Vec<WriteEntry>, len: usize, file: c_int) -> i32 {
+pub fn batch_write_data(entries: Vec<WriteEntry>, len: usize, file: c_int) -> i32 {
     let c_buffer: Vec<WriteEntryC> = entries.iter().map(|f| f.to_c()).collect();
     
     unsafe {
@@ -254,7 +253,7 @@ pub async fn batch_write_data(entries: Vec<WriteEntry>, len: usize, file: c_int)
     }
 }
 
-#[derive(Default,Debug)]
+
 pub struct Database{
     location : String,
     settings : Settings,
@@ -331,7 +330,7 @@ impl Database{
         Ok(())
     }
     
-    async fn load_containers(&mut self) -> Result<(), Error> {
+    fn load_containers(&mut self) -> Result<(), Error> {
          let path = format!("{}/containers.yaml", &self.location);
         if !fs::exists(&path).unwrap() {
             
@@ -372,7 +371,7 @@ impl Database{
                     he.1,
                     header_offset,
                     he.0
-                ).await.unwrap(),
+                ).unwrap(),
             );
             
         }        
@@ -392,29 +391,29 @@ impl Database{
         Ok(())
     }
     
-    pub async fn commit(&mut self) -> Result<(), Error> {
+    pub fn commit(&mut self) -> Result<(), Error> {
         
         for (_, c) in self.container.iter_mut() {
             
-            c.lock().await.commit().await?;
+            c.lock().unwrap().commit()?;
             
         }
         
         Ok(())
     }
     
-    pub async fn rollback(&mut self) -> Result<(), Error> {
+    pub fn rollback(&mut self) -> Result<(), Error> {
         
         for (_, c) in self.container.iter_mut() {
             
-            c.lock().await.rollback().await?;
+            c.lock().unwrap().rollback()?;
             
         }
         
         Ok(())
     }
     
-    pub async fn setup(&self) -> Result<(), Error> {
+    pub fn setup(&self) -> Result<(), Error> {
         let db_path = database_path();
         
         if !std::fs::exists(&db_path)? {
@@ -497,7 +496,7 @@ impl Database{
         
         Err(gerr("Container not found"))
     }
-    pub async fn run(&mut self, ast: AST) -> Result<Query, Error> {
+    pub fn run(&mut self, ast: AST) -> Result<Query, Error> {
         let min_column: usize = (self.settings.min_columns as usize).max(1);
         let max_columns: usize = self.settings.max_columns as usize;
         
@@ -534,7 +533,7 @@ impl Database{
                     structure.col_val,
                     file.metadata()?.len(),
                     structure.col_nam
-                ).await.unwrap();
+                ).unwrap();
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
             },
@@ -544,7 +543,7 @@ impl Database{
                         
                         return Err(gerr(&format!("Container '{}' does not exist.", structure.container)));
                     },
-                    Some(a) => a.lock().await,
+                    Some(a) => a.lock().unwrap(),
                 };
                 
                 if structure.col_nam.len() != structure.col_val.len() {
@@ -570,7 +569,7 @@ impl Database{
                     }
                 }
 
-                container.push_row(val).await?;                
+                container.push_row(val)?;                
             },
             AST::Search(structure) => {
                 let container = if let Some(a) = self.container.get(&structure.container){
@@ -580,7 +579,7 @@ impl Database{
                 };
                 let sa = {
                     let c = container.clone();
-                    let sa = c.lock().await;
+                    let sa = c.lock().unwrap();
 
                     let col_prop = {
                         let mut h = HashMap::new();
@@ -597,8 +596,8 @@ impl Database{
                         conditions: QueryConditions::from_primitive_conditions(structure.conditions,&col_prop,pk)?
                     }
                 };
-                let mut rows = search(container.clone(), sa).await?.0;
-                let cn = {container.lock().await.column_names().clone()};
+                let mut rows = search(container.clone(), sa)?.0;
+                let cn = {container.lock().unwrap().column_names().clone()};
                 if structure.col_nam.len() != cn.len(){
                 let mut index_map = HashMap::with_capacity(cn.len());
                 let mut ide = Vec::with_capacity(cn.len());
@@ -628,7 +627,7 @@ impl Database{
                 };
                 let sa = {
                     let c = container.clone();
-                    let sa = c.lock().await;
+                    let sa = c.lock().unwrap();
 
                     let col_prop = {
                         let mut h = HashMap::new();
@@ -645,7 +644,7 @@ impl Database{
                         conditions: QueryConditions::from_primitive_conditions(structure.conditions,&col_prop,pk)?
                     }
                 };
-                search_with_action(container.clone(),sa,ActionType::Edit((structure.col_nam,structure.col_val))).await?;                 
+                search_with_action(container.clone(),sa,ActionType::Edit((structure.col_nam,structure.col_val)))?;                 
                 return Ok(Query { rows: (vec![],vec![]) })
             },
             AST::DeleteRow(structure) => {
@@ -656,7 +655,7 @@ impl Database{
                 };
                 let sa = {
                     let c = container.clone();
-                    let sa = c.lock().await;
+                    let sa = c.lock().unwrap();
 
                     let col_prop = {
                         let mut h = HashMap::new();
@@ -674,7 +673,7 @@ impl Database{
                     }
                 };
                 
-                search_with_action(container.clone(),sa,ActionType::Delete).await?;                
+                search_with_action(container.clone(),sa,ActionType::Delete)?;                
                 return Ok(Query{rows:(Vec::new(),Vec::new())})
             },
             AST::DeleteContainer(structure) => {
@@ -694,13 +693,13 @@ impl Database{
                     self.container.remove(&structure.container);
                     
                     let path = format!("{}/{}", self.location, structure.container);
-                    let _ = tokio::fs::remove_file(path.clone()).await;
+                    let _ = std::fs::remove_file(path.clone());
                     let path = format!("{}/{}.index", self.location, structure.container);
-                    let _ = tokio::fs::remove_file(path.clone()).await;
+                    let _ = std::fs::remove_file(path.clone());
                     let path = format!("{}/{}.hashmap", self.location, structure.container);
-                    let _ = tokio::fs::remove_file(path).await;
+                    let _ = std::fs::remove_file(path);
                     let path = format!("{}/{}.mr", self.location, structure.container);
-                    let _ = tokio::fs::remove_file(path).await;
+                    let _ = std::fs::remove_file(path);
 
                     
                     self.save_containers()?;
@@ -717,7 +716,7 @@ impl Database{
                         match self.container.get_mut(&container) {
                             Some(a) => {
                                 
-                                a.lock().await.commit().await.unwrap();
+                                a.lock().unwrap().commit().unwrap();
                                 
                                 return Ok(Query{rows:(Vec::new(),Vec::new())});
                             },
@@ -729,7 +728,7 @@ impl Database{
                     },
                     None => {
                         
-                        self.commit().await?;
+                        self.commit()?;
                         
                     }
                 }
@@ -741,7 +740,7 @@ impl Database{
                         match self.container.get_mut(&container) {
                             Some(a) => {
                                 
-                                a.lock().await.rollback().await?;
+                                a.lock().unwrap().rollback()?;
                                 
                                 return Ok(Query{rows:(Vec::new(),Vec::new())});
                             },
@@ -753,7 +752,7 @@ impl Database{
                     },
                     None => {
                         
-                        self.rollback().await?;
+                        self.rollback()?;
                         
                     }
                 }
@@ -763,14 +762,14 @@ impl Database{
         Ok(Query{rows: (Vec::new(),Vec::new())})
     }
     
-    // pub async fn execute(&mut self, input: &str, arguments: Vec<String>) -> Result<Query, Error> {
+    // pub fn execute(&mut self, input: &str, arguments: Vec<String>) -> Result<Query, Error> {
     //     let ast = parse(input.to_owned(), arguments)?;
-    //     let result = self.run(ast).await?;
+    //     let result = self.run(ast)?;
     //     Ok(result)
     // }
 }
 
-pub async fn connect() -> Result<Database, Error>{
+pub fn connect() -> Result<Database, Error>{
     let dbp = database_path();
     let path : &str = if dbp.ends_with('/') {
         &dbp[..dbp.len()-1]
@@ -791,15 +790,15 @@ pub async fn connect() -> Result<Database, Error>{
     }
 
     // if let Some(strix) = STRIX.get(){
-    //     start_strix(strix.clone()).await;
+    //     start_strix(strix.clone());
     // }
 
     let mut db = Database{location:database_path().to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new()};
-    db.setup().await?;
+    db.setup()?;
     if let Err(e) = db.load_settings(){
         logerr!("err: load_settings");
         return Err(e)
-    };if let Err(e) = db.load_containers().await{
+    };if let Err(e) = db.load_containers(){
         logerr!("err: load_containers");
         return Err(e)
     };
@@ -905,17 +904,17 @@ fn conditions_to_tyto_db(t: (Vec<(String, LogicalOperator, NetworkAlbaTypes)>, V
 use falcotcp::Server;
 
 
-async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<Query,Vec<u8>>{
+fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<Query,Vec<u8>>{
     Ok(match c{
         commands::Batch(batch_batch) => {
             let mut que = Vec::new();
             for i in batch_batch.commands{
-                let prrperpoewr = Box::pin(process(mtx_db,i)).await;
+                let prrperpoewr = process(mtx_db,i);
                 match prrperpoewr{
                     Ok(a) => que.push(a),
                     Err(e) => {
                         if batch_batch.transaction{
-                            if let Err(e) = mtx_db.lock().await.rollback().await{
+                            if let Err(e) = mtx_db.lock().unwrap().rollback(){
                                 let mut b = vec![1u8];
                                 b.extend_from_slice(&e.to_string().as_bytes());
                                 return Err(b)
@@ -926,7 +925,7 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
                 };
             }
             if batch_batch.transaction{
-                if let Err(e) = mtx_db.lock().await.commit().await{
+                if let Err(e) = mtx_db.lock().unwrap().commit(){
                     let mut b = vec![1u8];
                     b.extend_from_slice(&e.to_string().as_bytes());
                     return Err(b)
@@ -958,12 +957,12 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
                     }
                 }
             }
-            let mut db = mtx_db.lock().await;
+            let mut db = mtx_db.lock().unwrap();
             let c =  db.run(AST::CreateContainer(crate::AstCreateContainer {
                 name: create_container.name,
                 col_nam: create_container.col_nam,
                 col_val: col_v
-            })).await;
+            }));
             match c {
                 Ok(mut q) => {
                     q.rows.0.push("success".to_string());
@@ -978,11 +977,11 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::CreateRow(create_row) => {
-            match mtx_db.lock().await.run(AST::CreateRow(AstCreateRow{
+            match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow{
                 col_nam: create_row.col_nam,
                 col_val: create_row.col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
                 container: create_row.container
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -994,11 +993,11 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
         commands::BatchCreateRows(create_row) => {
             let mut bururu = None;
             for col_val in create_row.col_val{
-                match mtx_db.lock().await.run(AST::CreateRow(AstCreateRow{
+                match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow{
                     col_nam: create_row.col_nam.clone(),
                     col_val: col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
                     container: create_row.container.clone()
-                })).await{
+                })){
                     Ok(a) => bururu = Some(a),
                     Err(e) => {
                         let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1015,12 +1014,12 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::EditRow(edit_row) => {
-            match mtx_db.lock().await.run(AST::EditRow(AstEditRow{
+            match mtx_db.lock().unwrap().run(AST::EditRow(AstEditRow{
                 col_nam: edit_row.col_nam,
                 col_val: edit_row.col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
                 container: edit_row.container,
                 conditions: conditions_to_tyto_db((edit_row.conditions.0,edit_row.conditions.1.iter().map(|f|{(f.0 as usize,f.1)}).collect()))
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1030,10 +1029,10 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::DeleteRow(delete_row) => {
-            match mtx_db.lock().await.run(AST::DeleteRow(AstDeleteRow{
+            match mtx_db.lock().unwrap().run(AST::DeleteRow(AstDeleteRow{
                 container: delete_row.container,
                 conditions: if let Some(s) = delete_row.conditions{Some(conditions_to_tyto_db(s))}else{None}
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1043,9 +1042,9 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::DeleteContainer(delete_container) => {
-            match mtx_db.lock().await.run(AST::DeleteContainer(AstDeleteContainer{
+            match mtx_db.lock().unwrap().run(AST::DeleteContainer(AstDeleteContainer{
                 container: delete_container.container,
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1056,11 +1055,11 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
         },
         commands::Search(search) => {
             let mtx_db = &mtx_db;
-            match mtx_db.lock().await.run(AST::Search(AstSearch{
+            match mtx_db.lock().unwrap().run(AST::Search(AstSearch{
                 col_nam: search.col_nam,
                 container: search.container,
                 conditions: conditions_to_tyto_db((search.conditions.0,search.conditions.1.iter().map(|f|{(f.0 as usize ,f.1)}).collect()))
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1070,9 +1069,9 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::Commit(commit) => {
-            match mtx_db.lock().await.run(AST::Commit(AstCommit{
+            match mtx_db.lock().unwrap().run(AST::Commit(AstCommit{
                 container: commit.container
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1082,9 +1081,9 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
             }
         },
         commands::Rollback(rollback) => {
-            match mtx_db.lock().await.run(AST::Rollback(AstRollback{
+            match mtx_db.lock().unwrap().run(AST::Rollback(AstRollback{
                 container: rollback.container,
-            })).await{
+            })){
                 Ok(a) => a,
                 Err(e) => {
                     let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
@@ -1097,7 +1096,7 @@ async fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<
 }
 
 impl Database{
-    pub async fn run_database(self) -> Result<(), Error>{
+    pub fn run_database(self) -> Result<(), Error>{
         let mut password : [u8;32] = [0u8;32];
         if fs::exists(secret_key_path()).unwrap(){
             let mut buffer : Vec<u8> = Vec::new();
@@ -1125,38 +1124,22 @@ impl Database{
         let workers = self.settings.workers as usize;
         let mtx_db: &'static Arc<Mutex<Database>> = Box::leak(Box::new(Arc::new(Mutex::new(self))));
 
-        let message_handler: Arc<(dyn Fn(Vec<u8>) -> Pin<Box<(dyn futures::Future<Output = Vec<u8>> + std::marker::Send + 'static)>> + std::marker::Send + Sync + 'static)> = Arc::new(move |input: Vec<u8>| { Box::pin(async move {
-            let mut val = vec![0u8];
-            val.extend_from_slice(&query_to_bytes(match commands::decompile(&input){
-                Ok(a) => {
-                    match process(mtx_db, a).await{
-                        Ok(a) => a,
-                        Err(e) => {return e}
-                    }
-                },
-                Err(e) => {
-                    let mut b = vec![1u8];
-                    b.extend_from_slice(e.to_string().as_bytes());
-                    return b
-                }
-            }));
-            val
-        })});
+        
 
         let db_lock = mtx_db.clone();
-        let t = tokio::spawn(async move {
+        thread::scope(|_| {
             let db = db_lock;
             let vacuum_settings = {
-                let ldb = db.lock().await;
+                let ldb = db.lock().unwrap();
                 ldb.settings.vacuum.clone()
             };
             let mut once = Vec::new();
             let vacuum_settings : Vec<(String,String)> = vacuum_settings.into_iter().filter(|f| { if f.1.to_lowercase().contains("once"){once.push(f.clone());false}else{true} }).collect();
             if !once.is_empty(){
-                let db = db.lock().await;
+                let db = db.lock().unwrap();
                 for i in once{
                     if let Some(b) = db.container.get(&i.1){
-                        let _ = b.lock().await.vacuum().await;
+                        let _ = b.lock().unwrap().vacuum();
                     }
                 }
             }
@@ -1191,10 +1174,10 @@ impl Database{
                 let mut growth = 0;
                 vacuum_parsed = vacuum_parsed.into_iter().map(|f|{let a=(f.0,f.1.saturating_sub(growth));growth+=f.1;a}).collect();
                 for i in vacuum_parsed{ 
-                    tokio::time::sleep(std::time::Duration::from_secs(i.1+1)).await;
-                    let db = db.lock().await;
+                    thread::sleep(std::time::Duration::from_secs(i.1+1));
+                    let db = db.lock().unwrap();
                     if let Some(c) = db.container.get(&i.0){
-                        if let Err(e) = c.lock().await.vacuum().await{
+                        if let Err(e) = c.lock().unwrap().vacuum(){
                             eprintln!("{}",e);
                         };
                     }
@@ -1202,8 +1185,28 @@ impl Database{
                 
             }
         });
-        let a = Server::new(host, password, message_handler, workers).await;
-        let _ = t.await;
-        a
+
+        let message_handler : Box<(dyn Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static)>  = Box::new(move |input: Vec<u8>| {
+            let mut val = vec![0u8];
+            val.extend_from_slice(&query_to_bytes(match commands::decompile(&input){
+                Ok(a) => {
+                    let a = process(mtx_db, a);
+                    match a{
+                        Ok(a) => a,
+                        Err(e) => {return e}
+                    }
+                    
+                },
+                Err(e) => {
+                    let mut b = vec![1u8];
+                    b.extend_from_slice(e.to_string().as_bytes());
+                    return b
+                }
+            }));
+            val
+        });
+        Server::new(host, password, message_handler, (workers/2).max(1)).unwrap();
+        
+        Ok(())
     }
 }

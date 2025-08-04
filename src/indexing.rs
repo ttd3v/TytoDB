@@ -1,4 +1,4 @@
-use std::{ffi::CString, os::raw::{c_char, c_int},io::Error};
+use std::{ffi::CString, io::Error, os::raw::{c_char, c_int}};
 
 use crate::gerr;
 
@@ -13,30 +13,9 @@ pub struct Hashmap {
 }
 
 #[repr(C)]
-pub struct Cell {
-    pub exists: u8,
-    pub key: u64,
-    pub value: u64,
-}
-
-#[repr(C)]
-pub struct CellPtr {
-    pub exists: u8,
-    pub key: u64,
-    pub value: u64,
-    pub ptr: u64,
-}
-
-#[repr(C)]
-pub struct HashmapMetadata {
-    pub bucket_size: u64,
-    pub len: u64,
-}
-
-#[repr(C)]
 pub struct OptionUINT64 {
     pub some: i8,
-    pub value: i64,
+    pub value: u64,
 }
 
 #[repr(C)]
@@ -46,6 +25,7 @@ pub struct GetInput {
 }
 
 #[repr(C)]
+#[derive(Default)]
 pub struct GetOutput {
     pub success: i8,
     pub count: u32,
@@ -60,45 +40,11 @@ pub struct WriteInput {
     pub exists: *mut u8,
 }
 
-#[repr(C)]
-pub struct Vector {
-    pub count: u64,
-    pub capacity: u64,
-    pub values: *mut u64,
-}
-
-#[repr(C)]
-pub struct VectorCell {
-    pub count: u64,
-    pub capacity: u64,
-    pub values: *mut Cell,
-}
-
-#[repr(C)]
-pub struct VectorCellPtr {
-    pub count: u64,
-    pub capacity: u64,
-    pub values: *mut CellPtr,
-}
-
-#[repr(C)]
-pub struct CustomerList {
-    pub indices: *mut u64,
-    pub count: u64,
-    pub capacity: u64,
-}
-
-#[repr(C)]
-pub struct HmChunk {
-    pub count: usize,
-    pub ptr: u64,
-    pub cells: VectorCell,
-}
 #[link(name="hashmap", kind="static")]
 unsafe extern "C"{
-    fn hashmap_new(hashmap : &Hashmap) -> c_int;
-    fn hashmap_get(hashmap : &Hashmap, entry : &GetInput, foreign_output : &mut GetOutput) -> c_int;
-    fn hashmap_write(hashmap : &Hashmap, entry : &WriteInput) -> c_int; 
+    fn hashmap_new(hashmap : *mut Hashmap) -> c_int;
+    fn hashmap_get(hashmap : *mut Hashmap, entry : *mut GetInput, foreign_output : *mut GetOutput) -> c_int;
+    fn hashmap_write(hashmap : *mut Hashmap, entry : *mut WriteInput) -> c_int; 
 }
 
 fn error_execution_product(i: i32) -> Error {
@@ -121,9 +67,10 @@ fn error_execution_product(i: i32) -> Error {
 }
 
 pub struct IndexingHashmap{
-    inner: Hashmap,
-    path: String,
+    inner: Hashmap
 }
+unsafe impl Send for IndexingHashmap {}
+unsafe impl Sync for IndexingHashmap {}
 impl IndexingHashmap{
     pub fn new(path : String) -> Result<Self,Error> {
         let p = format!("{}.hashmap",path);
@@ -134,22 +81,81 @@ impl IndexingHashmap{
         let c_tp = match CString::new(ptemp){Ok(a)=>a,Err(e) => return Err(gerr(&e.to_string()))};
 
 
-        let h : Hashmap = Hashmap{
+        let mut h : Hashmap = Hashmap{
             path: c_p.into_raw(),
             temp_path: c_tp.into_raw(),
             file: -1,
             len: 0,
             bucket_size: 0
         };
-        let execution_product = unsafe{hashmap_new(&h)};
+        let execution_product = unsafe{hashmap_new((&mut h) as *mut Hashmap)};
         match execution_product{
             x if x >= 0 => {
-                return Ok(IndexingHashmap { inner: h, path: p })
+                return Ok(IndexingHashmap { inner: h })
             },
             _ =>{
                 return Err(error_execution_product(execution_product));
             }
         };
+    }
+    pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>,Error>{
+        let mut keys = keys;
+        let mut input = GetInput{
+            count:keys.len() as u32,
+            key: keys.as_mut_ptr()
+        };
+        let mut output = GetOutput::default();
+
+        let execution_product = unsafe{hashmap_get(&mut self.inner as *mut Hashmap, &mut input as *mut GetInput, &mut output as *mut GetOutput)};
+        match execution_product{
+            x if x >= 0 => {
+                let v = output.value;
+                return Ok(unsafe{
+                    let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
+                    let mut b = Vec::new();
+                    for i in a{
+                        if i.some >0{
+                            b.push(i.value);
+                        }
+                    }
+                    b
+                })
+            },
+            _ =>{
+                return Err(error_execution_product(execution_product));
+            }
+        };
+    }
+    pub fn write(&mut self, entries: Vec<(bool, u64, u64)>) -> Result<(), Error> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut keys: Vec<u64> = Vec::with_capacity(entries.len());
+        let mut values: Vec<u64> = Vec::with_capacity(entries.len());
+        let mut exists: Vec<u8> = Vec::with_capacity(entries.len());
+
+        for (exist, key, value) in entries {
+            exists.push(if exist { 1 } else { 0 });
+            keys.push(key);
+            values.push(value);
+        }
+
+        let mut input = WriteInput {
+            count: keys.len() as u32,
+            key: keys.as_mut_ptr(),
+            value: values.as_mut_ptr(),
+            exists: exists.as_mut_ptr(),
+        };
+
+        let execution_product = unsafe {
+            hashmap_write(&mut self.inner as *mut Hashmap, &mut input as *mut WriteInput)
+        };
+
+        match execution_product {
+            x if x >= 0 => Ok(()),
+            _ => Err(error_execution_product(execution_product)),
+        }
     }
 
 }

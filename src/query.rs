@@ -1,7 +1,7 @@
 use std::{fs::File, io::Error, os::unix::fs::FileExt, sync::Arc, vec};
 use crate::alba_types::AlbaTypes;
 use crate::container::MvccState;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use crate::container::MAX_GRAVEYARD_LENGTH_IN_MEMORY;
@@ -27,9 +27,9 @@ pub struct SearchArguments {
 const CHUNK_SIZE_BYTES : usize = 4096 * 12;
 
 
-pub async fn search(container: Arc<Mutex<Container>>, args: SearchArguments) -> Result<(Vec<Row>,Vec<u64>), Error> {
-    let file = args.file.lock().await;
-    let lck = container.lock().await;
+pub  fn search(container: Arc<Mutex<Container>>, args: SearchArguments) -> Result<(Vec<Row>,Vec<u64>), Error> {
+    let file = args.file.lock().unwrap();
+    let lck = container.lock().unwrap();
     let size = file.metadata().unwrap().len() as usize;
     if size == args.header_offset{
         return Ok((Vec::new(),Vec::new()))
@@ -37,22 +37,20 @@ pub async fn search(container: Arc<Mutex<Container>>, args: SearchArguments) -> 
     let empty = vec![255u8;args.element_size];
     let column_names = &lck.column_names();
     let qt = args.conditions.query_type()?;
-    let mut gy = lck.graveyard.lock().await;
+    let mut gy = lck.graveyard.lock().unwrap();
     if let QueryType::Indexed(QueryIndexType::Strict(u)) = qt{
         let mut res = (Vec::new(),Vec::new());
-        for u in u{
-            if let Some(offset) = lck.index_map.lock().await.get(u)?{
-                if gy.contains(&offset) {continue;}
-                let mut buff = vec![0u8;args.element_size];
-                file.read_exact_at(&mut buff, offset)?;
-                if buff == empty{continue;}
-                let b = Row{data:lck.deserialize_row(&buff).await?};
-                if args.conditions.row_match(&b, column_names)?{
-                    res.0.push(b);res.1.push(u);
-                }
+        let v = lck.index_map.lock().unwrap().get(u)?;
+        for offset in v{
+            if gy.contains(&offset) {continue;}
+            let mut buff = vec![0u8;args.element_size];
+            file.read_exact_at(&mut buff, offset)?;
+            if buff == empty{continue;}
+            let b = Row{data:lck.deserialize_row(&buff)?};
+            if args.conditions.row_match(&b, column_names)?{
+                res.0.push(b);res.1.push(offset);
             }
         }
-
         return Ok(res)
     }
 
@@ -79,7 +77,7 @@ pub async fn search(container: Arc<Mutex<Container>>, args: SearchArguments) -> 
                 }
                 continue;
             }
-            let bare_row = lck.deserialize_row(row_bin).await?;
+            let bare_row = lck.deserialize_row(row_bin)?;
             let row = Row { data: bare_row };
             if args.conditions.row_match(&row, &column_names)?{
                 offsets.push(offset_in_file as u64);
@@ -117,9 +115,9 @@ pub enum ActionType{
 }
 
 
-pub async fn search_with_action(container: Arc<Mutex<Container>>, args: SearchArguments, action_type: ActionType ) -> Result<(), Error> {
-    let file = args.file.lock().await;
-    let lck = container.lock().await;
+pub  fn search_with_action(container: Arc<Mutex<Container>>, args: SearchArguments, action_type: ActionType ) -> Result<(), Error> {
+    let file = args.file.lock().unwrap();
+    let lck = container.lock().unwrap();
     let size = file.metadata().unwrap().len() as usize;
     if size == args.header_offset{
         return Ok(())
@@ -127,22 +125,20 @@ pub async fn search_with_action(container: Arc<Mutex<Container>>, args: SearchAr
     let empty = vec![255u8;args.element_size];
     let column_names = &lck.column_names();
     let qt = args.conditions.query_type()?;
-    let mut gy = lck.graveyard.lock().await;
+    let mut gy = lck.graveyard.lock().unwrap();
     if let QueryType::Indexed(QueryIndexType::Strict(u)) = qt{
         let mut res = (Vec::new(),Vec::new());
-        for u in u{
-            if let Some(offset) = lck.index_map.lock().await.get(u)?{
-                if gy.contains(&offset) {continue;}
-                let mut buff = vec![0u8;args.element_size];
-                file.read_exact_at(&mut buff, offset)?;
-                if buff == empty{continue;}
-                let b = Row{data:lck.deserialize_row(&buff).await?};
-                if args.conditions.row_match(&b, column_names)?{
-                    res.0.push(b);res.1.push(u);
-                }
+        let v = lck.index_map.lock().unwrap().get(u)?;
+        for offset in v{
+            if gy.contains(&offset) {continue;}
+            let mut buff = vec![0u8;args.element_size];
+            file.read_exact_at(&mut buff, offset)?;
+            if buff == empty{continue;}
+            let b = Row{data:lck.deserialize_row(&buff)?};
+            if args.conditions.row_match(&b, column_names)?{
+                res.0.push(b);res.1.push(offset);
             }
         }
-
         return Ok(())
     }
 
@@ -152,8 +148,8 @@ pub async fn search_with_action(container: Arc<Mutex<Container>>, args: SearchAr
     let count_its = (total_rows / rows_per_it).max(1);
     let mut space_gy = gy.len();
 
-    let container = container.lock().await;
-    let mut mvcc = container.mvcc.lock().await;
+    let container = container.lock().unwrap();
+    let mut mvcc = container.mvcc.lock().unwrap();
     let mut indexes = Vec::new();
     if let ActionType::Edit((col_nam,col_val)) = action_type.clone(){
         for i in col_nam.iter().enumerate(){
@@ -181,7 +177,7 @@ pub async fn search_with_action(container: Arc<Mutex<Container>>, args: SearchAr
                 }
                 continue;
             }
-            let bare_row = lck.deserialize_row(row_bin).await?;
+            let bare_row = lck.deserialize_row(row_bin)?;
             let mut row = Row { data: bare_row };
             if args.conditions.row_match(&row, &column_names)?{
                 //offsets.push(offset_in_file as u64);

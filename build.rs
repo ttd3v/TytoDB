@@ -5,6 +5,9 @@ fn main() {
         .compile("io");
     cc::Build::new()
         .include("native")
+        .file("native/hashmap.h")
+        .file("native/lib.c")
+        .file("native/lib.h")
         .file("native/hashmap.c")
         .compile("hashmap");
 

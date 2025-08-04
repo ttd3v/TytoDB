@@ -23,7 +23,7 @@ typedef struct {
 U64Hashmap new_u64hashmap(void);
 void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value);
 void u64hashmap_rebucket(U64Hashmap *self);
-void remove_u64hashmap(U64Hashmap *self, u64 key, u64 value);
+void remove_u64hashmap(U64Hashmap *self, u64 key);
 hash_cell get_u64hashmap(U64Hashmap *self, u64 key);
 void destroy_u64hashmap(U64Hashmap *self); 
 #endif

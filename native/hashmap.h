@@ -50,7 +50,7 @@ typedef struct {
 
 typedef struct {
     int8_t some;
-    int64_t value;
+    uint64_t value;
 } OptionUINT64;
 
 struct GetInput {

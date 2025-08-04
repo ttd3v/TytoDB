@@ -7,7 +7,6 @@ mod alba_types;
 mod query_conditions;
 use std::io::{Error,ErrorKind};
 use alba_types::AlbaTypes;
-use tokio;
 use database::connect;
 
 pub mod better_logs;
@@ -158,13 +157,12 @@ struct AstRollback{
 
 fn gerr(msg : &str) -> Error{Error::new(ErrorKind::Other, msg.to_string())}
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db = match connect().await{
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = match connect(){
         Ok(database) => {println!("connected");database},
         Err(e) => panic!("{}",e.to_string())
     };
-    if let Err(e) = db.run_database().await{
+    if let Err(e) = db.run_database(){
         logerr!("{}",e);
     };
     Ok(())
