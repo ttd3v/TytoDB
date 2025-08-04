@@ -1,240 +1,155 @@
-use std::{collections::hash_map::DefaultHasher, fs::{self, File, OpenOptions}, hash::{Hash, Hasher}, io::Error, os::unix::fs::FileExt, path::Path};
+use std::{ffi::CString, os::raw::{c_char, c_int},io::Error};
 
-const BUCKET_CAPACITY : u64 = 4096;
-const BUCKET_SIZE : u64 = 73728; // 4096 cells * 18 bytes/cell
+use crate::gerr;
 
-#[derive(PartialEq, Debug)]
-enum CellState {
-    Empty,
-    Occupied,
-    Deleted,
+
+#[repr(C)]
+pub struct Hashmap {
+    pub file: c_int,
+    pub bucket_size: u64,
+    pub len: u64,
+    pub path: *mut c_char,
+    pub temp_path: *mut c_char,
 }
 
-impl CellState {
-    fn from_bytes(bytes: [u8; 2]) -> Self {
-        match u16::from_le_bytes(bytes) {
-            1 => CellState::Occupied,
-            2 => CellState::Deleted,
-            _ => CellState::Empty,
-        }
-    }
+#[repr(C)]
+pub struct Cell {
+    pub exists: u8,
+    pub key: u64,
+    pub value: u64,
+}
 
-    fn to_bytes(&self) -> [u8; 2] {
-        match self {
-            CellState::Empty => 0u16.to_le_bytes(),
-            CellState::Occupied => 1u16.to_le_bytes(),
-            CellState::Deleted => 2u16.to_le_bytes(),
-        }
+#[repr(C)]
+pub struct CellPtr {
+    pub exists: u8,
+    pub key: u64,
+    pub value: u64,
+    pub ptr: u64,
+}
+
+#[repr(C)]
+pub struct HashmapMetadata {
+    pub bucket_size: u64,
+    pub len: u64,
+}
+
+#[repr(C)]
+pub struct OptionUINT64 {
+    pub some: i8,
+    pub value: i64,
+}
+
+#[repr(C)]
+pub struct GetInput {
+    pub count: u32,
+    pub key: *mut u64,
+}
+
+#[repr(C)]
+pub struct GetOutput {
+    pub success: i8,
+    pub count: u32,
+    pub value: *mut OptionUINT64,
+}
+
+#[repr(C)]
+pub struct WriteInput {
+    pub count: u32,
+    pub key: *mut u64,
+    pub value: *mut u64,
+    pub exists: *mut u8,
+}
+
+#[repr(C)]
+pub struct Vector {
+    pub count: u64,
+    pub capacity: u64,
+    pub values: *mut u64,
+}
+
+#[repr(C)]
+pub struct VectorCell {
+    pub count: u64,
+    pub capacity: u64,
+    pub values: *mut Cell,
+}
+
+#[repr(C)]
+pub struct VectorCellPtr {
+    pub count: u64,
+    pub capacity: u64,
+    pub values: *mut CellPtr,
+}
+
+#[repr(C)]
+pub struct CustomerList {
+    pub indices: *mut u64,
+    pub count: u64,
+    pub capacity: u64,
+}
+
+#[repr(C)]
+pub struct HmChunk {
+    pub count: usize,
+    pub ptr: u64,
+    pub cells: VectorCell,
+}
+#[link(name="hashmap", kind="static")]
+unsafe extern "C"{
+    fn hashmap_new(hashmap : &Hashmap) -> c_int;
+    fn hashmap_get(hashmap : &Hashmap, entry : &GetInput, foreign_output : &mut GetOutput) -> c_int;
+    fn hashmap_write(hashmap : &Hashmap, entry : &WriteInput) -> c_int; 
+}
+
+fn error_execution_product(i: i32) -> Error {
+    match i {
+        0 => gerr("Hashmap Error(0): Unexpected success code in error handler"),
+        -1 => gerr("Hashmap Error(-1): Something went wrong"),
+        -2 => gerr("Hashmap Error(-2): Failed to allocate memory"), 
+        -3 => gerr("Hashmap Error(-3): Disk write failure"),
+        -4 => gerr("Hashmap Error(-4): Disk read failure"),
+        -5 => gerr("Hashmap Error(-5): Failed to open file"),
+        -6 => gerr("Hashmap Error(-6): IoUring queue start failure"),
+        -7 => gerr("Hashmap Error(-7): IoUring SQE failure"),
+        -8 => gerr("Hashmap Error(-8): IoUring CQE file write failure"),
+        -10 => gerr("Hashmap Error(-10): IoUring CQE file read failure"),
+        -11 => gerr("Hashmap Error(-11): Fsync failure"),
+        -12 => gerr("Hashmap Error(-12): Out of disk space"),
+        -13 => gerr("Hashmap Error(-13): IoUring submit failure"),
+        _ => gerr(&format!("Hashmap Error({}): Unknown error code", i)),
     }
 }
 
-struct Cell {
-    key : u64,
-    value : u64,
-    state : CellState
-}
-
-impl Cell{
-    fn from_bytes(byte : [u8;18]) -> Cell{
-        let key     = {let mut load = [0u8;8];load[0..8].copy_from_slice(&byte[..8]);u64::from_le_bytes(load)};
-        let value   = {let mut load = [0u8;8];load[0..8].copy_from_slice(&byte[8..16]);u64::from_le_bytes(load)};
-        let state  = CellState::from_bytes({let mut load = [0u8;2];load[0..2].copy_from_slice(&byte[16..]);load});
-        Cell{key,value,state}
-    }
-    fn as_bytes(&self) -> [u8; 18] {
-        let mut bytes = [0u8; 18];
-        bytes[0..8].copy_from_slice(&self.key.to_le_bytes());
-        bytes[8..16].copy_from_slice(&self.value.to_le_bytes());
-        bytes[16..18].copy_from_slice(&self.state.to_bytes());
-        bytes
-    }
-}
-#[derive(Debug)]
-pub struct Hashmap{
-    length : u64,
-    bucket_count : u64,
-    file : File,
+pub struct IndexingHashmap{
+    inner: Hashmap,
     path: String,
 }
-impl Hashmap{
+impl IndexingHashmap{
     pub fn new(path : String) -> Result<Self,Error> {
-        let filepath = format!("{}.hashmap", &path);
-        if !Path::new(&filepath).exists(){
-            let f = fs::File::create_new(&filepath)?;
-            f.set_len(8+BUCKET_SIZE)?;
-            f.write_all_at(&0u64.to_le_bytes(), 0)?;
-            return Ok(Hashmap { length: 0, bucket_count: 1, file:f, path})
-        }
-        let file = OpenOptions::new().read(true).write(true).open(filepath)?;
-        let length = {
-            let mut load = [0u8;8];
-            file.read_exact_at(&mut load, 0)?;
-            u64::from_le_bytes(load)
+        let p = format!("{}.hashmap",path);
+        let ptemp = format!("{}.temp",path);
+        
+        let c_p = match CString::new(p.clone()){Ok(a)=>a,Err(e) => return Err(gerr(&e.to_string()))};
+        
+        let c_tp = match CString::new(ptemp){Ok(a)=>a,Err(e) => return Err(gerr(&e.to_string()))};
+
+
+        let h : Hashmap = Hashmap{
+            path: c_p.into_raw(),
+            temp_path: c_tp.into_raw(),
+            file: -1,
+            len: 0,
+            bucket_size: 0
         };
-        let file_size = file.metadata()?.len();
-        let bucket_count = (file_size - 8) / BUCKET_SIZE;
-        Ok(Hashmap { length, bucket_count, file, path})
+        let execution_product = unsafe{hashmap_new(&h)};
+        match execution_product{
+            x if x >= 0 => {
+                return Ok(IndexingHashmap { inner: h, path: p })
+            },
+            _ =>{
+                return Err(error_execution_product(execution_product));
+            }
+        };
     }
 
-    fn h(&self,key:u64) -> u64{let mut h=DefaultHasher::new();key.hash(&mut h);h.finish()}
-
-    pub fn get_initial_ptr(&self, key: u64) -> (u64, u64) {
-        let h = self.h(key);
-        let bucket_index = h % self.bucket_count;
-        let bucket_start_ptr = 8 + bucket_index * BUCKET_SIZE;
-
-        let cell_index_in_bucket = self.h(h) % BUCKET_CAPACITY;
-        let cell_ptr = bucket_start_ptr + cell_index_in_bucket * 18;
-
-        (cell_ptr, bucket_start_ptr)
-    }
-
-    pub fn insert(&mut self, key : u64, value : u64) -> Result<(),Error>{
-        if self.length * 100 / (self.bucket_count * BUCKET_CAPACITY) > 70 {
-            self.rebucket()?;
-        }
-
-        let (start_ptr, bucket_start_ptr) = self.get_initial_ptr(key);
-        let mut ptr = start_ptr;
-        let mut tombstone_ptr = None;
-
-        loop {
-            let mut bin = [0u8;18];
-            self.file.read_exact_at(&mut bin, ptr)?;
-            let cell = Cell::from_bytes(bin);
-
-            if cell.state == CellState::Deleted && tombstone_ptr.is_none() {
-                tombstone_ptr = Some(ptr);
-            }
-
-            if cell.state == CellState::Empty || (cell.state == CellState::Deleted && tombstone_ptr.is_some()) {
-                let write_ptr = tombstone_ptr.unwrap_or(ptr);
-                let new_cell = Cell { key, value, state: CellState::Occupied };
-                self.file.write_all_at(&new_cell.as_bytes(), write_ptr)?;
-                self.length += 1;
-                return Ok(());
-            }
-
-            if cell.state == CellState::Occupied && cell.key == key {
-                let new_cell = Cell { key, value, state: CellState::Occupied };
-                self.file.write_all_at(&new_cell.as_bytes(), ptr)?;
-                return Ok(());
-            }
-
-            ptr += 18;
-            if ptr >= bucket_start_ptr + BUCKET_SIZE {
-                ptr = bucket_start_ptr;
-            }
-            if ptr == start_ptr {
-                return Err(Error::new(std::io::ErrorKind::Other, "Bucket is full, rebucket failed"));
-            }
-        }
-    }
-
-    pub fn get(&mut self, key : u64) -> Result<Option<u64>,Error>{
-        let (start_ptr, bucket_start_ptr) = self.get_initial_ptr(key);
-        let mut ptr = start_ptr;
-
-        loop {
-            let mut bin = [0u8;18];
-            self.file.read_exact_at(&mut bin, ptr)?;
-            let cell = Cell::from_bytes(bin);
-
-            if cell.state == CellState::Empty {
-                return Ok(None);
-            }
-
-            if cell.state == CellState::Occupied && cell.key == key {
-                return Ok(Some(cell.value));
-            }
-
-            ptr += 18;
-            if ptr >= bucket_start_ptr + BUCKET_SIZE {
-                ptr = bucket_start_ptr;
-            }
-            if ptr == start_ptr {
-                return Ok(None);
-            }
-        }
-    }
-
-    pub fn remove(&mut self, key: u64) -> Result<bool, Error> {
-        let (start_ptr, bucket_start_ptr) = self.get_initial_ptr(key);
-        let mut ptr = start_ptr;
-
-        loop {
-            let mut bin = [0u8; 18];
-            self.file.read_exact_at(&mut bin, ptr)?;
-            let cell = Cell::from_bytes(bin);
-
-            if cell.state == CellState::Empty {
-                return Ok(false);
-            }
-
-            if cell.state == CellState::Occupied && cell.key == key {
-                let new_cell = Cell { key: 0, value: 0, state: CellState::Deleted };
-                self.file.write_all_at(&new_cell.as_bytes(), ptr)?;
-                self.length -= 1;
-                return Ok(true);
-            }
-
-            ptr += 18;
-            if ptr >= bucket_start_ptr + BUCKET_SIZE {
-                ptr = bucket_start_ptr;
-            }
-            if ptr == start_ptr {
-                return Ok(false);
-            }
-        }
-    }
-
-    pub fn rebucket(&mut self) -> Result<(), Error> {
-        let temp_path_str = format!("{}.temp", self.path);
-        let _ = fs::remove_file(format!("{}.hashmap", &temp_path_str));
-        let mut new_hm = Hashmap::new(temp_path_str.clone())?;
-
-        let new_bucket_count = self.bucket_count * 10;
-        let new_len = 8 + new_bucket_count * BUCKET_SIZE;
-        new_hm.file.set_len(new_len)?;
-        new_hm.bucket_count = new_bucket_count;
-
-        let old_file_len = self.file.metadata()?.len();
-        let mut read_ptr = 8;
-        
-        loop {
-            let mut cell_buffer = [0u8; 18];
-            if read_ptr + 18 > old_file_len {
-                break;
-            }
-            self.file.read_exact_at(&mut cell_buffer, read_ptr)?;
-            let cell = Cell::from_bytes(cell_buffer);
-            if cell.state == CellState::Occupied {
-                new_hm.insert(cell.key, cell.value)?;
-            }
-            read_ptr += 18;
-        }
-
-        new_hm.sync()?;
-
-        let old_filepath = format!("{}.hashmap", self.path);
-        let temp_filepath = format!("{}.hashmap", temp_path_str);
-
-        self.file = new_hm.file;
-        self.bucket_count = new_hm.bucket_count;
-        self.length = new_hm.length;
-
-        fs::remove_file(&old_filepath)?;
-        fs::rename(temp_filepath, &old_filepath)?;
-        
-        self.file = OpenOptions::new().read(true).write(true).open(&old_filepath)?;
-
-        Ok(())
-    }
-
-
-    pub fn sync(&mut self) -> Result<(),Error>{
-        self.file.write_all_at(&self.length.to_le_bytes(), 0)?;
-        self.file.sync_all()
-    }
 }
-
