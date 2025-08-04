@@ -4,6 +4,7 @@
 #include <liburing/io_uring.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -74,19 +75,19 @@ HashmapMetadata deserialize_hashmapmetadata(unsigned char*const buffer){
 /// Hashmap_draw_defaults
 ///     Sets the file layout of a hashmap file
 ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
-    unsigned char *buffer = (unsigned char *)malloc(bucket_size*sizeof(Cell));
-    int success = fwrite(buffer, sizeof(unsigned char), bucket_size*sizeof(Cell), file);
-    if (success == -1){
-        free(buffer);
-        return -3;
+    int fd = fileno(file);
+    off_t total_size = bucket_size * sizeof(Cell) + sizeof(HashmapMetadata);
+    
+    if (ftruncate(fd, total_size) != 0) {
+        return -3; 
     }
-    free(buffer);
+
 
     HashmapMetadata meta = (HashmapMetadata){bucket_size,0};
     unsigned char *meta_buffer = (unsigned char *)malloc(sizeof(HashmapMetadata));
     serialize_hashmapmetadata(&meta, meta_buffer);
     fseek(file, bucket_size*sizeof(Cell), 0);
-    success = fwrite(meta_buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
+    int success = fwrite(meta_buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
 
     if (success == -1){
         free(meta_buffer);
@@ -332,7 +333,7 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
 
 
     buffers = malloc(blocks.count * sizeof(unsigned char*));
-    if(buffers){
+    if(buffers != NULL){
         for (u64 i = 0; i < blocks.count; i++) {
             buffers[i] = NULL;
         }
@@ -457,10 +458,10 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     //*   ____                        __                          
     //*  /\  _`\                     /\ \  __                     
     //*  \ \ \L\ \     __     __     \_\ \/\_\    ___      __     
-    //*   \ \ ,  /   /'__`\ /'__`\   /'_` \/\ \ /' _ `\  /'_ `\
-    //*    \ \ \\ \ /\  __//\ \L\.\_/\ \L\ \ \ \/\ \/\ \/\ \L\ \
-    //*     \ \_\ \_\ \____\ \__/.\_\ \___,_\ \_\ \_\ \_\ \____ \
-    //*      \/_/\/ /\/____/\/__/\/_/\/__,_ /\/_/\/_/\/_/\/___L\ \
+    //*   \ \ ,  /   /'__`\ /'__`\   /'_` \/\ \ /' _ `\  /'_ `\ 
+    //*    \ \ \\ \ /\  __//\ \L\.\_/\ \L\ \ \ \/\ \/\ \/\ \L\ \ 
+    //*     \ \_\ \_\ \____\ \__/.\_\ \___,_\ \_\ \_\ \_\ \____ \ 
+    //*      \/_/\/ /\/____/\/__/\/_/\/__,_ /\/_/\/_/\/_/\/___L\ \ 
     //*                                                    /\____/
     //*                                                    \_/__/ 
     //*
@@ -540,6 +541,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     };
     ring_initialized = 1;
 
+    buffers = malloc(blocks.count * sizeof(unsigned char*));
     if (!buffers){ product = -2; goto clean; }
     #pragma GCC unroll 4
     for (u64 j = 0; j < blocks.count; j++){
@@ -597,10 +599,10 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     //     __      __             __                            
     //    /\ \  __/\ \         __/\ \__  __                     
     //    \ \ \/\ \ \ \  _ __ /\_\ \ ,_\/\_\    ___      __     
-    //     \ \ \ \ \ \ \/\`'__\/\ \ \ \/\/\ \ /' _ `\  /'_ `\
-    //      \ \ \_/ \_\ \ \ \/ \ \ \ \ \_\ \ \/\ \/\ \/\ \L\ \
-    //       \ `\___x___/\ \_\  \ \_\ \__\\ \_\ \_\ \_\ \____ \
-    //       '\/__//__/  \/_/   \/_/\/__/ \/_/\/_/\/_/\/___L\ \
+    //     \ \ \ \ \ \ \/\`'__\/\ \ \ \/\/\ \ /' _ `\  /'_ `\ 
+    //      \ \ \_/ \_\ \ \ \/ \ \ \ \ \_\ \ \/\ \/\ \/\ \L\ \ 
+    //       \ `\___x___/\ \_\  \ \_\ \__\\ \_\ \_\ \_\ \____ \ 
+    //       '\/__//__/  \/_/   \/_/\/__/ \/_/\/_/\/_/\/___L\ \ 
     //                                                  /\____/
     //                                                  \_/__/
     //
