@@ -110,7 +110,7 @@ int hashmap_new(struct Hashmap *hashmap){
     FILE *file;
     if (exists == -1) {
         file = fopen(path, "w+b");
-        if (!file) printf("Failed to open file(w+b)");return -1;
+        if (!file) {printf("Failed to open file(w+b)");return -1;}
         if (hashmap_draw_defaults(file, DEFAULT_BUCKET_SIZE) < 0) {
             fclose(file);
         return -3;
@@ -120,7 +120,7 @@ int hashmap_new(struct Hashmap *hashmap){
     } else {
         fclose(existence);
         file = fopen(path, "r+b");
-        if (!file) printf("Failed to open file(r+b)");return -1;
+        if (!file) {printf("Failed to open file(r+b)");return -1;}
         fseek(file, -sizeof(HashmapMetadata), SEEK_END);
         unsigned char *buffer = malloc(sizeof(HashmapMetadata));
         if (!buffer) {
@@ -285,7 +285,7 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
     
     
 
-    if(output.value == NULL) return -2; 
+    if(output.value == NULL) {return -2;}; 
     
     clean:
         if(blocks.values != NULL){
@@ -499,7 +499,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     clean:
         if(blocks.values != NULL) free(blocks.values);
         if(hm.array != NULL) destroy_u64hashmap(&hm);
-        if(ring_initialized >= 0) io_uring_queue_exit(&ring); 
+        if(ring_initialized >= 0) {io_uring_queue_exit(&ring);}; 
         if(buffers != NULL){
             for(u64 j = 0; j < blocks.count; j++) {
                 if(buffers[j] != NULL) free(buffers[j]);
@@ -508,7 +508,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         }
         if(cells.values != NULL) free(cells.values);
         if(customers->indices != NULL) free(customers->indices);
-        if(hmap.array != NULL) destroy_u64hashmap(&hmap); 
+        if(hmap.array != NULL) {destroy_u64hashmap(&hmap);}; 
         if(writing_buffers != NULL){
             for(u64 j = 0; j<cells.count; j++) if(writing_buffers[j] != NULL) {free(writing_buffers[j]);};
             free(writing_buffers);
@@ -847,7 +847,7 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
     rename(self->temp_path, self->path);
     
     FILE* fi = fopen(self->path, "r+b");
-    if(fi == NULL) return -5;      
+    if(fi == NULL) {return -5;};      
     self->file = fileno(fi); 
     self->bucket_size *= HASHMAP_REBUCKET_GROWTH_FACTOR;
     

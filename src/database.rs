@@ -533,7 +533,7 @@ impl Database{
                     structure.col_val,
                     file.metadata()?.len(),
                     structure.col_nam
-                ).unwrap();
+                )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
             },
