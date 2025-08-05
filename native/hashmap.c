@@ -110,7 +110,7 @@ int hashmap_new(struct Hashmap *hashmap){
     FILE *file;
     if (exists == -1) {
         file = fopen(path, "w+b");
-        if (!file) return -1;
+        if (!file) printf("Failed to open file(w+b)");return -1;
         if (hashmap_draw_defaults(file, DEFAULT_BUCKET_SIZE) < 0) {
             fclose(file);
         return -3;
@@ -120,7 +120,7 @@ int hashmap_new(struct Hashmap *hashmap){
     } else {
         fclose(existence);
         file = fopen(path, "r+b");
-        if (!file) return -1;
+        if (!file) printf("Failed to open file(r+b)");return -1;
         fseek(file, -sizeof(HashmapMetadata), SEEK_END);
         unsigned char *buffer = malloc(sizeof(HashmapMetadata));
         if (!buffer) {
