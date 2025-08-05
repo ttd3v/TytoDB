@@ -35,7 +35,7 @@ jobs:
         git clone https://github.com/FeatheredSystems/TytoDB-Testing ~/testing-program
 
         # Start the database in the background
-        cargo run --release &
+        RUST_BACKTRACE=full cargo run --release &
         DB_PID=$!
 
         # Wait for database to be ready
