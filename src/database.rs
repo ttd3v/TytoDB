@@ -1205,7 +1205,7 @@ impl Database{
             }));
             val
         });
-        Server::new(host, password, message_handler, (workers/2).max(1)).unwrap();
+        Server::new(host, password, message_handler, (workers).max(1)).unwrap();
         
         Ok(())
     }
