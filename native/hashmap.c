@@ -85,19 +85,22 @@ ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
 
     HashmapMetadata meta = (HashmapMetadata){bucket_size,0};
     unsigned char *meta_buffer = (unsigned char *)malloc(sizeof(HashmapMetadata));
+    if(!meta_buffer){
+        printf("Failed to allocate buffer for metadata writing");
+        return -1;
+    }
     serialize_hashmapmetadata(&meta, meta_buffer);
-    fseek(file, bucket_size*sizeof(Cell), 0);
-    int success = fwrite(meta_buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
+    int success = pwrite(fd,meta_buffer, sizeof(HashmapMetadata), bucket_size*sizeof(Cell));
 
-    if (success == -1){
+    if (success < 0) {
+        printf("Failed to write metadata into the hashmap file");
         free(meta_buffer);
         return -3;
     }
+
     free(meta_buffer);
     fflush(file);
 
-    int current = ftell(file);
-    fseek(file, current, SEEK_SET);
 
     return 0;
 }
@@ -107,6 +110,7 @@ int hashmap_new(struct Hashmap *hashmap){
     char *path = hashmap->path;
     FILE *existence = fopen(path,"r");
     int exists = existence == NULL?-1:0;
+    if (existence != NULL) fclose(existence);
     FILE *file;
     if (exists == -1) {
         file = fopen(path, "w+b");
@@ -118,16 +122,35 @@ int hashmap_new(struct Hashmap *hashmap){
         hashmap->bucket_size = DEFAULT_BUCKET_SIZE;
         hashmap->len = 0;
     } else {
-        fclose(existence);
         file = fopen(path, "r+b");
         if (!file) {printf("Failed to open file(r+b)");return -1;}
-        fseek(file, -sizeof(HashmapMetadata), SEEK_END);
-        unsigned char *buffer = malloc(sizeof(HashmapMetadata));
+        unsigned char *buffer = (unsigned char*)malloc(sizeof(HashmapMetadata));
         if (!buffer) {
+            printf("Failed to allocate memory for metadata");
             fclose(file);
             return -2;
         }
-        fread(buffer, sizeof(unsigned char), sizeof(HashmapMetadata), file);
+        int fd = fileno(file);
+        struct stat file_stats;
+        
+       if (fstat(fd, &file_stats) == -1) {
+            perror("fstat");
+            fclose(file);
+            free(buffer);
+            return -1;
+        } 
+        if (file_stats.st_size < sizeof(HashmapMetadata)){
+            printf("Invalid file size");
+            fclose(file);
+            free(buffer);
+            return -1;
+        }
+        if(pread(fd,buffer, sizeof(HashmapMetadata), file_stats.st_size-sizeof(HashmapMetadata)) < 0){
+            printf("failed to read metadata");
+            fclose(file);
+            free(buffer);
+            return -1;
+        };
         HashmapMetadata meta = deserialize_hashmapmetadata(buffer);
         free(buffer);
         fseek(file, 0, SEEK_SET);
@@ -274,7 +297,7 @@ typedef uint64_t u64;
 typedef size_t usize;
 
 ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
-    ExecutionProduct product = -1;
+    ExecutionProduct product = 0;
     int initialized_ring = -1;
     struct GetOutput output = (struct GetOutput){0,0,(OptionUINT64*)malloc(entry->count * sizeof(OptionUINT64))};
     vector blocks = {0};
@@ -440,19 +463,47 @@ void remove_customer(customer_list *list, u64 position) {
     list->count--;
 }
 
+ExecutionProduct hashmap_save_metadata(struct Hashmap *self) {
+    if (!self) {
+        return -1; 
+    }
+    
+
+    HashmapMetadata meta = {
+        .bucket_size = self->bucket_size,
+        .len = self->len
+    };
+    
+    
+    unsigned char *meta_buffer = malloc(sizeof(HashmapMetadata));
+    if (!meta_buffer) {
+        return -2; 
+    }
+    
+    serialize_hashmapmetadata(&meta, meta_buffer);
+    
+    off_t metadata_offset = self->bucket_size * sizeof(Cell);
+    ssize_t bytes_written = pwrite(self->file, meta_buffer, sizeof(HashmapMetadata), metadata_offset);
+    free(meta_buffer);
+    if (bytes_written < 0) {
+        return -3; 
+    }
+    
+    if ((size_t)bytes_written != sizeof(HashmapMetadata)) {
+        return -4;
+    }
+    
+
+    if (fsync(self->file) < 0) {
+        return -5; 
+    }
+    
+    return 0; 
+}
+
 
 ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 
-    //
-    //
-    //  This specific part of the codebase is very long and might be considered bad in coding readability and maintainability scores,
-    //  the objective of keeping this as/is instead of creating a helper functions is to allow me to benefit from the different data 
-    //  flows of both functions, since they use the readen data in different ways.
-    //  
-    //  I undestand that this is a bad practice, functions shouldn't be long; But at least on the moment in time I am writing this note,
-    //  that decision is reasonable.
-    //
-    //  Best regards, ttd3v.
     //
     //*
     //*   ____                        __                          
@@ -468,7 +519,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     //
     //
     
-    ExecutionProduct product = -1;
+    ExecutionProduct product = 0;
     int ring_initialized = -1;
 
     // All cycles
@@ -733,6 +784,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         };
     }
     product = 0;
+    hashmap_save_metadata(self);
     goto clean;
 }
 
@@ -761,12 +813,17 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
         .len = 0,
         .temp_path = "./.temp"
     };
-    hashmap_draw_defaults(temp, self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR);
+    ExecutionProduct hm_def = hashmap_draw_defaults(temp, self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR);
+    if (hm_def < 0){
+        printf("rebucket");
+        return hm_def;
+    };
     
     unsigned char *buffer = NULL;
     FILE *f = fdopen(self->file, "r+b");
     
     if(f == NULL){
+        printf("failed to open rebucket file");
         fclose(temp);
         remove(self->temp_path);
         return -1;
@@ -853,8 +910,9 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
     
     if (remaining_entries->count > 0){
         ExecutionProduct a = hashmap_write(self, remaining_entries);
-        if (a < 0){return a;};
+        if (a < 0){printf("failed to write/rebucket");return a;};
     }
 
     return 0;
 }
+

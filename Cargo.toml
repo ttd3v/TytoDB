@@ -8,6 +8,13 @@ build = "build.rs"
 [build-dependencies]
 cc = "1.0"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false
+panic = "abort"
+
 [dependencies]
 serde = {version="1.0.219", features=["derive"]}
 serde_yaml = "0.9"

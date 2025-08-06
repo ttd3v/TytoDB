@@ -91,12 +91,13 @@ impl IndexingHashmap{
         let execution_product = unsafe{hashmap_new((&mut h) as *mut Hashmap)};
         match execution_product{
             x if x >= 0 => {
-                return Ok(IndexingHashmap { inner: h })
+                Ok(IndexingHashmap { inner: h })
             },
             _ =>{
-                return Err(error_execution_product(execution_product));
+                eprintln!("Failed to create hashmap-file");
+                Err(error_execution_product(execution_product))
             }
-        };
+        }
     }
     pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>,Error>{
         let mut keys = keys;
@@ -107,24 +108,23 @@ impl IndexingHashmap{
         let mut output = GetOutput::default();
 
         let execution_product = unsafe{hashmap_get(&mut self.inner as *mut Hashmap, &mut input as *mut GetInput, &mut output as *mut GetOutput)};
-        match execution_product{
-            x if x >= 0 => {
-                let v = output.value;
-                return Ok(unsafe{
-                    let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
-                    let mut b = Vec::new();
-                    for i in a{
-                        if i.some >0{
-                            b.push(i.value);
-                        }
-                    }
-                    b
-                })
-            },
-            _ =>{
-                return Err(error_execution_product(execution_product));
+        
+        if execution_product < 0{
+            eprintln!("Failed to run hashmap-get");
+           return Err(error_execution_product(execution_product))
+        }
+        let v = output.value;
+        Ok(unsafe{
+            let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
+            let mut b = Vec::new();
+            for i in a{
+                if i.some >0{
+                    b.push(i.value);
+                }
             }
-        };
+            b
+        })
+
     }
     pub fn write(&mut self, entries: Vec<(bool, u64, u64)>) -> Result<(), Error> {
         if entries.is_empty() {
@@ -152,10 +152,11 @@ impl IndexingHashmap{
             hashmap_write(&mut self.inner as *mut Hashmap, &mut input as *mut WriteInput)
         };
 
-        match execution_product {
-            x if x >= 0 => Ok(()),
-            _ => Err(error_execution_product(execution_product)),
+        if execution_product<0{
+            eprintln!("Failed to run hashmap-write");
+            return Err(error_execution_product(execution_product));
         }
+        Ok(())
     }
 
 }
