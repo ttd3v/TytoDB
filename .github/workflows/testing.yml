@@ -63,7 +63,7 @@ jobs:
         cd ~/testing-program
         
         # Run tests and capture exit code
-        if cargo run --release; then
+        if time cargo run --release; then
           echo "Tests completed successfully"
           TEST_EXIT_CODE=0
         else
