@@ -20,7 +20,7 @@ enum LogicalGate{
     Or,
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct QueryConditionAtom{
     column : String,
     operator : Operator,
@@ -114,6 +114,9 @@ impl QueryConditions{
                     },
                     AlbaTypes::Int(_) => {
                         if let Token::Int(number) = value.2{
+                            if number < i32::MIN as i64 || number > i32::MAX as i64 {
+                                return Err(gerr("Number out of range for Int"))
+                            }
                             AlbaTypes::Int(number as i32)
                         }else {
                             return Err(gerr("No integer found in the ComparisionToken"))
@@ -124,6 +127,80 @@ impl QueryConditions{
                             AlbaTypes::Bigint(number)
                         }else {
                             return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::UInt(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < 0 || number > u32::MAX as i64 {
+                                return Err(gerr("Number out of range for UInt"))
+                            }
+                            AlbaTypes::UInt(number as u32)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::UBigint(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < 0 {
+                                return Err(gerr("Negative number for UBigint"))
+                            }
+                            AlbaTypes::UBigint(number as u64)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::NanoInt(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < i8::MIN as i64 || number > i8::MAX as i64 {
+                                return Err(gerr("Number out of range for NanoInt"))
+                            }
+                            AlbaTypes::NanoInt(number as i8)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::UNanoInt(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < 0 || number > u8::MAX as i64 {
+                                return Err(gerr("Number out of range for UNanoInt"))
+                            }
+                            AlbaTypes::UNanoInt(number as u8)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Short(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < i16::MIN as i64 || number > i16::MAX as i64 {
+                                return Err(gerr("Number out of range for Short"))
+                            }
+                            AlbaTypes::Short(number as i16)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::UShort(_) => {
+                        if let Token::Int(number) = value.2{
+                            if number < 0 || number > u16::MAX as i64 {
+                                return Err(gerr("Number out of range for UShort"))
+                            }
+                            AlbaTypes::UShort(number as u16)
+                        }else {
+                            return Err(gerr("No integer found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::HugeInt(_) => {
+                        match value.2 {
+                            Token::Huge(number) => AlbaTypes::HugeInt(number),
+                            Token::Int(i) => AlbaTypes::HugeInt(i as i128),
+                            _ => return Err(gerr("No huge integer found in the ComparisionToken")),
+                        }
+                    },
+                    AlbaTypes::UHugeInt(_) => {
+                        match value.2 {
+                            Token::UHuge(number) => AlbaTypes::UHugeInt(number),
+                            Token::Int(i) if i >= 0 => AlbaTypes::UHugeInt(i as u128),
+                            _ => return Err(gerr("No unsigned huge integer found in the ComparisionToken")),
                         }
                     },
                     AlbaTypes::Float(_) => {
@@ -147,6 +224,13 @@ impl QueryConditions{
                             return Err(gerr("No char found in the ComparisionToken"))
                         }
                     },
+                    AlbaTypes::Geo(_) => {
+                        if let Token::Geo(geo) = value.2{
+                            AlbaTypes::Geo(geo)
+                        }else {
+                            return Err(gerr("No geo found in the ComparisionToken"))
+                        }
+                    },
                     AlbaTypes::NanoString(_) => {
                         if let Token::String(mut nano_string) = value.2{
                             nano_string.truncate(10);
@@ -166,7 +250,7 @@ impl QueryConditions{
                     AlbaTypes::MediumString(_) => {
                         if let Token::String(mut medium_string) = value.2{
                             medium_string.truncate(500);
-                            AlbaTypes::SmallString(medium_string)
+                            AlbaTypes::MediumString(medium_string)
                         }else {
                             return Err(gerr("No medium_string found in the ComparisionToken"))
                         }
@@ -174,7 +258,7 @@ impl QueryConditions{
                     AlbaTypes::BigString(_) => {
                         if let Token::String(mut big_string) = value.2{
                             big_string.truncate(2000);
-                            AlbaTypes::SmallString(big_string)
+                            AlbaTypes::BigString(big_string)
                         }else {
                             return Err(gerr("No big_string found in the ComparisionToken"))
                         }
@@ -182,9 +266,20 @@ impl QueryConditions{
                     AlbaTypes::LargeString(_) => {
                         if let Token::String(mut large_string) = value.2{
                             large_string.truncate(3000);
-                            AlbaTypes::SmallString(large_string)
+                            AlbaTypes::LargeString(large_string)
                         }else {
                             return Err(gerr("No large_string found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Email(_) => {
+                        if let Token::String(mut email) = value.2{
+                            email.truncate(320);
+                            if !email.is_ascii() {
+                                email = unidecode::unidecode(&email);
+                            }
+                            AlbaTypes::Email(email)
+                        }else {
+                            return Err(gerr("No email string found in the ComparisionToken"))
                         }
                     },
                     AlbaTypes::NanoBytes(_) => {
@@ -222,9 +317,81 @@ impl QueryConditions{
                     AlbaTypes::LargeBytes(_) => {
                         if let Token::Bytes(mut large_bytes) = value.2{
                             large_bytes.truncate(1000000);
-                            AlbaTypes::BigSBytes(large_bytes)
+                            AlbaTypes::LargeBytes(large_bytes)
                         }else {
                             return Err(gerr("No large_bytes found in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::LightPassword(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 32 { b.truncate(32); }
+                            else { b.resize(32, 0); }
+                            AlbaTypes::LightPassword(b)
+                        }else {
+                            return Err(gerr("No bytes found for LightPassword in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::MediumPassword(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 64 { b.truncate(64); }
+                            else { b.resize(64, 0); }
+                            AlbaTypes::MediumPassword(b)
+                        }else {
+                            return Err(gerr("No bytes found for MediumPassword in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::HeavyPassword(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 128 { b.truncate(128); }
+                            else { b.resize(128, 0); }
+                            AlbaTypes::HeavyPassword(b)
+                        }else {
+                            return Err(gerr("No bytes found for HeavyPassword in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Slice4(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 32 { b.truncate(32); }
+                            else { b.resize(32, 0); }
+                            AlbaTypes::Slice4(b)
+                        }else {
+                            return Err(gerr("No bytes found for Slice4 in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Slice3(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 20 { b.truncate(20); }
+                            else { b.resize(20, 0); }
+                            AlbaTypes::Slice3(b)
+                        }else {
+                            return Err(gerr("No bytes found for Slice3 in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Slice2(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 16 { b.truncate(16); }
+                            else { b.resize(16, 0); }
+                            AlbaTypes::Slice2(b)
+                        }else {
+                            return Err(gerr("No bytes found for Slice2 in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Slice1(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 6 { b.truncate(6); }
+                            else { b.resize(6, 0); }
+                            AlbaTypes::Slice1(b)
+                        }else {
+                            return Err(gerr("No bytes found for Slice1 in the ComparisionToken"))
+                        }
+                    },
+                    AlbaTypes::Slice0(_) => {
+                        if let Token::Bytes(mut b) = value.2{
+                            if b.len() > 4 { b.truncate(4); }
+                            else { b.resize(4, 0); }
+                            AlbaTypes::Slice0(b)
+                        }else {
+                            return Err(gerr("No bytes found for Slice0 in the ComparisionToken"))
                         }
                     },
                     AlbaTypes::NONE => {
@@ -293,79 +460,21 @@ impl QueryConditions{
                     let lower = (opd == discriminant(&Operator::Lower)) || 
                                (opd == discriminant(&Operator::LowerEquality));
                     
-                    
-    
-                    match (row_value, value) {
-                        (AlbaTypes::Int(x), AlbaTypes::Int(y)) => {
-                            
-                            let result = if lower { if equality { x <= y } else { x < y } } 
-                            else { if equality { x >= y } else { x > y } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Bigint(x), AlbaTypes::Bigint(y)) => {
-                            
-                            let result = if lower { if equality { x <= y } else { x < y } } 
-                            else { if equality { x >= y } else { x > y } };
-                            result
-                        },
-                        (AlbaTypes::Float(x), AlbaTypes::Float(y)) => {
-                            
-                            let result = if lower { if equality { x <= y } else { x < y } } 
-                            else { if equality { x >= y } else { x > y } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Int(x), AlbaTypes::Bigint(y)) => {
-                            let x_promoted = *x as i64;
-                            
-                            let result = if lower { if equality { x_promoted <= *y } else { x_promoted < *y } } 
-                            else { if equality { x_promoted >= *y } else { x_promoted > *y } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Bigint(x), AlbaTypes::Int(y)) => {
-                            let y_promoted = *y as i64;
-                            
-                            let result = if lower { if equality { *x <= y_promoted } else { *x < y_promoted } } 
-                            else { if equality { *x >= y_promoted } else { *x > y_promoted } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Int(x), AlbaTypes::Float(y)) => {
-                            let x_promoted = *x as f64;
-                            
-                            let result = if lower { if equality { x_promoted <= *y } else { x_promoted < *y } } 
-                            else { if equality { x_promoted >= *y } else { x_promoted > *y } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Float(x), AlbaTypes::Int(y)) => {
-                            let y_promoted = *y as f64;
-                            
-                            let result = if lower { if equality { *x <= y_promoted } else { *x < y_promoted } } 
-                            else { if equality { *x >= y_promoted } else { *x > y_promoted } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Bigint(x), AlbaTypes::Float(y)) => {
-                            let x_promoted = *x as f64;
-                            
-                            let result = if lower { if equality { x_promoted <= *y } else { x_promoted < *y } } 
-                            else { if equality { x_promoted >= *y } else { x_promoted > *y } };
-                            
-                            result
-                        },
-                        (AlbaTypes::Float(x), AlbaTypes::Bigint(y)) => {
-                            let y_promoted = *y as f64;
-                            if lower { if equality { *x <= y_promoted } else { *x < y_promoted } } 
-                            else { if equality { *x >= y_promoted } else { *x > y_promoted } }
-                        },
-                        _ => {
-                            
-                            return Err(gerr("Invalid type for numeric comparison"));
-                        }
-                    }
+                    let result = match (row_value, value) {
+                        (AlbaTypes::NanoInt(x), AlbaTypes::NanoInt(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::Short(x), AlbaTypes::Short(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::Int(x), AlbaTypes::Int(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::Bigint(x), AlbaTypes::Bigint(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::HugeInt(x), AlbaTypes::HugeInt(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::UNanoInt(x), AlbaTypes::UNanoInt(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::UShort(x), AlbaTypes::UShort(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::UInt(x), AlbaTypes::UInt(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::UBigint(x), AlbaTypes::UBigint(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::UHugeInt(x), AlbaTypes::UHugeInt(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        (AlbaTypes::Float(x), AlbaTypes::Float(y)) => if lower { if equality { *x <= *y } else { *x < *y } } else { if equality { *x >= *y } else { *x > *y } },
+                        _ => return Err(gerr("Invalid type for numeric comparison")),
+                    };
+                    result
                 },
                 Operator::Different => {
                     *value != *row_value
@@ -377,11 +486,23 @@ impl QueryConditions{
                     
                     
                     let row_string = match row_value {
+                        AlbaTypes::NanoInt(i) => i.to_string(),
+                        AlbaTypes::Short(i) => i.to_string(),
                         AlbaTypes::Int(i) => i.to_string(),
                         AlbaTypes::Bigint(i) => i.to_string(),
-                        AlbaTypes::Float(i) => i.to_string(),
-                        AlbaTypes::SmallString(s) | AlbaTypes::MediumString(s) | 
-                        AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => s.to_string(),
+                        AlbaTypes::HugeInt(i) => i.to_string(),
+                        AlbaTypes::UNanoInt(u) => u.to_string(),
+                        AlbaTypes::UShort(u) => u.to_string(),
+                        AlbaTypes::UInt(u) => u.to_string(),
+                        AlbaTypes::UBigint(u) => u.to_string(),
+                        AlbaTypes::UHugeInt(u) => u.to_string(),
+                        AlbaTypes::Float(f) => f.to_string(),
+                        AlbaTypes::Bool(b) => b.to_string(),
+                        AlbaTypes::Char(c) => c.to_string(),
+                        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) | 
+                        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) | 
+                        AlbaTypes::Email(s) => s.to_string(),
+                        AlbaTypes::Geo((lat, lon)) => format!("({}, {})", lat, lon),
                         _ => {
                             
                             return Err(gerr("Invalid, the entered type cannot make string operations"));
@@ -389,11 +510,23 @@ impl QueryConditions{
                     };
                     
                     let value_string = match value {
+                        AlbaTypes::NanoInt(i) => i.to_string(),
+                        AlbaTypes::Short(i) => i.to_string(),
                         AlbaTypes::Int(i) => i.to_string(),
                         AlbaTypes::Bigint(i) => i.to_string(),
-                        AlbaTypes::Float(i) => i.to_string(),
-                        AlbaTypes::SmallString(s) | AlbaTypes::MediumString(s) | 
-                        AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => s.to_string(),
+                        AlbaTypes::HugeInt(i) => i.to_string(),
+                        AlbaTypes::UNanoInt(u) => u.to_string(),
+                        AlbaTypes::UShort(u) => u.to_string(),
+                        AlbaTypes::UInt(u) => u.to_string(),
+                        AlbaTypes::UBigint(u) => u.to_string(),
+                        AlbaTypes::UHugeInt(u) => u.to_string(),
+                        AlbaTypes::Float(f) => f.to_string(),
+                        AlbaTypes::Bool(b) => b.to_string(),
+                        AlbaTypes::Char(c) => c.to_string(),
+                        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) | 
+                        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) | 
+                        AlbaTypes::Email(s) => s.to_string(),
+                        AlbaTypes::Geo((lat, lon)) => format!("({}, {})", lat, lon),
                         _ => {
                             
                             return Err(gerr("Invalid, the entered type cannot make string operations"));
@@ -410,11 +543,23 @@ impl QueryConditions{
                     
                     
                     let row_string = match row_value {
+                        AlbaTypes::NanoInt(i) => i.to_string(),
+                        AlbaTypes::Short(i) => i.to_string(),
                         AlbaTypes::Int(i) => i.to_string(),
                         AlbaTypes::Bigint(i) => i.to_string(),
-                        AlbaTypes::Float(i) => i.to_string(),
-                        AlbaTypes::SmallString(s) | AlbaTypes::MediumString(s) | 
-                        AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => s.to_string(),
+                        AlbaTypes::HugeInt(i) => i.to_string(),
+                        AlbaTypes::UNanoInt(u) => u.to_string(),
+                        AlbaTypes::UShort(u) => u.to_string(),
+                        AlbaTypes::UInt(u) => u.to_string(),
+                        AlbaTypes::UBigint(u) => u.to_string(),
+                        AlbaTypes::UHugeInt(u) => u.to_string(),
+                        AlbaTypes::Float(f) => f.to_string(),
+                        AlbaTypes::Bool(b) => b.to_string(),
+                        AlbaTypes::Char(c) => c.to_string(),
+                        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) | 
+                        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) | 
+                        AlbaTypes::Email(s) => s.to_string(),
+                        AlbaTypes::Geo((lat, lon)) => format!("({}, {})", lat, lon),
                         _ => {
                             
                             return Err(gerr("Invalid, the entered type cannot make string operations"));
@@ -422,11 +567,23 @@ impl QueryConditions{
                     };
                     
                     let value_string = match value {
+                        AlbaTypes::NanoInt(i) => i.to_string(),
+                        AlbaTypes::Short(i) => i.to_string(),
                         AlbaTypes::Int(i) => i.to_string(),
                         AlbaTypes::Bigint(i) => i.to_string(),
-                        AlbaTypes::Float(i) => i.to_string(),
-                        AlbaTypes::SmallString(s) | AlbaTypes::MediumString(s) | 
-                        AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => s.to_string(),
+                        AlbaTypes::HugeInt(i) => i.to_string(),
+                        AlbaTypes::UNanoInt(u) => u.to_string(),
+                        AlbaTypes::UShort(u) => u.to_string(),
+                        AlbaTypes::UInt(u) => u.to_string(),
+                        AlbaTypes::UBigint(u) => u.to_string(),
+                        AlbaTypes::UHugeInt(u) => u.to_string(),
+                        AlbaTypes::Float(f) => f.to_string(),
+                        AlbaTypes::Bool(b) => b.to_string(),
+                        AlbaTypes::Char(c) => c.to_string(),
+                        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) | 
+                        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) | 
+                        AlbaTypes::Email(s) => s.to_string(),
+                        AlbaTypes::Geo((lat, lon)) => format!("({}, {})", lat, lon),
                         _ => {
                             
                             return Err(gerr("Invalid, the entered type cannot make string operations"));

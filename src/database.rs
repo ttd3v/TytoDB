@@ -810,43 +810,63 @@ pub fn connect() -> Result<Database, Error>{
 use tytodb_client::{commands::Commands as commands, db_response::{DBResponse, Row as NetRow}, logical_operators::LogicalOperator};
 use tytodb_client::types::AlbaTypes as NetworkAlbaTypes;
 
-fn ab_from_nat(a : NetworkAlbaTypes) -> AlbaTypes{
-    match a{
-        NetworkAlbaTypes::String(a) => AlbaTypes::LargeString(a),
-        NetworkAlbaTypes::U8(a) => AlbaTypes::Int(a as i32),
-        NetworkAlbaTypes::U16(a) => AlbaTypes::Int(a as i32),
-        NetworkAlbaTypes::U32(a) => AlbaTypes::Bigint(a as i64),
-        NetworkAlbaTypes::U64(a) => AlbaTypes::Bigint(a as i64),
-        NetworkAlbaTypes::U128(a) => AlbaTypes::Bigint(a as i64),
+fn ab_from_nat(a: NetworkAlbaTypes) -> AlbaTypes {
+    match a {
+        NetworkAlbaTypes::String(a) => AlbaTypes::Text(a),
+        NetworkAlbaTypes::U8(a) => AlbaTypes::UNanoInt(a),
+        NetworkAlbaTypes::U16(a) => AlbaTypes::UShort(a),
+        NetworkAlbaTypes::U32(a) => AlbaTypes::UInt(a),
+        NetworkAlbaTypes::U64(a) => AlbaTypes::UBigint(a),
+        NetworkAlbaTypes::U128(a) => AlbaTypes::UHugeInt(a),
         NetworkAlbaTypes::F32(a) => AlbaTypes::Float(a as f64),
-        NetworkAlbaTypes::F64(a) => AlbaTypes::Float(a as f64),
-        NetworkAlbaTypes::Bool(a) => AlbaTypes::Bool(a as bool),
-        NetworkAlbaTypes::I32(a) => AlbaTypes::Int(a as i32),
-        NetworkAlbaTypes::I64(a) => AlbaTypes::Bigint(a as i64),
+        NetworkAlbaTypes::F64(a) => AlbaTypes::Float(a),
+        NetworkAlbaTypes::Bool(a) => AlbaTypes::Bool(a),
+        NetworkAlbaTypes::I32(a) => AlbaTypes::Int(a),
+        NetworkAlbaTypes::I64(a) => AlbaTypes::Bigint(a),
         NetworkAlbaTypes::Bytes(items) => AlbaTypes::LargeBytes(items),
     }
 }
-fn ab_to_nat(a : AlbaTypes) -> NetworkAlbaTypes{
-    match a{
+
+fn ab_to_nat(a: AlbaTypes) -> NetworkAlbaTypes {
+    match a {
         AlbaTypes::Text(a) => NetworkAlbaTypes::String(a),
-        AlbaTypes::Int(a) => NetworkAlbaTypes::I32(a),
-        AlbaTypes::Bigint(a) => NetworkAlbaTypes::I64(a),
-        AlbaTypes::Float(a) => NetworkAlbaTypes::F64(a),
-        AlbaTypes::Bool(a) => NetworkAlbaTypes::Bool(a),
-        AlbaTypes::Char(a) => NetworkAlbaTypes::String(a.to_string()),
         AlbaTypes::NanoString(a) => NetworkAlbaTypes::String(a),
         AlbaTypes::SmallString(a) => NetworkAlbaTypes::String(a),
         AlbaTypes::MediumString(a) => NetworkAlbaTypes::String(a),
         AlbaTypes::BigString(a) => NetworkAlbaTypes::String(a),
         AlbaTypes::LargeString(a) => NetworkAlbaTypes::String(a),
+        AlbaTypes::Email(a) => NetworkAlbaTypes::String(a),
+        AlbaTypes::Int(a) => NetworkAlbaTypes::I32(a),
+        AlbaTypes::Bigint(a) => NetworkAlbaTypes::I64(a),
+        AlbaTypes::UInt(a) => NetworkAlbaTypes::U32(a),
+        AlbaTypes::UBigint(a) => NetworkAlbaTypes::U64(a),
+        AlbaTypes::NanoInt(a) => NetworkAlbaTypes::I32(a as i32),
+        AlbaTypes::UNanoInt(a) => NetworkAlbaTypes::U8(a),
+        AlbaTypes::Short(a) => NetworkAlbaTypes::I32(a as i32),
+        AlbaTypes::UShort(a) => NetworkAlbaTypes::U16(a),
+        AlbaTypes::HugeInt(a) => NetworkAlbaTypes::String(a.to_string()),
+        AlbaTypes::UHugeInt(a) => NetworkAlbaTypes::U128(a),
+        AlbaTypes::Float(a) => NetworkAlbaTypes::F64(a),
+        AlbaTypes::Bool(a) => NetworkAlbaTypes::Bool(a),
+        AlbaTypes::Char(a) => NetworkAlbaTypes::String(a.to_string()),
+        AlbaTypes::Geo((lat, lon)) => NetworkAlbaTypes::String(format!("({}, {})", lat, lon)),
         AlbaTypes::NanoBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::SmallBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::MediumBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::BigSBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::LargeBytes(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::LightPassword(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::MediumPassword(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::HeavyPassword(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::Slice4(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::Slice3(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::Slice2(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::Slice1(a) => NetworkAlbaTypes::Bytes(a),
+        AlbaTypes::Slice0(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::NONE => NetworkAlbaTypes::U8(0),
     }
 }
+
 fn abl_to_nat(a : Vec<AlbaTypes>) -> Vec<NetworkAlbaTypes>{
     a.iter().map(|f|ab_to_nat(f.to_owned())).collect()
 }
@@ -879,6 +899,24 @@ fn alba_types_to_token(alba_type: AlbaTypes) -> Token {
         AlbaTypes::BigSBytes(items) => Token::Bytes(items),
         AlbaTypes::LargeBytes(items) => Token::Bytes(items),
         AlbaTypes::NONE => Token::Int(0),
+        AlbaTypes::LightPassword(items) => Token::Bytes(items),
+        AlbaTypes::MediumPassword(items) => Token::Bytes(items),
+        AlbaTypes::HeavyPassword(items) => Token::Bytes(items),
+        AlbaTypes::Email(s) => Token::String(s),
+        AlbaTypes::Geo(f) => Token::Geo(f),
+        AlbaTypes::Slice4(items) => Token::Bytes(items),
+        AlbaTypes::Slice3(items) => Token::Bytes(items),
+        AlbaTypes::Slice2(items) => Token::Bytes(items),
+        AlbaTypes::Slice1(items) => Token::Bytes(items),
+        AlbaTypes::Slice0(items) => Token::Bytes(items),
+        AlbaTypes::UInt(u) => Token::Int(u as i64),
+        AlbaTypes::UBigint(u) => Token::Int(u as i64),
+        AlbaTypes::NanoInt(u) => Token::Int(u as i64),
+        AlbaTypes::UNanoInt(u) => Token::Int(u as i64),
+        AlbaTypes::Short(u) => Token::Int(u as i64),
+        AlbaTypes::UShort(u) => Token::Int(u as i64),
+        AlbaTypes::HugeInt(u) => Token::Huge(u as i128),
+        AlbaTypes::UHugeInt(u) => Token::UHuge(u as u128),
     }
 }
 fn conditions_to_tyto_db(t: (Vec<(String, LogicalOperator, NetworkAlbaTypes)>, Vec<(usize, char)>)) -> (Vec<(Token, Token, Token)>, Vec<(usize, char)>) {
