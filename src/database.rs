@@ -1,18 +1,33 @@
-use std::{collections::HashMap, fs::{self, File}, io::{Error, ErrorKind, Read, Write}, os::{raw::c_int, unix::fs::FileExt}, path::PathBuf, sync::{Arc,Mutex},thread};
+use std::{
+    collections::HashMap,
+    fs::{self, File},
+    io::{Error, ErrorKind, Read, Write},
+    os::{raw::c_int, unix::fs::FileExt},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    thread,
+};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{alba_types::AlbaTypes, container::Container, gerr, logerr, query::{search, Query, SearchArguments, ActionType, search_with_action}, query_conditions::QueryConditions, row::Row, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback, AstSearch, Token, AST};
-use rand::{rngs::OsRng, Rng, TryRngCore};
+use crate::{
+    AST, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback,
+    AstSearch, Token,
+    alba_types::AlbaTypes,
+    container::Container,
+    gerr, logerr,
+    query::{ActionType, Query, SearchArguments, search, search_with_action},
+    query_conditions::QueryConditions,
+    row::Row,
+};
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
-
-
+use rand::{Rng, TryRngCore, rngs::OsRng};
 
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
 
-pub const MAX_STR_LEN : usize = 256;
+pub const MAX_STR_LEN: usize = 256;
 const DEFAULT_SETTINGS: &str = r#"
 # Delete the comments if the size of the config file bothers you ;)
 
@@ -47,31 +62,28 @@ workers: 1
 vacuum: []
 "#;
 
-type VacuumSpec = (String,String);
+type VacuumSpec = (String, String);
 
-#[derive(Serialize,Deserialize, Default,Debug)]
-struct Settings{
-    max_columns : u32,
-    min_columns : u32,
-    ip:String,
+#[derive(Serialize, Deserialize, Default, Debug)]
+struct Settings {
+    max_columns: u32,
+    min_columns: u32,
+    ip: String,
     port: u32,
     workers: u32,
-    vacuum: Vec<VacuumSpec>
+    vacuum: Vec<VacuumSpec>,
 }
 
+const SECRET_KEY_PATH: &str = "TytoDB/.secret";
+pub const DATABASE_PATH: &str = "TytoDB";
 
-
-
-const SECRET_KEY_PATH : &str = "TytoDB/.secret";
-pub const DATABASE_PATH : &str = "TytoDB";
-
-pub fn database_path() -> String{
+pub fn database_path() -> String {
     let first = std::env::var("HOME").unwrap();
-    return format!("{}/{}",first,DATABASE_PATH)
+    return format!("{}/{}", first, DATABASE_PATH);
 }
-fn secret_key_path() -> String{
+fn secret_key_path() -> String {
     let first = std::env::var("HOME").unwrap();
-    return format!("{}/{}",first,SECRET_KEY_PATH)
+    return format!("{}/{}", first, SECRET_KEY_PATH);
 }
 /////////////////////////////////////////////////
 /////////////////////////////////////////////////
@@ -82,8 +94,8 @@ pub enum Schedule {
     Duration(Duration), // For "X minutes/hours/months/years/decades"
     NextTime(Duration), // For "HH:MM:SS"
     NextMonthDayTime(u8, u8, NaiveTime, Duration), // For "M/D HH:MM:SS"
-    Random(i64, i64), // For "Random N:M"
-    Once, // For "Once"
+    Random(i64, i64),   // For "Random N:M"
+    Once,               // For "Once"
 }
 
 #[derive(Debug, PartialEq)]
@@ -130,9 +142,6 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
         return Ok(Schedule::NextTime(duration));
     }
 
-    
-
-
     if let Some((date_str, time_str)) = input.split_once(' ') {
         if let Some((month_str, day_str)) = date_str.split_once('/') {
             if let (Ok(month), Ok(day)) = (month_str.parse::<u8>(), day_str.parse::<u8>()) {
@@ -146,13 +155,15 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
                         NaiveDate::from_ymd_opt(current_year, month as u32, day as u32)
                             .ok_or(ScheduleError::InvalidDate)?;
                     if target_date < today {
-                        target_date = NaiveDate::from_ymd_opt(current_year + 1, month as u32, day as u32)
-                            .ok_or(ScheduleError::InvalidDate)?;
+                        target_date =
+                            NaiveDate::from_ymd_opt(current_year + 1, month as u32, day as u32)
+                                .ok_or(ScheduleError::InvalidDate)?;
                     }
                     let target = NaiveDateTime::new(target_date, time);
                     if target <= now.naive_local() {
-                        target_date = NaiveDate::from_ymd_opt(current_year + 1, month as u32, day as u32)
-                            .ok_or(ScheduleError::InvalidDate)?;
+                        target_date =
+                            NaiveDate::from_ymd_opt(current_year + 1, month as u32, day as u32)
+                                .ok_or(ScheduleError::InvalidDate)?;
                     }
                     let final_target = NaiveDateTime::new(target_date, time);
                     let duration = final_target.signed_duration_since(now.naive_local());
@@ -179,7 +190,7 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
     if input.to_lowercase() == "once" {
         return Ok(Schedule::Once);
     }
-    
+
     Err(ScheduleError::InvalidFormat)
 }
 
@@ -188,10 +199,10 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
 /////////////////////////////////////////////////
 
 #[repr(C)]
-pub struct WriteEntryC{
-    pub buffer : *const u8,
-    pub length : usize,
-    pub offset : i64,
+pub struct WriteEntryC {
+    pub buffer: *const u8,
+    pub length: usize,
+    pub offset: i64,
 }
 
 // #[repr(C)]
@@ -208,17 +219,17 @@ pub struct WriteEntryC{
 // }
 
 #[derive(Clone)]
-pub struct WriteEntry{
-    pub buffer : Arc<Vec<u8>>,
-    pub length : usize,
-    pub offset : i64,
+pub struct WriteEntry {
+    pub buffer: Arc<Vec<u8>>,
+    pub length: usize,
+    pub offset: i64,
 }
-impl WriteEntry{
-    fn to_c(&self) -> WriteEntryC{
-        WriteEntryC{
-            buffer : self.buffer.as_slice().as_ptr(),
-            length : self.length,
-            offset : self.offset,
+impl WriteEntry {
+    fn to_c(&self) -> WriteEntryC {
+        WriteEntryC {
+            buffer: self.buffer.as_slice().as_ptr(),
+            length: self.length,
+            offset: self.offset,
         }
     }
 }
@@ -247,30 +258,25 @@ unsafe extern "C" {
 
 pub fn batch_write_data(entries: Vec<WriteEntry>, len: usize, file: c_int) -> i32 {
     let c_buffer: Vec<WriteEntryC> = entries.iter().map(|f| f.to_c()).collect();
-    
-    unsafe {
-        batch_write_data_c(c_buffer.as_ptr(), len, file)
-    }
+
+    unsafe { batch_write_data_c(c_buffer.as_ptr(), len, file) }
 }
 
-
-pub struct Database{
-    location : String,
-    settings : Settings,
-    containers : Vec<String>,
-    headers : Vec<(Vec<String>,Vec<AlbaTypes>)>,
-    pub container : HashMap<String,Arc<Mutex<Container>>>,
+pub struct Database {
+    location: String,
+    settings: Settings,
+    containers: Vec<String>,
+    headers: Vec<(Vec<String>, Vec<AlbaTypes>)>,
+    pub container: HashMap<String, Arc<Mutex<Container>>>,
 }
 
+const SETTINGS_FILE: &str = "settings.yaml";
 
-const SETTINGS_FILE : &str = "settings.yaml";
-
-
-fn create_container_headers(column_names : Vec<String>,column_values : Vec<AlbaTypes>) -> Vec<u8>{
-    let mut byteload : Vec<u8> = Vec::new();
+fn create_container_headers(column_names: Vec<String>, column_values: Vec<AlbaTypes>) -> Vec<u8> {
+    let mut byteload: Vec<u8> = Vec::new();
     let len = column_names.len();
     byteload.extend_from_slice(&(len as u64).to_le_bytes());
-    for i in column_names.into_iter().zip(column_values){
+    for i in column_names.into_iter().zip(column_values) {
         let size = i.0.len() as u64;
         let mut b = Vec::new();
         b.extend_from_slice(&size.to_le_bytes());
@@ -280,10 +286,10 @@ fn create_container_headers(column_names : Vec<String>,column_values : Vec<AlbaT
     }
     byteload
 }
-fn get_container_headers(file : &File) -> Result<(Vec<String>,Vec<AlbaTypes>,u64),Error>{
+fn get_container_headers(file: &File) -> Result<(Vec<String>, Vec<AlbaTypes>, u64), Error> {
     let mut offset = 0u64;
     let column_count = {
-        let mut buf = [0u8;8];
+        let mut buf = [0u8; 8];
         file.read_exact_at(&mut buf, offset)?;
         offset += 8;
         u64::from_le_bytes(buf)
@@ -292,17 +298,17 @@ fn get_container_headers(file : &File) -> Result<(Vec<String>,Vec<AlbaTypes>,u64
     let mut col_nam = Vec::new();
     let mut col_val = Vec::new();
 
-    for _ in 0..column_count{
-        let mut size_len = [0u8;8];
+    for _ in 0..column_count {
+        let mut size_len = [0u8; 8];
         file.read_exact_at(&mut size_len, offset)?;
         let str_size = u64::from_le_bytes(size_len);
         offset += 8;
 
-        let mut str_buff = vec![0u8;str_size as usize];
+        let mut str_buff = vec![0u8; str_size as usize];
         file.read_exact_at(&mut str_buff, offset)?;
         offset += str_size;
 
-        let mut column_type_buffer = [0u8;1];
+        let mut column_type_buffer = [0u8; 1];
         file.read_exact_at(&mut column_type_buffer, offset)?;
         offset += 1;
 
@@ -311,58 +317,55 @@ fn get_container_headers(file : &File) -> Result<(Vec<String>,Vec<AlbaTypes>,u64
         col_nam.push(column_name);
         col_val.push(column_type);
     }
-    Ok((col_nam,col_val,offset))
+    Ok((col_nam, col_val, offset))
 }
 
-impl Database{
+impl Database {
     fn set_default_settings(&self) -> Result<(), Error> {
         let path = format!("{}/{}", self.location, SETTINGS_FILE);
-        
+
         if fs::metadata(&path).is_err() {
-            
             let mut file = fs::File::create_new(&path)?;
-            
+
             let content = DEFAULT_SETTINGS.to_string();
-            
+
             file.write_all(content.as_bytes())?;
-            
-        } 
+        }
         Ok(())
     }
-    
+
     fn load_containers(&mut self) -> Result<(), Error> {
-         let path = format!("{}/containers.yaml", &self.location);
+        let path = format!("{}/containers.yaml", &self.location);
         if !fs::exists(&path).unwrap() {
-            
             let yaml = serde_yaml::to_string(&self.containers)
-                .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string())).unwrap();
+                .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string()))
+                .unwrap();
             let mut file = fs::File::create_new(path).unwrap();
             file.write_all(&yaml.as_bytes()).unwrap();
-            
+
             return Ok(());
         }
         let mut file = fs::File::open(path).unwrap();
-        
+
         let mut raw = String::new();
         file.read_to_string(&mut raw).unwrap();
-        
+
         self.containers = serde_yaml::from_str(&raw)
-            .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string())).unwrap();
-        
+            .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .unwrap();
+
         self.headers.clear();
-        
+
         for contain in self.containers.iter() {
-            
-            let (he,header_offset) = self.get_container_headers(&contain).unwrap();
-            
+            let (he, header_offset) = self.get_container_headers(&contain).unwrap();
+
             self.headers.push(he.clone());
-            
+
             let mut element_size: usize = 0;
             for el in he.1.iter() {
                 element_size += el.size();
-                
             }
-            
+
             self.container.insert(
                 contain.to_string(),
                 Container::new(
@@ -370,184 +373,207 @@ impl Database{
                     element_size,
                     he.1,
                     header_offset,
-                    he.0
-                ).unwrap(),
+                    he.0,
+                )
+                .unwrap(),
             );
-            
-        }        
+        }
         Ok(())
     }
-    
+
     fn save_containers(&self) -> Result<(), Error> {
         let path = std::path::PathBuf::from(&self.location).join("containers.yaml");
-        
+
         let yaml = serde_yaml::to_string(&self.containers)
             .map_err(|e| Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-        
+
         fs::remove_file(&path)?;
-        
+
         fs::write(&path, yaml.as_bytes())?;
-        
+
         Ok(())
     }
-    
+
     pub fn commit(&mut self) -> Result<(), Error> {
-        
         for (_, c) in self.container.iter_mut() {
-            
             c.lock().unwrap().commit()?;
-            
         }
-        
+
         Ok(())
     }
-    
+
     pub fn rollback(&mut self) -> Result<(), Error> {
-        
         for (_, c) in self.container.iter_mut() {
-            
             c.lock().unwrap().rollback()?;
-            
         }
-        
+
         Ok(())
     }
-    
+
     pub fn setup(&self) -> Result<(), Error> {
         let db_path = database_path();
-        
+
         if !std::fs::exists(&db_path)? {
-            
             std::fs::create_dir(&db_path)?;
-            
         }
         Ok(())
     }
-    
+
     fn load_settings(&mut self) -> Result<(), Error> {
         let dir = PathBuf::from(&self.location);
-        
+
         let path = dir.join(SETTINGS_FILE);
-        
+
         fs::create_dir_all(&dir)?;
-        
+
         if path.exists() && fs::metadata(&path)?.is_dir() {
-            
             fs::remove_dir(&path)?;
-            
         }
         if !path.is_file() {
-            
             self.set_default_settings()?;
-            
         }
         let mut rewrite = false;
-        
-        let raw = fs::read_to_string(&path)
-            .map_err(|e| Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e)))?;
-        
-        let mut settings: Settings = serde_yaml::from_str(&raw)
-            .map_err(|e| Error::new(ErrorKind::InvalidData, format!("Invalid {}: {}", SETTINGS_FILE, e)))?;
-        
+
+        let raw = fs::read_to_string(&path).map_err(|e| {
+            Error::new(e.kind(), format!("Failed to read {}: {}", SETTINGS_FILE, e))
+        })?;
+
+        let mut settings: Settings = serde_yaml::from_str(&raw).map_err(|e| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Invalid {}: {}", SETTINGS_FILE, e),
+            )
+        })?;
+
         if settings.max_columns <= settings.min_columns {
-            eprintln!("Failed to load settings, rewriting.\nERROR: \"max_columns\" cannot be equal nor lower than \"min_columns\".");
+            eprintln!(
+                "Failed to load settings, rewriting.\nERROR: \"max_columns\" cannot be equal nor lower than \"min_columns\"."
+            );
             settings.min_columns = 1;
             rewrite = true;
         }
         if settings.max_columns <= 1 {
-            eprintln!("Failed to load settings, rewriting.\nERROR: \"max_columns\" cannot be 1 nor lower.");
+            eprintln!(
+                "Failed to load settings, rewriting.\nERROR: \"max_columns\" cannot be 1 nor lower."
+            );
             settings.max_columns = 10;
             rewrite = true;
         }
         if settings.min_columns > settings.max_columns {
-            eprintln!("Failed to load settings, rewriting.\nERROR: \"min_columns\" count cannot be higher than \"max_column\"."); 
+            eprintln!(
+                "Failed to load settings, rewriting.\nERROR: \"min_columns\" count cannot be higher than \"max_column\"."
+            );
             settings.min_columns = 1;
             rewrite = true;
         }
         if settings.workers < 1 {
-            eprintln!("Failed to load settings, rewriting.\nERROR: \"workers\" cannot be lower than zero.");
+            eprintln!(
+                "Failed to load settings, rewriting.\nERROR: \"workers\" cannot be lower than zero."
+            );
             settings.workers = 1;
             rewrite = true;
         }
-       
+
         if rewrite {
-            
             let new_yaml = serde_yaml::to_string(&settings)
                 .map_err(|e| Error::new(ErrorKind::Other, format!("Serialize failed: {}", e)))?;
-            
-            fs::write(&path, new_yaml)
-                .map_err(|e| Error::new(e.kind(), format!("Failed to rewrite {}: {}", SETTINGS_FILE, e)))?;
-            
+
+            fs::write(&path, new_yaml).map_err(|e| {
+                Error::new(
+                    e.kind(),
+                    format!("Failed to rewrite {}: {}", SETTINGS_FILE, e),
+                )
+            })?;
         }
         self.settings = settings;
-        
+
         Ok(())
     }
-    
-    fn get_container_headers(&self, container_name: &str) -> Result<((Vec<String>, Vec<AlbaTypes>),u64), Error> {
+
+    fn get_container_headers(
+        &self,
+        container_name: &str,
+    ) -> Result<((Vec<String>, Vec<AlbaTypes>), u64), Error> {
         let path = format!("{}/{}", self.location, container_name);
         let exists = fs::exists(&path)?;
-        
+
         if exists {
             let mut file = fs::File::open(&path)?;
             let val = get_container_headers(&mut file)?;
-            return Ok(((val.0,val.1),val.2 as u64))
+            return Ok(((val.0, val.1), val.2 as u64));
         }
-        
+
         Err(gerr("Container not found"))
     }
     pub fn run(&mut self, ast: AST) -> Result<Query, Error> {
         let min_column: usize = (self.settings.min_columns as usize).max(1);
         let max_columns: usize = self.settings.max_columns as usize;
-        
+
         match ast {
             AST::CreateContainer(structure) => {
-                if structure.name.len() > 60{
-                    return Err(gerr(&format!("Failed to create container, the maximum length of a container name is 60, the entered is {}",structure.name.len())))
+                if structure.name.len() > 60 {
+                    return Err(gerr(&format!(
+                        "Failed to create container, the maximum length of a container name is 60, the entered is {}",
+                        structure.name.len()
+                    )));
                 }
-                if structure.col_nam.len() != structure.col_val.len(){
-                    return Err(gerr("Failed to create container, the count of names does not match to the count of values"))
+                if structure.col_nam.len() != structure.col_val.len() {
+                    return Err(gerr(
+                        "Failed to create container, the count of names does not match to the count of values",
+                    ));
                 }
-                if structure.col_val.len() == 0{
-                    return Err(gerr(&format!("Failed to create container, it must have at least {}",min_column)))
+                if structure.col_val.len() == 0 {
+                    return Err(gerr(&format!(
+                        "Failed to create container, it must have at least {}",
+                        min_column
+                    )));
                 }
-                if structure.col_val.len() > max_columns{
-                    return Err(gerr("Failed to create container, the count of columns are higher than the maximum set on the settings file."));
+                if structure.col_val.len() > max_columns {
+                    return Err(gerr(
+                        "Failed to create container, the count of columns are higher than the maximum set on the settings file.",
+                    ));
                 }
-                let path = format!("{}/{}",self.location,structure.name);
-                if self.container.get(&structure.name).is_some() || fs::exists(&path).unwrap(){
-                    return Err(gerr("Failed to create container, there is already a container with this name or a file with this name on the container directory."))
+                let path = format!("{}/{}", self.location, structure.name);
+                if self.container.get(&structure.name).is_some() || fs::exists(&path).unwrap() {
+                    return Err(gerr(
+                        "Failed to create container, there is already a container with this name or a file with this name on the container directory.",
+                    ));
                 }
                 let mut file = fs::File::create_new(&path).unwrap();
-                let mut el : usize = 0;
-                for i in structure.col_val.iter(){
+                let mut el: usize = 0;
+                for i in structure.col_val.iter() {
                     el += i.size()
                 }
 
-                file.write_all(&create_container_headers( structure.col_nam.clone(), structure.col_val.clone())).unwrap();
+                file.write_all(&create_container_headers(
+                    structure.col_nam.clone(),
+                    structure.col_val.clone(),
+                ))
+                .unwrap();
                 self.containers.push(structure.name.clone());
-                
+
                 let c = Container::new(
                     &path,
                     el,
                     structure.col_val,
                     file.metadata()?.len(),
-                    structure.col_nam
+                    structure.col_nam,
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
-            },
+            }
             AST::CreateRow(structure) => {
                 let mut container = match self.container.get_mut(&structure.container) {
                     None => {
-                        
-                        return Err(gerr(&format!("Container '{}' does not exist.", structure.container)));
-                    },
+                        return Err(gerr(&format!(
+                            "Container '{}' does not exist.",
+                            structure.container
+                        )));
+                    }
                     Some(a) => a.lock().unwrap(),
                 };
-                
+
                 if structure.col_nam.len() != structure.col_val.len() {
-                    
                     return Err(gerr(&format!(
                         "In CREATE ROW, expected {} values for the specified columns, but got {}",
                         structure.col_nam.len(),
@@ -555,27 +581,27 @@ impl Database{
                     )));
                 }
 
-                let mut val  = container.columns();
+                let mut val = container.columns();
 
                 let mut id_map = HashMap::new();
-                for i in container.column_names().into_iter().enumerate(){
+                for i in container.column_names().into_iter().enumerate() {
                     id_map.insert(i.1, i.0);
                 }
 
-                for i in structure.col_nam.into_iter().enumerate(){
+                for i in structure.col_nam.into_iter().enumerate() {
                     let val1 = &structure.col_val[i.0];
-                    if let Some(a) = id_map.get(&i.1){
+                    if let Some(a) = id_map.get(&i.1) {
                         val[*a] = val1.clone();
                     }
                 }
 
-                container.push_row(val)?;                
-            },
+                container.push_row(val)?;
+            }
             AST::Search(structure) => {
-                let container = if let Some(a) = self.container.get(&structure.container){
+                let container = if let Some(a) = self.container.get(&structure.container) {
                     a
-                }else{
-                    return Err(gerr("There is no container with the given name"))
+                } else {
+                    return Err(gerr("There is no container with the given name"));
                 };
                 let sa = {
                     let c = container.clone();
@@ -583,47 +609,58 @@ impl Database{
 
                     let col_prop = {
                         let mut h = HashMap::new();
-                        for i in sa.headers.clone(){
-                            h.insert(i.0,i.1);
+                        for i in sa.headers.clone() {
+                            h.insert(i.0, i.1);
                         }
                         h
                     };
                     let pk = sa.headers[0].0.clone();
-                    SearchArguments { 
+                    SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
                         file: sa.file.clone(),
-                        conditions: QueryConditions::from_primitive_conditions(structure.conditions,&col_prop,pk)?
+                        conditions: QueryConditions::from_primitive_conditions(
+                            structure.conditions,
+                            &col_prop,
+                            pk,
+                        )?,
                     }
                 };
                 let mut rows = search(container.clone(), sa)?.0;
-                let cn = {container.lock().unwrap().column_names().clone()};
-                if structure.col_nam.len() != cn.len(){
-                let mut index_map = HashMap::with_capacity(cn.len());
-                let mut ide = Vec::with_capacity(cn.len());
-                for i in cn.into_iter().enumerate(){index_map.insert(i.1,i.0);}
-                    for i in structure.col_nam.iter(){
-                        if let Some(a) = index_map.get(i){
-                                ide.push(*a);
+                let cn = { container.lock().unwrap().column_names().clone() };
+                if structure.col_nam.len() != cn.len() {
+                    let mut index_map = HashMap::with_capacity(cn.len());
+                    let mut ide = Vec::with_capacity(cn.len());
+                    for i in cn.into_iter().enumerate() {
+                        index_map.insert(i.1, i.0);
+                    }
+                    for i in structure.col_nam.iter() {
+                        if let Some(a) = index_map.get(i) {
+                            ide.push(*a);
                         }
                     }
-                    rows = rows.into_iter().map(|f|{
-                        let mut val = Vec::with_capacity(ide.len());
-                        for i in ide.iter(){
-                            val.push(f.data[*i].to_owned());
-                        }
-                        Row{data:val}
-                    }).collect();
+                    rows = rows
+                        .into_iter()
+                        .map(|f| {
+                            let mut val = Vec::with_capacity(ide.len());
+                            for i in ide.iter() {
+                                val.push(f.data[*i].to_owned());
+                            }
+                            Row { data: val }
+                        })
+                        .collect();
                 }
-                let q = Query { rows: (structure.col_nam.clone(),rows ) };
-                
-                return Ok(q)
-            },
+                let q = Query {
+                    rows: (structure.col_nam.clone(), rows),
+                };
+
+                return Ok(q);
+            }
             AST::EditRow(structure) => {
-                let container = if let Some(a) = self.container.get(&structure.container){
+                let container = if let Some(a) = self.container.get(&structure.container) {
                     a
-                }else{
-                    return Err(gerr("There is no container with the given name"))
+                } else {
+                    return Err(gerr("There is no container with the given name"));
                 };
                 let sa = {
                     let c = container.clone();
@@ -631,27 +668,37 @@ impl Database{
 
                     let col_prop = {
                         let mut h = HashMap::new();
-                        for i in sa.headers.clone(){
-                            h.insert(i.0,i.1);
+                        for i in sa.headers.clone() {
+                            h.insert(i.0, i.1);
                         }
                         h
                     };
                     let pk = sa.headers[0].0.clone();
-                    SearchArguments { 
+                    SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
                         file: sa.file.clone(),
-                        conditions: QueryConditions::from_primitive_conditions(structure.conditions,&col_prop,pk)?
+                        conditions: QueryConditions::from_primitive_conditions(
+                            structure.conditions,
+                            &col_prop,
+                            pk,
+                        )?,
                     }
                 };
-                search_with_action(container.clone(),sa,ActionType::Edit((structure.col_nam,structure.col_val)))?;                 
-                return Ok(Query { rows: (vec![],vec![]) })
-            },
+                search_with_action(
+                    container.clone(),
+                    sa,
+                    ActionType::Edit((structure.col_nam, structure.col_val)),
+                )?;
+                return Ok(Query {
+                    rows: (vec![], vec![]),
+                });
+            }
             AST::DeleteRow(structure) => {
-                let container = if let Some(a) = self.container.get(&structure.container){
+                let container = if let Some(a) = self.container.get(&structure.container) {
                     a
-                }else{
-                    return Err(gerr("There is no container with the given name"))
+                } else {
+                    return Err(gerr("There is no container with the given name"));
                 };
                 let sa = {
                     let c = container.clone();
@@ -659,39 +706,46 @@ impl Database{
 
                     let col_prop = {
                         let mut h = HashMap::new();
-                        for i in sa.headers.clone(){
-                            h.insert(i.0,i.1);
+                        for i in sa.headers.clone() {
+                            h.insert(i.0, i.1);
                         }
                         h
                     };
                     let pk = sa.headers[0].0.clone();
-                    SearchArguments { 
+                    SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
                         file: sa.file.clone(),
-                        conditions: QueryConditions::from_primitive_conditions(if let Some(a) = structure.conditions{a}else{(Vec::new(),Vec::new())},&col_prop,pk)?
+                        conditions: QueryConditions::from_primitive_conditions(
+                            if let Some(a) = structure.conditions {
+                                a
+                            } else {
+                                (Vec::new(), Vec::new())
+                            },
+                            &col_prop,
+                            pk,
+                        )?,
                     }
                 };
-                
-                search_with_action(container.clone(),sa,ActionType::Delete)?;                
-                return Ok(Query{rows:(Vec::new(),Vec::new())})
-            },
+
+                search_with_action(container.clone(), sa, ActionType::Delete)?;
+                return Ok(Query {
+                    rows: (Vec::new(), Vec::new()),
+                });
+            }
             AST::DeleteContainer(structure) => {
-                
                 if self.containers.contains(&structure.container) {
                     let mut ind = Vec::new();
                     for (i, name) in self.containers.iter().enumerate() {
                         if structure.container == *name {
                             ind.push(i);
-                            
                         }
                     }
                     for i in ind {
                         self.containers.remove(i);
-                        
                     }
                     self.container.remove(&structure.container);
-                    
+
                     let path = format!("{}/{}", self.location, structure.container);
                     let _ = std::fs::remove_file(path.clone());
                     let path = format!("{}/{}.index", self.location, structure.container);
@@ -701,67 +755,55 @@ impl Database{
                     let path = format!("{}/{}.mr", self.location, structure.container);
                     let _ = std::fs::remove_file(path);
 
-                    
                     self.save_containers()?;
-                    
                 } else {
-                    
-                    return Err(gerr(&format!("There is no database with the name {}", structure.container)));
-                }
-            },
-            AST::Commit(structure) => {
-                
-                match structure.container {
-                    Some(container) => {
-                        match self.container.get_mut(&container) {
-                            Some(a) => {
-                                
-                                a.lock().unwrap().commit().unwrap();
-                                
-                                return Ok(Query{rows:(Vec::new(),Vec::new())});
-                            },
-                            None => {
-                                
-                                return Err(gerr(&format!("There is no container named {}", container)));
-                            }
-                        }
-                    },
-                    None => {
-                        
-                        self.commit()?;
-                        
-                    }
-                }
-            },
-            AST::Rollback(structure) => {
-                
-                match structure.container {
-                    Some(container) => {
-                        match self.container.get_mut(&container) {
-                            Some(a) => {
-                                
-                                a.lock().unwrap().rollback()?;
-                                
-                                return Ok(Query{rows:(Vec::new(),Vec::new())});
-                            },
-                            None => {
-                                
-                                return Err(gerr(&format!("There is no container named {}", container)));
-                            }
-                        }
-                    },
-                    None => {
-                        
-                        self.rollback()?;
-                        
-                    }
+                    return Err(gerr(&format!(
+                        "There is no database with the name {}",
+                        structure.container
+                    )));
                 }
             }
+            AST::Commit(structure) => match structure.container {
+                Some(container) => match self.container.get_mut(&container) {
+                    Some(a) => {
+                        a.lock().unwrap().commit().unwrap();
+
+                        return Ok(Query {
+                            rows: (Vec::new(), Vec::new()),
+                        });
+                    }
+                    None => {
+                        return Err(gerr(&format!("There is no container named {}", container)));
+                    }
+                },
+                None => {
+                    self.commit()?;
+                }
+            },
+            AST::Rollback(structure) => match structure.container {
+                Some(container) => match self.container.get_mut(&container) {
+                    Some(a) => {
+                        a.lock().unwrap().rollback()?;
+
+                        return Ok(Query {
+                            rows: (Vec::new(), Vec::new()),
+                        });
+                    }
+                    None => {
+                        return Err(gerr(&format!("There is no container named {}", container)));
+                    }
+                },
+                None => {
+                    self.rollback()?;
+                }
+            },
         }
-        
-        Ok(Query{rows: (Vec::new(),Vec::new())})
+
+        Ok(Query {
+            rows: (Vec::new(), Vec::new()),
+        })
     }
-    
+
     // pub fn execute(&mut self, input: &str, arguments: Vec<String>) -> Result<Query, Error> {
     //     let ast = parse(input.to_owned(), arguments)?;
     //     let result = self.run(ast)?;
@@ -769,11 +811,11 @@ impl Database{
     // }
 }
 
-pub fn connect() -> Result<Database, Error>{
+pub fn connect() -> Result<Database, Error> {
     let dbp = database_path();
-    let path : &str = if dbp.ends_with('/') {
-        &dbp[..dbp.len()-1]
-    }else{
+    let path: &str = if dbp.ends_with('/') {
+        &dbp[..dbp.len() - 1]
+    } else {
         &dbp
     };
 
@@ -793,22 +835,32 @@ pub fn connect() -> Result<Database, Error>{
     //     start_strix(strix.clone());
     // }
 
-    let mut db = Database{location:database_path().to_string(),settings:Default::default(),containers:Vec::new(),headers:Vec::new(),container:HashMap::new()};
+    let mut db = Database {
+        location: database_path().to_string(),
+        settings: Default::default(),
+        containers: Vec::new(),
+        headers: Vec::new(),
+        container: HashMap::new(),
+    };
     db.setup()?;
-    if let Err(e) = db.load_settings(){
+    if let Err(e) = db.load_settings() {
         logerr!("err: load_settings");
-        return Err(e)
-    };if let Err(e) = db.load_containers(){
+        return Err(e);
+    };
+    if let Err(e) = db.load_containers() {
         logerr!("err: load_containers");
-        return Err(e)
+        return Err(e);
     };
     //
-    return Ok(db)
+    return Ok(db);
 }
 
-
-use tytodb_client::{commands::Commands as commands, db_response::{DBResponse, Row as NetRow}, logical_operators::LogicalOperator};
 use tytodb_client::types::AlbaTypes as NetworkAlbaTypes;
+use tytodb_client::{
+    commands::Commands as commands,
+    db_response::{DBResponse, Row as NetRow},
+    logical_operators::LogicalOperator,
+};
 
 fn ab_from_nat(a: NetworkAlbaTypes) -> AlbaTypes {
     match a {
@@ -824,6 +876,8 @@ fn ab_from_nat(a: NetworkAlbaTypes) -> AlbaTypes {
         NetworkAlbaTypes::I32(a) => AlbaTypes::Int(a),
         NetworkAlbaTypes::I64(a) => AlbaTypes::Bigint(a),
         NetworkAlbaTypes::Bytes(items) => AlbaTypes::LargeBytes(items),
+        NetworkAlbaTypes::I128(a) => AlbaTypes::HugeInt(a),
+        NetworkAlbaTypes::Geo(a) => AlbaTypes::Geo(a),
     }
 }
 
@@ -844,12 +898,12 @@ fn ab_to_nat(a: AlbaTypes) -> NetworkAlbaTypes {
         AlbaTypes::UNanoInt(a) => NetworkAlbaTypes::U8(a),
         AlbaTypes::Short(a) => NetworkAlbaTypes::I32(a as i32),
         AlbaTypes::UShort(a) => NetworkAlbaTypes::U16(a),
-        AlbaTypes::HugeInt(a) => NetworkAlbaTypes::String(a.to_string()),
+        AlbaTypes::HugeInt(a) => NetworkAlbaTypes::I128(a),
         AlbaTypes::UHugeInt(a) => NetworkAlbaTypes::U128(a),
         AlbaTypes::Float(a) => NetworkAlbaTypes::F64(a),
         AlbaTypes::Bool(a) => NetworkAlbaTypes::Bool(a),
         AlbaTypes::Char(a) => NetworkAlbaTypes::String(a.to_string()),
-        AlbaTypes::Geo((lat, lon)) => NetworkAlbaTypes::String(format!("({}, {})", lat, lon)),
+        AlbaTypes::Geo((lat, lon)) => NetworkAlbaTypes::Geo((lat, lon)),
         AlbaTypes::NanoBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::SmallBytes(a) => NetworkAlbaTypes::Bytes(a),
         AlbaTypes::MediumBytes(a) => NetworkAlbaTypes::Bytes(a),
@@ -867,17 +921,23 @@ fn ab_to_nat(a: AlbaTypes) -> NetworkAlbaTypes {
     }
 }
 
-fn abl_to_nat(a : Vec<AlbaTypes>) -> Vec<NetworkAlbaTypes>{
-    a.iter().map(|f|ab_to_nat(f.to_owned())).collect()
+fn abl_to_nat(a: Vec<AlbaTypes>) -> Vec<NetworkAlbaTypes> {
+    a.iter().map(|f| ab_to_nat(f.to_owned())).collect()
 }
 
-fn query_to_bytes(q : Query) -> Vec<u8>{
-    let a = row_list_to_bytes(q.rows.1.iter().map(|f|NetRow::new(abl_to_nat(f.data.to_owned()))).collect());
+fn query_to_bytes(q: Query) -> Vec<u8> {
+    let a = row_list_to_bytes(
+        q.rows
+            .1
+            .iter()
+            .map(|f| NetRow::new(abl_to_nat(f.data.to_owned())))
+            .collect(),
+    );
     a
 }
 
-fn row_list_to_bytes(a : Vec<tytodb_client::db_response::Row>) -> Vec<u8>{
-   DBResponse::new(a).encode()
+fn row_list_to_bytes(a: Vec<tytodb_client::db_response::Row>) -> Vec<u8> {
+    DBResponse::new(a).encode()
 }
 
 fn alba_types_to_token(alba_type: AlbaTypes) -> Token {
@@ -919,226 +979,301 @@ fn alba_types_to_token(alba_type: AlbaTypes) -> Token {
         AlbaTypes::UHugeInt(u) => Token::UHuge(u as u128),
     }
 }
-fn conditions_to_tyto_db(t: (Vec<(String, LogicalOperator, NetworkAlbaTypes)>, Vec<(usize, char)>)) -> (Vec<(Token, Token, Token)>, Vec<(usize, char)>) {
-    let a = (t.0.iter().map(|f| {
-        (
-            Token::String(f.0.clone()),
-            Token::Operator(match f.1 {
-                LogicalOperator::Equal => "=".to_string(),
-                LogicalOperator::Diferent => "!=".to_string(),
-                LogicalOperator::Higher => ">".to_string(),
-                LogicalOperator::Lower => "<".to_string(),
-                LogicalOperator::HigherEquality => ">=".to_string(),
-                LogicalOperator::LowerEquality => "<=".to_string(),
-                LogicalOperator::StringContains => "&>".to_string(),
-                LogicalOperator::StringContainsInsensitive => "&&>".to_string(),
-                LogicalOperator::StringRegex => "&&&>".to_string(),
-            }),
-            (alba_types_to_token(ab_from_nat(f.2.clone()))) // Convert AlbaTypes to Token
-        )
-    }).collect(), t.1.iter().map(|f|{(f.0 , f.1)}).collect());
+fn conditions_to_tyto_db(
+    t: (
+        Vec<(String, LogicalOperator, NetworkAlbaTypes)>,
+        Vec<(usize, char)>,
+    ),
+) -> (Vec<(Token, Token, Token)>, Vec<(usize, char)>) {
+    let a = (
+        t.0.iter()
+            .map(|f| {
+                (
+                    Token::String(f.0.clone()),
+                    Token::Operator(match f.1 {
+                        LogicalOperator::Equal => "=".to_string(),
+                        LogicalOperator::Diferent => "!=".to_string(),
+                        LogicalOperator::Higher => ">".to_string(),
+                        LogicalOperator::Lower => "<".to_string(),
+                        LogicalOperator::HigherEquality => ">=".to_string(),
+                        LogicalOperator::LowerEquality => "<=".to_string(),
+                        LogicalOperator::StringContains => "&>".to_string(),
+                        LogicalOperator::StringContainsInsensitive => "&&>".to_string(),
+                        LogicalOperator::StringRegex => "&&&>".to_string(),
+                    }),
+                    (alba_types_to_token(ab_from_nat(f.2.clone()))), // Convert AlbaTypes to Token
+                )
+            })
+            .collect(),
+        t.1.iter().map(|f| (f.0, f.1)).collect(),
+    );
     a
 }
 use falcotcp::Server;
 
-
-fn process(mtx_db : &'static Arc<Mutex<Database>>,c : commands) -> Result<Query,Vec<u8>>{
-    Ok(match c{
+fn process(mtx_db: &'static Arc<Mutex<Database>>, c: commands) -> Result<Query, Vec<u8>> {
+    Ok(match c {
         commands::Batch(batch_batch) => {
             let mut que = Vec::new();
-            for i in batch_batch.commands{
-                let prrperpoewr = process(mtx_db,i);
-                match prrperpoewr{
+            for i in batch_batch.commands {
+                let prrperpoewr = process(mtx_db, i);
+                match prrperpoewr {
                     Ok(a) => que.push(a),
                     Err(e) => {
-                        if batch_batch.transaction{
-                            if let Err(e) = mtx_db.lock().unwrap().rollback(){
+                        if batch_batch.transaction {
+                            if let Err(e) = mtx_db.lock().unwrap().rollback() {
                                 let mut b = vec![1u8];
                                 b.extend_from_slice(&e.to_string().as_bytes());
-                                return Err(b)
+                                return Err(b);
                             };
                         }
-                        return Err(e)
+                        return Err(e);
                     }
                 };
             }
-            if batch_batch.transaction{
-                if let Err(e) = mtx_db.lock().unwrap().commit(){
+            if batch_batch.transaction {
+                if let Err(e) = mtx_db.lock().unwrap().commit() {
                     let mut b = vec![1u8];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 };
             }
-            let mut q = if let Some(a) = que.first(){
+            let mut q = if let Some(a) = que.first() {
                 a.to_owned()
-            }else{
-                return Ok(Query{rows:(Vec::new(),Vec::new())})
+            } else {
+                return Ok(Query {
+                    rows: (Vec::new(), Vec::new()),
+                });
             };
-            if que.len() > 2{
-                for i in 0..que.len()-2{
+            if que.len() > 2 {
+                for i in 0..que.len() - 2 {
                     q.rows.1.extend_from_slice(&que[i].rows.1);
                 }
             }
             q
-        },
+        }
         commands::CreateContainer(create_container) => {
             let mut col_v = Vec::new();
-            for f in create_container.col_val{
-                match AlbaTypes::from_id(f){
+            for f in create_container.col_val {
+                match AlbaTypes::from_id(f) {
                     Ok(a) => {
                         col_v.push(a);
-                    },
+                    }
                     Err(e) => {
                         let mut b = vec![1u8];
                         b.extend_from_slice(&e.to_string().as_bytes());
-                        return Err(b)
+                        return Err(b);
                     }
                 }
             }
             let mut db = mtx_db.lock().unwrap();
-            let c =  db.run(AST::CreateContainer(crate::AstCreateContainer {
+            let c = db.run(AST::CreateContainer(crate::AstCreateContainer {
                 name: create_container.name,
                 col_nam: create_container.col_nam,
-                col_val: col_v
+                col_val: col_v,
             }));
             match c {
                 Ok(mut q) => {
                     q.rows.0.push("success".to_string());
-                    q.rows.1.push(Row{data:vec![AlbaTypes::Bool(true)]});
+                    q.rows.1.push(Row {
+                        data: vec![AlbaTypes::Bool(true)],
+                    });
                     q
                 }
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::CreateRow(create_row) => {
-            match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow{
+            match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow {
                 col_nam: create_row.col_nam,
-                col_val: create_row.col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
-                container: create_row.container
-            })){
+                col_val: create_row
+                    .col_val
+                    .iter()
+                    .map(|f| ab_from_nat(f.clone()))
+                    .collect(),
+                container: create_row.container,
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::BatchCreateRows(create_row) => {
             let mut bururu = None;
-            for col_val in create_row.col_val{
-                match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow{
+            for col_val in create_row.col_val {
+                match mtx_db.lock().unwrap().run(AST::CreateRow(AstCreateRow {
                     col_nam: create_row.col_nam.clone(),
-                    col_val: col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
-                    container: create_row.container.clone()
-                })){
+                    col_val: col_val.iter().map(|f| ab_from_nat(f.clone())).collect(),
+                    container: create_row.container.clone(),
+                })) {
                     Ok(a) => bururu = Some(a),
                     Err(e) => {
-                        let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                        let mut b = vec![
+                            1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114,
+                            115, 32,
+                        ];
                         b.extend_from_slice(&e.to_string().as_bytes());
-                        return Err(b)
+                        return Err(b);
                     }
                 }
             }
-            if let Some(prrrprrrcatapim) = bururu{
+            if let Some(prrrprrrcatapim) = bururu {
                 prrrprrrcatapim
-            }else{
-                let b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
-                return Err(b)
+            } else {
+                let b = vec![
+                    1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32,
+                ];
+                return Err(b);
             }
-        },
+        }
         commands::EditRow(edit_row) => {
-            match mtx_db.lock().unwrap().run(AST::EditRow(AstEditRow{
+            match mtx_db.lock().unwrap().run(AST::EditRow(AstEditRow {
                 col_nam: edit_row.col_nam,
-                col_val: edit_row.col_val.iter().map(|f|{ab_from_nat(f.clone())}).collect(),
+                col_val: edit_row
+                    .col_val
+                    .iter()
+                    .map(|f| ab_from_nat(f.clone()))
+                    .collect(),
                 container: edit_row.container,
-                conditions: conditions_to_tyto_db((edit_row.conditions.0,edit_row.conditions.1.iter().map(|f|{(f.0 as usize,f.1)}).collect()))
-            })){
+                conditions: conditions_to_tyto_db((
+                    edit_row.conditions.0,
+                    edit_row
+                        .conditions
+                        .1
+                        .iter()
+                        .map(|f| (f.0 as usize, f.1))
+                        .collect(),
+                )),
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::DeleteRow(delete_row) => {
-            match mtx_db.lock().unwrap().run(AST::DeleteRow(AstDeleteRow{
+            match mtx_db.lock().unwrap().run(AST::DeleteRow(AstDeleteRow {
                 container: delete_row.container,
-                conditions: if let Some(s) = delete_row.conditions{Some(conditions_to_tyto_db(s))}else{None}
-            })){
+                conditions: if let Some(s) = delete_row.conditions {
+                    Some(conditions_to_tyto_db(s))
+                } else {
+                    None
+                },
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::DeleteContainer(delete_container) => {
-            match mtx_db.lock().unwrap().run(AST::DeleteContainer(AstDeleteContainer{
-                container: delete_container.container,
-            })){
+            match mtx_db
+                .lock()
+                .unwrap()
+                .run(AST::DeleteContainer(AstDeleteContainer {
+                    container: delete_container.container,
+                })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::Search(search) => {
             let mtx_db = &mtx_db;
-            match mtx_db.lock().unwrap().run(AST::Search(AstSearch{
+            match mtx_db.lock().unwrap().run(AST::Search(AstSearch {
                 col_nam: search.col_nam,
                 container: search.container,
-                conditions: conditions_to_tyto_db((search.conditions.0,search.conditions.1.iter().map(|f|{(f.0 as usize ,f.1)}).collect()))
-            })){
+                conditions: conditions_to_tyto_db((
+                    search.conditions.0,
+                    search
+                        .conditions
+                        .1
+                        .iter()
+                        .map(|f| (f.0 as usize, f.1))
+                        .collect(),
+                )),
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::Commit(commit) => {
-            match mtx_db.lock().unwrap().run(AST::Commit(AstCommit{
-                container: commit.container
-            })){
+            match mtx_db.lock().unwrap().run(AST::Commit(AstCommit {
+                container: commit.container,
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
         commands::Rollback(rollback) => {
-            match mtx_db.lock().unwrap().run(AST::Rollback(AstRollback{
+            match mtx_db.lock().unwrap().run(AST::Rollback(AstRollback {
                 container: rollback.container,
-            })){
+            })) {
                 Ok(a) => a,
                 Err(e) => {
-                    let mut b = vec![1u8,73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115, 32];
+                    let mut b = vec![
+                        1u8, 73, 110, 118, 97, 108, 105, 100, 32, 104, 101, 97, 100, 101, 114, 115,
+                        32,
+                    ];
                     b.extend_from_slice(&e.to_string().as_bytes());
-                    return Err(b)
+                    return Err(b);
                 }
             }
-        },
+        }
     })
 }
 
-impl Database{
-    pub fn run_database(self) -> Result<(), Error>{
-        let mut password : [u8;32] = [0u8;32];
-        if fs::exists(secret_key_path()).unwrap(){
-            let mut buffer : Vec<u8> = Vec::new();
-            fs::File::open(secret_key_path()).unwrap().read_to_end(&mut buffer)?;
+impl Database {
+    pub fn run_database(self) -> Result<(), Error> {
+        let mut password: [u8; 32] = [0u8; 32];
+        if fs::exists(secret_key_path()).unwrap() {
+            let mut buffer: Vec<u8> = Vec::new();
+            fs::File::open(secret_key_path())
+                .unwrap()
+                .read_to_end(&mut buffer)?;
             password[0..].copy_from_slice(&buffer);
             // let bv : Vec<Vec<u8>> = val.iter().map(|s|{
             //     match eng.decode(s){
@@ -1148,9 +1283,9 @@ impl Database{
             //         }
             //     }
             // }).collect();
-        }else{
+        } else {
             let mut file = fs::File::create_new(secret_key_path()).unwrap();
-            let mut bytes: [u8; 32] = [0u8;32];
+            let mut bytes: [u8; 32] = [0u8; 32];
             let mut osr = OsRng;
             osr.try_fill_bytes(&mut bytes).unwrap();
             let _ = file.write_all(&bytes);
@@ -1158,11 +1293,13 @@ impl Database{
             file.sync_all()?;
             password = bytes;
         }
-        let host = format!("{}:{}",self.settings.ip.clone(),self.settings.port.clone());
+        let host = format!(
+            "{}:{}",
+            self.settings.ip.clone(),
+            self.settings.port.clone()
+        );
         let workers = self.settings.workers as usize;
         let mtx_db: &'static Arc<Mutex<Database>> = Box::leak(Box::new(Arc::new(Mutex::new(self))));
-
-        
 
         let db_lock = mtx_db.clone();
         thread::scope(|_| {
@@ -1172,79 +1309,100 @@ impl Database{
                 ldb.settings.vacuum.clone()
             };
             let mut once = Vec::new();
-            let vacuum_settings : Vec<(String,String)> = vacuum_settings.into_iter().filter(|f| { if f.1.to_lowercase().contains("once"){once.push(f.clone());false}else{true} }).collect();
-            if !once.is_empty(){
+            let vacuum_settings: Vec<(String, String)> = vacuum_settings
+                .into_iter()
+                .filter(|f| {
+                    if f.1.to_lowercase().contains("once") {
+                        once.push(f.clone());
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if !once.is_empty() {
                 let db = db.lock().unwrap();
-                for i in once{
-                    if let Some(b) = db.container.get(&i.1){
+                for i in once {
+                    if let Some(b) = db.container.get(&i.1) {
                         let _ = b.lock().unwrap().vacuum();
                     }
                 }
             }
-            loop{
+            loop {
                 let mut vacuum_parsed = Vec::new();
-            
-                for i in vacuum_settings.iter(){
-                    if let Ok(b) = parse_schedule(i.1.as_str()){
-                        vacuum_parsed.push(
-                            (i.0.clone(),
+
+                for i in vacuum_settings.iter() {
+                    if let Ok(b) = parse_schedule(i.1.as_str()) {
+                        vacuum_parsed.push((
+                            i.0.clone(),
                             match b {
-                                Schedule::Duration(duration) => duration.num_seconds().max(0) as u64,
-                                Schedule::NextTime(duration) => duration.num_seconds().max(0) as u64,
-                                Schedule::NextMonthDayTime(_, _, _, duration) => duration.num_seconds().max(0) as u64,
+                                Schedule::Duration(duration) => {
+                                    duration.num_seconds().max(0) as u64
+                                }
+                                Schedule::NextTime(duration) => {
+                                    duration.num_seconds().max(0) as u64
+                                }
+                                Schedule::NextMonthDayTime(_, _, _, duration) => {
+                                    duration.num_seconds().max(0) as u64
+                                }
                                 Schedule::Random(min, max) => {
                                     let min = min.max(0) as u64;
                                     let max = max.max(0) as u64;
                                     rand::rng().random_range(min..max)
                                 }
                                 Schedule::Once => 0,
-                                }
-                         )
-                        )
-                    }else{
+                            },
+                        ))
+                    } else {
                         eprintln!("failed to parse");
                     }
                 }
-                if vacuum_parsed.is_empty(){
+                if vacuum_parsed.is_empty() {
                     break;
                 }
-                vacuum_parsed.sort_by_key(|f|f.1);
+                vacuum_parsed.sort_by_key(|f| f.1);
                 let mut growth = 0;
-                vacuum_parsed = vacuum_parsed.into_iter().map(|f|{let a=(f.0,f.1.saturating_sub(growth));growth+=f.1;a}).collect();
-                for i in vacuum_parsed{ 
-                    thread::sleep(std::time::Duration::from_secs(i.1+1));
+                vacuum_parsed = vacuum_parsed
+                    .into_iter()
+                    .map(|f| {
+                        let a = (f.0, f.1.saturating_sub(growth));
+                        growth += f.1;
+                        a
+                    })
+                    .collect();
+                for i in vacuum_parsed {
+                    thread::sleep(std::time::Duration::from_secs(i.1 + 1));
                     let db = db.lock().unwrap();
-                    if let Some(c) = db.container.get(&i.0){
-                        if let Err(e) = c.lock().unwrap().vacuum(){
-                            eprintln!("{}",e);
+                    if let Some(c) = db.container.get(&i.0) {
+                        if let Err(e) = c.lock().unwrap().vacuum() {
+                            eprintln!("{}", e);
                         };
                     }
                 }
-                
             }
         });
 
-        let message_handler : Box<(dyn Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static)>  = Box::new(move |input: Vec<u8>| {
-            let mut val = vec![0u8];
-            val.extend_from_slice(&query_to_bytes(match commands::decompile(&input){
-                Ok(a) => {
-                    let a = process(mtx_db, a);
-                    match a{
-                        Ok(a) => a,
-                        Err(e) => {return e}
+        let message_handler: Box<(dyn Fn(Vec<u8>) -> Vec<u8> + Send + Sync + 'static)> =
+            Box::new(move |input: Vec<u8>| {
+                let mut val = vec![0u8];
+                val.extend_from_slice(&query_to_bytes(match commands::decompile(&input) {
+                    Ok(a) => {
+                        let a = process(mtx_db, a);
+                        match a {
+                            Ok(a) => a,
+                            Err(e) => return e,
+                        }
                     }
-                    
-                },
-                Err(e) => {
-                    let mut b = vec![1u8];
-                    b.extend_from_slice(e.to_string().as_bytes());
-                    return b
-                }
-            }));
-            val
-        });
+                    Err(e) => {
+                        let mut b = vec![1u8];
+                        b.extend_from_slice(e.to_string().as_bytes());
+                        return b;
+                    }
+                }));
+                val
+            });
         Server::new(host, password, message_handler, (workers).max(1)).unwrap();
-        
+
         Ok(())
     }
 }
