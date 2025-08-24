@@ -14,7 +14,7 @@
 const unsigned long BUCKET_SIZE_MARGIN = 25;
 const unsigned long DEFAULT_BUCKET_SIZE = 240;
 const unsigned long HASHMAP_BLOCK_SIZE = 8;
-const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 8;
+const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 20;
 
 
 void serialize_cell(Cell *const value, unsigned char* buffer){ 
