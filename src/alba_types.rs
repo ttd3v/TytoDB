@@ -1,12 +1,15 @@
-use std::{fmt, io::{Error, ErrorKind}};
+use std::{
+    fmt,
+    io::{Error, ErrorKind},
+};
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 
-use crate::{database::MAX_STR_LEN, Token};
+use crate::{Token, database::MAX_STR_LEN};
 
-#[derive( Clone, PartialEq, Deserialize, Serialize)]
-pub enum AlbaTypes{
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
+pub enum AlbaTypes {
     Text(String),
     Int(i32),
     Bigint(i64),
@@ -23,20 +26,19 @@ pub enum AlbaTypes{
     MediumBytes(Vec<u8>),
     BigSBytes(Vec<u8>),
     LargeBytes(Vec<u8>),
-    
-    LightPassword(Vec<u8>), // [u8;32]
+
+    LightPassword(Vec<u8>),  // [u8;32]
     MediumPassword(Vec<u8>), // [u8;64]
-    HeavyPassword(Vec<u8>), // [u8;128]
-    
+    HeavyPassword(Vec<u8>),  // [u8;128]
+
     Email(String), // max-len 320 (ascii only); overhead -> 2bytes (u16)
 
-    Geo((f64,f64)),
+    Geo((f64, f64)),
     Slice4(Vec<u8>), // [32; u8]
     Slice3(Vec<u8>), // [20; u8]
     Slice2(Vec<u8>), // [16; u8]
     Slice1(Vec<u8>), // [6;u8]
     Slice0(Vec<u8>), // [4;u8]
-
 
     UInt(u32),
     UBigint(u64),
@@ -46,77 +48,153 @@ pub enum AlbaTypes{
     UShort(u16),
     HugeInt(i128),
     UHugeInt(u128),
-    NONE
+    NONE,
 }
 
-fn serialize_closed_string(item_size : usize,s : &String,buffer : &mut Vec<u8>){
+fn serialize_closed_string(item_size: usize, s: &String, buffer: &mut Vec<u8>) {
     let mut bytes = Vec::with_capacity(item_size);
     let size = s.len().to_be_bytes();
     let mut str = s.to_owned();
     let _ = s;
-    
-    if item_size == AlbaTypes::size(&AlbaTypes::Email(String::new())){
-        let mut buff = [0u8;320];
+
+    if item_size == AlbaTypes::size(&AlbaTypes::Email(String::new())) {
+        let mut buff = [0u8; 320];
         let b = if s.is_ascii() {
             s.as_bytes().to_vec()
         } else {
             let u = unidecode::unidecode(&s);
             u.as_bytes().to_vec()
         };
-        buff[..].copy_from_slice(&b);
+        buff[..b.len()].copy_from_slice(&b);
         buffer.extend_from_slice(&buff);
         return;
     }
 
-    if str.len() > item_size - 8{
-        str.truncate(item_size-8);
+    if str.len() > item_size - 8 {
+        str.truncate(item_size - 8);
     }
     let str_bytes = str.as_bytes();
     bytes.extend_from_slice(&size);
     bytes.extend_from_slice(str_bytes);
-    
-    if bytes.len() < item_size{
+
+    if bytes.len() < item_size {
         bytes.resize(item_size, 0);
     }
     buffer.extend_from_slice(&bytes);
 }
-fn serialize_closed_blob(item_size : usize,mut blob : Vec<u8>,buffer : &mut Vec<u8>){
-    match item_size{
-        x if x == 32 || x == 64 || x == 4 || x == 6 || x ==16 || x == 20 || x == 128 => {
-            let mut bytes = vec![0u8;item_size];
-            bytes[..].copy_from_slice(&blob);
-            bytes.truncate(item_size);
+
+fn serialize_closed_blob(item_size: usize, mut blob: Vec<u8>, buffer: &mut Vec<u8>) {
+    if item_size == 0 {
+        eprintln!("Warning: item_size is 0, zero bytes were inserted instead");
+        return;
+    }
+
+    if item_size > 1024 * 1024 {
+        eprintln!(
+            "Warning: item_size {} exceeds safe limit, skipping serialization",
+            item_size
+        );
+        return;
+    }
+
+    match item_size {
+        x if x == 32 || x == 64 || x == 4 || x == 6 || x == 16 || x == 20 || x == 128 => {
+            if blob.len() > item_size {
+                eprintln!(
+                    "Warning: blob size {} exceeds item_size {}, truncating",
+                    blob.len(),
+                    item_size
+                );
+            }
+
+            let mut bytes = vec![0u8; item_size];
+
+            let copy_len = std::cmp::min(blob.len(), item_size);
+            if copy_len > 0 {
+                bytes[..copy_len].copy_from_slice(&blob[..copy_len]);
+            } else {
+                eprintln!("Warning: empty blob for fixed-size serialization");
+            }
+
             buffer.extend_from_slice(&bytes);
         }
         _ => {
-            let mut bytes: Vec<u8> = Vec::with_capacity(item_size);
-            let blob_length: Vec<u8> = blob.len().to_le_bytes().to_vec();
-            blob.truncate(item_size-size_of::<u64>());
-            bytes.extend_from_slice(&blob_length);
+            let u64_size = size_of::<u64>();
+
+            if item_size <= u64_size {
+                eprintln!(
+                    "Warning: item_size {} too small for length prefix ({}), using minimum",
+                    item_size, u64_size
+                );
+                let blob_len = blob.len() as u64;
+                let len_bytes = blob_len.to_le_bytes();
+                let copy_len = std::cmp::min(item_size, len_bytes.len());
+                let mut bytes = vec![0u8; item_size];
+                bytes[..copy_len].copy_from_slice(&len_bytes[..copy_len]);
+                buffer.extend_from_slice(&bytes);
+                return;
+            }
+
+            let max_blob_size = item_size - u64_size;
+
+            if blob.len() > max_blob_size {
+                eprintln!(
+                    "Warning: blob size {} exceeds available space {} (item_size {} - length_prefix {}), truncating",
+                    blob.len(),
+                    max_blob_size,
+                    item_size,
+                    u64_size
+                );
+                blob.truncate(max_blob_size);
+            }
+
+            let original_len = blob.len() as u64;
+            let blob_length_bytes = original_len.to_le_bytes();
+
+            let mut bytes = Vec::with_capacity(item_size);
+
+            bytes.extend_from_slice(&blob_length_bytes);
+
             bytes.extend_from_slice(&blob);
-            bytes.resize(item_size,0);
+
+            bytes.resize(item_size, 0);
+
+            if bytes.len() != item_size {
+                eprintln!(
+                    "Warning: serialized size {} doesn't match expected item_size {}",
+                    bytes.len(),
+                    item_size
+                );
+                bytes.truncate(item_size);
+                if bytes.len() < item_size {
+                    bytes.resize(item_size, 0);
+                }
+            }
+
             buffer.extend_from_slice(&bytes);
         }
     }
 }
+
 pub fn into_schema(target: &mut Vec<AlbaTypes>, schema: &Vec<AlbaTypes>) -> Result<(), Error> {
     if target.len() != schema.len() {
         return Err(Error::new(
             ErrorKind::InvalidInput,
-            format!("Target length ({}) doesn't match schema length ({})", target.len(), schema.len())
+            format!(
+                "Target length ({}) doesn't match schema length ({})",
+                target.len(),
+                schema.len()
+            ),
         ));
     }
 
     for (t, s) in target.iter_mut().zip(schema.iter()) {
         if std::mem::discriminant(t) != std::mem::discriminant(s) {
-
             match convert_to_schema_type(t.clone(), s) {
                 Ok(new_value) => {
-
                     *t = new_value;
                 }
                 Err(e) => {
-
                     return Err(e);
                 }
             }
@@ -133,21 +211,33 @@ fn convert_to_schema_type(source: AlbaTypes, schema_type: &AlbaTypes) -> Result<
         AlbaTypes::Bool(_) => AlbaTypes::Bool(false).try_from_existing(source),
         AlbaTypes::Char(_) => AlbaTypes::Char('\0').try_from_existing(source),
         AlbaTypes::NanoString(_) => AlbaTypes::NanoString(String::new()).try_from_existing(source),
-        AlbaTypes::SmallString(_) => AlbaTypes::SmallString(String::new()).try_from_existing(source),
-        AlbaTypes::MediumString(_) => AlbaTypes::MediumString(String::new()).try_from_existing(source),
+        AlbaTypes::SmallString(_) => {
+            AlbaTypes::SmallString(String::new()).try_from_existing(source)
+        }
+        AlbaTypes::MediumString(_) => {
+            AlbaTypes::MediumString(String::new()).try_from_existing(source)
+        }
         AlbaTypes::BigString(_) => AlbaTypes::BigString(String::new()).try_from_existing(source),
-        AlbaTypes::LargeString(_) => AlbaTypes::LargeString(String::new()).try_from_existing(source),
+        AlbaTypes::LargeString(_) => {
+            AlbaTypes::LargeString(String::new()).try_from_existing(source)
+        }
         AlbaTypes::NanoBytes(_) => AlbaTypes::NanoBytes(Vec::new()).try_from_existing(source),
         AlbaTypes::SmallBytes(_) => AlbaTypes::SmallBytes(Vec::new()).try_from_existing(source),
         AlbaTypes::MediumBytes(_) => AlbaTypes::MediumBytes(Vec::new()).try_from_existing(source),
         AlbaTypes::BigSBytes(_) => AlbaTypes::BigSBytes(Vec::new()).try_from_existing(source),
         AlbaTypes::LargeBytes(_) => AlbaTypes::LargeBytes(Vec::new()).try_from_existing(source),
         AlbaTypes::NONE => Ok(AlbaTypes::NONE),
-        AlbaTypes::LightPassword(_) => AlbaTypes::LightPassword(Vec::new()).try_from_existing(source),
-        AlbaTypes::MediumPassword(_) => AlbaTypes::MediumPassword(Vec::new()).try_from_existing(source),
-        AlbaTypes::HeavyPassword(_) => AlbaTypes::HeavyPassword(Vec::new()).try_from_existing(source),
+        AlbaTypes::LightPassword(_) => {
+            AlbaTypes::LightPassword(Vec::new()).try_from_existing(source)
+        }
+        AlbaTypes::MediumPassword(_) => {
+            AlbaTypes::MediumPassword(Vec::new()).try_from_existing(source)
+        }
+        AlbaTypes::HeavyPassword(_) => {
+            AlbaTypes::HeavyPassword(Vec::new()).try_from_existing(source)
+        }
         AlbaTypes::Email(_) => AlbaTypes::Email(String::new()).try_from_existing(source),
-        AlbaTypes::Geo(_) => AlbaTypes::Geo((0.0,0.0)).try_from_existing(source),
+        AlbaTypes::Geo(_) => AlbaTypes::Geo((0.0, 0.0)).try_from_existing(source),
         AlbaTypes::Slice4(_) => AlbaTypes::Slice4(Vec::new()).try_from_existing(source),
         AlbaTypes::Slice3(_) => AlbaTypes::Slice3(Vec::new()).try_from_existing(source),
         AlbaTypes::Slice2(_) => AlbaTypes::Slice2(Vec::new()).try_from_existing(source),
@@ -169,13 +259,15 @@ impl AlbaTypes {
         match self {
             // String types - serialize as bytes
             AlbaTypes::Text(a) => array.extend_from_slice(a.as_bytes()),
-            
+
             // String types with size constraint
-            AlbaTypes::NanoString(a) | AlbaTypes::SmallString(a) | AlbaTypes::MediumString(a) | 
-            AlbaTypes::BigString(a) | AlbaTypes::LargeString(a) | AlbaTypes::Email(a) => {
-                serialize_closed_string(self.size(), a, array)
-            },
-            
+            AlbaTypes::NanoString(a)
+            | AlbaTypes::SmallString(a)
+            | AlbaTypes::MediumString(a)
+            | AlbaTypes::BigString(a)
+            | AlbaTypes::LargeString(a)
+            | AlbaTypes::Email(a) => serialize_closed_string(self.size(), a, array),
+
             // All numeric types (little-endian) - each type separately due to different byte array sizes
             AlbaTypes::Int(a) => array.extend_from_slice(&a.to_le_bytes()),
             AlbaTypes::Bigint(a) => array.extend_from_slice(&a.to_le_bytes()),
@@ -188,28 +280,33 @@ impl AlbaTypes {
             AlbaTypes::UShort(u) => array.extend_from_slice(&u.to_le_bytes()),
             AlbaTypes::HugeInt(u) => array.extend_from_slice(&u.to_le_bytes()),
             AlbaTypes::UHugeInt(u) => array.extend_from_slice(&u.to_le_bytes()),
-            
+
             // Blob types (bytes and passwords)
-            AlbaTypes::NanoBytes(items) | AlbaTypes::SmallBytes(items) | AlbaTypes::MediumBytes(items) |
-            AlbaTypes::BigSBytes(items) | AlbaTypes::LargeBytes(items) | AlbaTypes::LightPassword(items) |
-            AlbaTypes::MediumPassword(items) | AlbaTypes::HeavyPassword(items) | 
-            AlbaTypes::Slice4(items) | AlbaTypes::Slice3(items) | AlbaTypes::Slice2(items) |
-            AlbaTypes::Slice1(items) | AlbaTypes::Slice0(items) => {
-                serialize_closed_blob(self.size(), items.clone(), array)
-            },
-            
+            AlbaTypes::NanoBytes(items)
+            | AlbaTypes::SmallBytes(items)
+            | AlbaTypes::MediumBytes(items)
+            | AlbaTypes::BigSBytes(items)
+            | AlbaTypes::LargeBytes(items)
+            | AlbaTypes::LightPassword(items)
+            | AlbaTypes::MediumPassword(items)
+            | AlbaTypes::HeavyPassword(items)
+            | AlbaTypes::Slice4(items)
+            | AlbaTypes::Slice3(items)
+            | AlbaTypes::Slice2(items)
+            | AlbaTypes::Slice1(items)
+            | AlbaTypes::Slice0(items) => serialize_closed_blob(self.size(), items.clone(), array),
+
             // Special cases
             AlbaTypes::Bool(a) => array.push(*a as u8),
             AlbaTypes::Char(a) => array.extend_from_slice(&(*a as u32).to_le_bytes()),
             AlbaTypes::Geo((a, b)) => {
                 array.extend_from_slice(&a.to_le_bytes());
                 array.extend_from_slice(&b.to_le_bytes());
-            },
-            AlbaTypes::NONE => {},
+            }
+            AlbaTypes::NONE => {}
         }
     }
 }
-
 
 fn format_bytes_debug(
     f: &mut fmt::Formatter<'_>,
@@ -237,7 +334,7 @@ impl fmt::Debug for AlbaTypes {
             AlbaTypes::BigString(s) => f.debug_tuple("BigString").field(s).finish(),
             AlbaTypes::LargeString(s) => f.debug_tuple("LargeString").field(s).finish(),
             AlbaTypes::Email(s) => f.debug_tuple("Email").field(s).finish(),
-            
+
             // Numeric types
             AlbaTypes::Int(i) => f.debug_tuple("Int").field(i).finish(),
             AlbaTypes::Bigint(i) => f.debug_tuple("Bigint").field(i).finish(),
@@ -250,31 +347,31 @@ impl fmt::Debug for AlbaTypes {
             AlbaTypes::UShort(u) => f.debug_tuple("UShort").field(u).finish(),
             AlbaTypes::HugeInt(h) => f.debug_tuple("HugeInt").field(h).finish(),
             AlbaTypes::UHugeInt(u) => f.debug_tuple("UHugeInt").field(u).finish(),
-            
+
             // Other primitive types
             AlbaTypes::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
             AlbaTypes::Char(c) => f.debug_tuple("Char").field(c).finish(),
             AlbaTypes::Geo((lat, lon)) => f.debug_tuple("Geo").field(&(lat, lon)).finish(),
-            
+
             // Byte types with limited display
             AlbaTypes::NanoBytes(bytes) => format_bytes_debug(f, "NanoBytes", bytes, 10),
             AlbaTypes::SmallBytes(bytes) => format_bytes_debug(f, "SmallBytes", bytes, 10),
             AlbaTypes::MediumBytes(bytes) => format_bytes_debug(f, "MediumBytes", bytes, 10),
             AlbaTypes::BigSBytes(bytes) => format_bytes_debug(f, "BigSBytes", bytes, 10),
             AlbaTypes::LargeBytes(bytes) => format_bytes_debug(f, "LargeBytes", bytes, 10),
-            
+
             // Password types (limited display for security)
             AlbaTypes::LightPassword(bytes) => format_bytes_debug(f, "LightPassword", bytes, 3),
             AlbaTypes::MediumPassword(bytes) => format_bytes_debug(f, "MediumPassword", bytes, 3),
             AlbaTypes::HeavyPassword(bytes) => format_bytes_debug(f, "HeavyPassword", bytes, 3),
-            
+
             // Slice types
             AlbaTypes::Slice4(bytes) => format_bytes_debug(f, "Slice4", bytes, 10),
             AlbaTypes::Slice3(bytes) => format_bytes_debug(f, "Slice3", bytes, 10),
             AlbaTypes::Slice2(bytes) => format_bytes_debug(f, "Slice2", bytes, 10),
             AlbaTypes::Slice1(bytes) => format_bytes_debug(f, "Slice1", bytes, 10),
             AlbaTypes::Slice0(bytes) => format_bytes_debug(f, "Slice0", bytes, 10),
-            
+
             // Special case
             AlbaTypes::NONE => write!(f, "NONE"),
         }
@@ -299,16 +396,16 @@ bytes-l ~ 1,000,000 + 8
 impl AlbaTypes {
     pub fn from_id(code: u8) -> Result<AlbaTypes, Error> {
         match code {
-            0  => Ok(AlbaTypes::NONE),
-            1  => Ok(AlbaTypes::Char('\0')),
-            2  => Ok(AlbaTypes::Int(0)),
-            3  => Ok(AlbaTypes::Bigint(0)),
-            4  => Ok(AlbaTypes::Bool(false)),
-            5  => Ok(AlbaTypes::Float(0.0)),
-            6  => Ok(AlbaTypes::Text(String::new())),
-            7  => Ok(AlbaTypes::NanoString(String::new())),
-            8  => Ok(AlbaTypes::SmallString(String::new())),
-            9  => Ok(AlbaTypes::MediumString(String::new())),
+            0 => Ok(AlbaTypes::NONE),
+            1 => Ok(AlbaTypes::Char('\0')),
+            2 => Ok(AlbaTypes::Int(0)),
+            3 => Ok(AlbaTypes::Bigint(0)),
+            4 => Ok(AlbaTypes::Bool(false)),
+            5 => Ok(AlbaTypes::Float(0.0)),
+            6 => Ok(AlbaTypes::Text(String::new())),
+            7 => Ok(AlbaTypes::NanoString(String::new())),
+            8 => Ok(AlbaTypes::SmallString(String::new())),
+            9 => Ok(AlbaTypes::MediumString(String::new())),
             10 => Ok(AlbaTypes::BigString(String::new())),
             11 => Ok(AlbaTypes::LargeString(String::new())),
             12 => Ok(AlbaTypes::NanoBytes(Vec::new())),
@@ -334,49 +431,49 @@ impl AlbaTypes {
             32 => Ok(AlbaTypes::UShort(0)),
             33 => Ok(AlbaTypes::HugeInt(0)),
             34 => Ok(AlbaTypes::UHugeInt(0)),
-            x  => Err(Error::new(
-                      ErrorKind::InvalidData,
-                      format!("Unknown AlbaTypes code: {}", x)
-                  )),
+            x => Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("Unknown AlbaTypes code: {}", x),
+            )),
         }
-    } 
+    }
     pub fn get_id(&self) -> u8 {
         match self {
-            AlbaTypes::NONE            =>  0,
-            AlbaTypes::Char(_)         =>  1,
-            AlbaTypes::Int(_)          =>  2,
-            AlbaTypes::Bigint(_)       =>  3,
-            AlbaTypes::Bool(_)         =>  4,
-            AlbaTypes::Float(_)        =>  5,
-            AlbaTypes::Text(_)         =>  6,
-            AlbaTypes::NanoString(_)   =>  7,
-            AlbaTypes::SmallString(_)  =>  8,
-            AlbaTypes::MediumString(_) =>  9,
-            AlbaTypes::BigString(_)    => 10,
-            AlbaTypes::LargeString(_)  => 11,
-            AlbaTypes::NanoBytes(_)    => 12,
-            AlbaTypes::SmallBytes(_)   => 13,
-            AlbaTypes::MediumBytes(_)  => 14,
-            AlbaTypes::BigSBytes(_)    => 15,
-            AlbaTypes::LargeBytes(_)   => 16,
+            AlbaTypes::NONE => 0,
+            AlbaTypes::Char(_) => 1,
+            AlbaTypes::Int(_) => 2,
+            AlbaTypes::Bigint(_) => 3,
+            AlbaTypes::Bool(_) => 4,
+            AlbaTypes::Float(_) => 5,
+            AlbaTypes::Text(_) => 6,
+            AlbaTypes::NanoString(_) => 7,
+            AlbaTypes::SmallString(_) => 8,
+            AlbaTypes::MediumString(_) => 9,
+            AlbaTypes::BigString(_) => 10,
+            AlbaTypes::LargeString(_) => 11,
+            AlbaTypes::NanoBytes(_) => 12,
+            AlbaTypes::SmallBytes(_) => 13,
+            AlbaTypes::MediumBytes(_) => 14,
+            AlbaTypes::BigSBytes(_) => 15,
+            AlbaTypes::LargeBytes(_) => 16,
             AlbaTypes::LightPassword(_) => 17,
             AlbaTypes::MediumPassword(_) => 18,
             AlbaTypes::HeavyPassword(_) => 19,
-            AlbaTypes::Email(_)        => 20,
-            AlbaTypes::Geo(_)          => 21,
-            AlbaTypes::Slice4(_)       => 22,
-            AlbaTypes::Slice3(_)       => 23,
-            AlbaTypes::Slice2(_)       => 24,
-            AlbaTypes::Slice1(_)       => 25,
-            AlbaTypes::Slice0(_)       => 26,
-            AlbaTypes::UInt(_)         => 27,
-            AlbaTypes::UBigint(_)      => 28,
-            AlbaTypes::NanoInt(_)      => 29,
-            AlbaTypes::UNanoInt(_)     => 30,
-            AlbaTypes::Short(_)        => 31,
-            AlbaTypes::UShort(_)       => 32,
-            AlbaTypes::HugeInt(_)      => 33,
-            AlbaTypes::UHugeInt(_)     => 34,
+            AlbaTypes::Email(_) => 20,
+            AlbaTypes::Geo(_) => 21,
+            AlbaTypes::Slice4(_) => 22,
+            AlbaTypes::Slice3(_) => 23,
+            AlbaTypes::Slice2(_) => 24,
+            AlbaTypes::Slice1(_) => 25,
+            AlbaTypes::Slice0(_) => 26,
+            AlbaTypes::UInt(_) => 27,
+            AlbaTypes::UBigint(_) => 28,
+            AlbaTypes::NanoInt(_) => 29,
+            AlbaTypes::UNanoInt(_) => 30,
+            AlbaTypes::Short(_) => 31,
+            AlbaTypes::UShort(_) => 32,
+            AlbaTypes::HugeInt(_) => 33,
+            AlbaTypes::UHugeInt(_) => 34,
         }
     }
 
@@ -403,18 +500,20 @@ impl AlbaTypes {
     //         )),
     //     }
     // }
-
 }
 
 impl AlbaTypes {
-
     pub fn try_from_existing(&self, i: AlbaTypes) -> Result<AlbaTypes, Error> {
         match self {
             AlbaTypes::Text(_) => {
                 let text = match i {
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => s,
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s,
                     AlbaTypes::Int(n) => n.to_string(),
                     AlbaTypes::Bigint(n) => n.to_string(),
                     AlbaTypes::Float(f) => f.to_string(),
@@ -428,14 +527,26 @@ impl AlbaTypes {
                     AlbaTypes::UShort(n) => n.to_string(),
                     AlbaTypes::HugeInt(n) => n.to_string(),
                     AlbaTypes::UHugeInt(n) => n.to_string(),
-                    AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
-                    AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) | AlbaTypes::LightPassword(b) |
-                    AlbaTypes::MediumPassword(b) | AlbaTypes::HeavyPassword(b) | AlbaTypes::Slice4(b) |
-                    AlbaTypes::Slice3(b) | AlbaTypes::Slice2(b) | AlbaTypes::Slice1(b) | AlbaTypes::Slice0(b) => {
-                        general_purpose::STANDARD.encode(&b)
-                    }
+                    AlbaTypes::NanoBytes(b)
+                    | AlbaTypes::SmallBytes(b)
+                    | AlbaTypes::MediumBytes(b)
+                    | AlbaTypes::BigSBytes(b)
+                    | AlbaTypes::LargeBytes(b)
+                    | AlbaTypes::LightPassword(b)
+                    | AlbaTypes::MediumPassword(b)
+                    | AlbaTypes::HeavyPassword(b)
+                    | AlbaTypes::Slice4(b)
+                    | AlbaTypes::Slice3(b)
+                    | AlbaTypes::Slice2(b)
+                    | AlbaTypes::Slice1(b)
+                    | AlbaTypes::Slice0(b) => general_purpose::STANDARD.encode(&b),
                     AlbaTypes::Geo((lat, lon)) => format!("({}, {})", lat, lon),
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Text")),
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Text",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Text(text))
             }
@@ -446,28 +557,46 @@ impl AlbaTypes {
                         if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Bigint out of range for i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Bigint out of range for i32",
+                            ));
                         }
                     }
                     AlbaTypes::Float(f) => {
                         if f.is_nan() || f.is_infinite() {
-                            return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NaN or infinite float to i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot convert NaN or infinite float to i32",
+                            ));
                         }
                         f as i32
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     AlbaTypes::UInt(n) => {
                         if n <= i32::MAX as u32 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UInt out of range for i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UInt out of range for i32",
+                            ));
                         }
                     }
                     AlbaTypes::UBigint(n) => {
                         if n <= i32::MAX as u64 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UBigint out of range for i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UBigint out of range for i32",
+                            ));
                         }
                     }
                     AlbaTypes::NanoInt(n) => n as i32,
@@ -478,23 +607,43 @@ impl AlbaTypes {
                         if n >= i32::MIN as i128 && n <= i32::MAX as i128 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "HugeInt out of range for i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "HugeInt out of range for i32",
+                            ));
                         }
                     }
                     AlbaTypes::UHugeInt(n) => {
                         if n <= i32::MAX as u128 {
                             n as i32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UHugeInt out of range for i32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UHugeInt out of range for i32",
+                            ));
                         }
                     }
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<i32>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as i32"))?
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<i32>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as i32")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Int",
+                        ));
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Int")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Int")),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Int",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Int(int_val))
             }
@@ -504,17 +653,29 @@ impl AlbaTypes {
                     AlbaTypes::Int(n) => n as i64,
                     AlbaTypes::Float(f) => {
                         if f.is_nan() || f.is_infinite() {
-                            return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NaN or infinite float to i64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot convert NaN or infinite float to i64",
+                            ));
                         }
                         f as i64
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     AlbaTypes::UInt(n) => n as i64,
                     AlbaTypes::UBigint(n) => {
                         if n <= i64::MAX as u64 {
                             n as i64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UBigint out of range for i64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UBigint out of range for i64",
+                            ));
                         }
                     }
                     AlbaTypes::NanoInt(n) => n as i64,
@@ -525,23 +686,43 @@ impl AlbaTypes {
                         if n >= i64::MIN as i128 && n <= i64::MAX as i128 {
                             n as i64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "HugeInt out of range for i64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "HugeInt out of range for i64",
+                            ));
                         }
                     }
                     AlbaTypes::UHugeInt(n) => {
                         if n <= i64::MAX as u128 {
                             n as i64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UHugeInt out of range for i64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UHugeInt out of range for i64",
+                            ));
                         }
                     }
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<i64>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as i64"))?
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<i64>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as i64")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Bigint",
+                        ));
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bigint")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Bigint")),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Bigint",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Bigint(bigint_val))
             }
@@ -550,7 +731,13 @@ impl AlbaTypes {
                     AlbaTypes::Float(f) => f,
                     AlbaTypes::Int(n) => n as f64,
                     AlbaTypes::Bigint(n) => n as f64,
-                    AlbaTypes::Bool(b) => if b { 1.0 } else { 0.0 },
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     AlbaTypes::UInt(n) => n as f64,
                     AlbaTypes::UBigint(n) => n as f64,
                     AlbaTypes::NanoInt(n) => n as f64,
@@ -559,13 +746,27 @@ impl AlbaTypes {
                     AlbaTypes::UShort(n) => n as f64,
                     AlbaTypes::HugeInt(n) => n as f64,
                     AlbaTypes::UHugeInt(n) => n as f64,
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<f64>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as f64"))?
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<f64>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as f64")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Float",
+                        ));
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Float")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Float")),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Float",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Float(float_val))
             }
@@ -583,36 +784,72 @@ impl AlbaTypes {
                     AlbaTypes::UShort(n) => n != 0,
                     AlbaTypes::HugeInt(n) => n != 0,
                     AlbaTypes::UHugeInt(n) => n != 0,
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => {
                         let trimmed = s.trim().to_lowercase();
                         match trimmed.as_str() {
                             "0" | "f" | "false" => false,
                             "1" | "t" | "true" => true,
-                            _ => return Err(Error::new(ErrorKind::InvalidData, "Invalid boolean string")),
+                            _ => {
+                                return Err(Error::new(
+                                    ErrorKind::InvalidData,
+                                    "Invalid boolean string",
+                                ));
+                            }
                         }
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Bool")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Bool")),
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Bool",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Bool",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Bool(bool_val))
             }
             AlbaTypes::Char(_) => {
                 let char_val = match i {
                     AlbaTypes::Char(c) => c,
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => {
                         if s.len() == 1 {
                             s.chars().next().unwrap()
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "String must be a single character for Char"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "String must be a single character for Char",
+                            ));
                         }
                     }
                     AlbaTypes::UNanoInt(n) => n as char,
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Char")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Char")),
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Char",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Char",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Char(char_val))
             }
@@ -659,7 +896,9 @@ impl AlbaTypes {
             }
             AlbaTypes::LargeBytes(_) => {
                 let bytes = get_bytes_from_alba_type(i)?;
-                Ok(AlbaTypes::LargeBytes(truncate_or_pad_bytes(bytes, 1_000_000)))
+                Ok(AlbaTypes::LargeBytes(truncate_or_pad_bytes(
+                    bytes, 1_000_000,
+                )))
             }
             AlbaTypes::LightPassword(_) => {
                 let bytes = get_bytes_from_alba_type(i)?;
@@ -676,24 +915,43 @@ impl AlbaTypes {
             AlbaTypes::Geo(_) => {
                 let (lat, lon) = match i {
                     AlbaTypes::Geo(coords) => coords,
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => {
                         // Parse string format like "(lat, lon)" or "lat,lon"
                         let cleaned = s.trim().trim_matches('(').trim_matches(')');
                         let parts: Vec<&str> = cleaned.split(',').collect();
                         if parts.len() == 2 {
-                            let lat: f64 = parts[0].trim().parse()
-                                .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid latitude"))?;
-                            let lon: f64 = parts[1].trim().parse()
-                                .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid longitude"))?;
+                            let lat: f64 = parts[0].trim().parse().map_err(|_| {
+                                Error::new(ErrorKind::InvalidData, "Invalid latitude")
+                            })?;
+                            let lon: f64 = parts[1].trim().parse().map_err(|_| {
+                                Error::new(ErrorKind::InvalidData, "Invalid longitude")
+                            })?;
                             (lat, lon)
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Invalid geo format, expected 'lat,lon'"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Invalid geo format, expected 'lat,lon'",
+                            ));
                         }
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Geo")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Geo")),
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Geo",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Geo",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Geo((lat, lon)))
             }
@@ -724,36 +982,57 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative value cannot be converted to UInt"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative value cannot be converted to UInt",
+                            ));
                         }
                     }
                     AlbaTypes::UBigint(n) => {
                         if n <= u32::MAX as u64 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UBigint out of range for u32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UBigint out of range for u32",
+                            ));
                         }
                     }
                     AlbaTypes::Bigint(n) => {
                         if n >= 0 && n <= u32::MAX as i64 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Bigint out of range for u32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Bigint out of range for u32",
+                            ));
                         }
                     }
                     AlbaTypes::Float(f) => {
                         if f >= 0.0 && f <= u32::MAX as f64 && !f.is_nan() && !f.is_infinite() {
                             f as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Float out of range for u32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Float out of range for u32",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     AlbaTypes::NanoInt(n) => {
                         if n >= 0 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative NanoInt cannot be converted to UInt"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative NanoInt cannot be converted to UInt",
+                            ));
                         }
                     }
                     AlbaTypes::UNanoInt(n) => n as u32,
@@ -761,7 +1040,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Short cannot be converted to UInt"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Short cannot be converted to UInt",
+                            ));
                         }
                     }
                     AlbaTypes::UShort(n) => n as u32,
@@ -769,23 +1051,43 @@ impl AlbaTypes {
                         if n >= 0 && n <= u32::MAX as i128 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "HugeInt out of range for u32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "HugeInt out of range for u32",
+                            ));
                         }
                     }
                     AlbaTypes::UHugeInt(n) => {
                         if n <= u32::MAX as u128 {
                             n as u32
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UHugeInt out of range for u32"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UHugeInt out of range for u32",
+                            ));
                         }
                     }
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<u32>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as u32"))?
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<u32>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as u32")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to UInt",
+                        ));
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to UInt")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to UInt")),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to UInt",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::UInt(uint_val))
             }
@@ -797,29 +1099,47 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative value cannot be converted to UBigint"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative value cannot be converted to UBigint",
+                            ));
                         }
                     }
                     AlbaTypes::Int(n) => {
                         if n >= 0 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative value cannot be converted to UBigint"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative value cannot be converted to UBigint",
+                            ));
                         }
                     }
                     AlbaTypes::Float(f) => {
                         if f >= 0.0 && f <= u64::MAX as f64 && !f.is_nan() && !f.is_infinite() {
                             f as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Float out of range for u64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Float out of range for u64",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
                     AlbaTypes::NanoInt(n) => {
                         if n >= 0 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative NanoInt cannot be converted to UBigint"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative NanoInt cannot be converted to UBigint",
+                            ));
                         }
                     }
                     AlbaTypes::UNanoInt(n) => n as u64,
@@ -827,7 +1147,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Short cannot be converted to UBigint"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Short cannot be converted to UBigint",
+                            ));
                         }
                     }
                     AlbaTypes::UShort(n) => n as u64,
@@ -835,23 +1158,43 @@ impl AlbaTypes {
                         if n >= 0 && n <= u64::MAX as i128 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "HugeInt out of range for u64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "HugeInt out of range for u64",
+                            ));
                         }
                     }
                     AlbaTypes::UHugeInt(n) => {
                         if n <= u64::MAX as u128 {
                             n as u64
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UHugeInt out of range for u64"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UHugeInt out of range for u64",
+                            ));
                         }
                     }
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<u64>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as u64"))?
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<u64>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as u64")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to UBigint",
+                        ));
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to UBigint")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to UBigint")),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to UBigint",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::UBigint(ubigint_val))
             }
@@ -862,19 +1205,41 @@ impl AlbaTypes {
                         if n <= i8::MAX as u8 {
                             n as i8
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UNanoInt out of range for i8"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UNanoInt out of range for i8",
+                            ));
                         }
                     }
                     AlbaTypes::Int(n) => {
                         if n >= i8::MIN as i32 && n <= i8::MAX as i32 {
                             n as i8
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Int out of range for i8"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Int out of range for i8",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to NanoInt")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to NanoInt")),
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to NanoInt",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to NanoInt",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::NanoInt(nano_val))
             }
@@ -885,19 +1250,41 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u8
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative NanoInt cannot be converted to u8"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative NanoInt cannot be converted to u8",
+                            ));
                         }
                     }
                     AlbaTypes::Int(n) => {
                         if n >= 0 && n <= u8::MAX as i32 {
                             n as u8
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Int out of range for u8"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Int out of range for u8",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to UNanoInt")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to UNanoInt")),
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to UNanoInt",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to UNanoInt",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::UNanoInt(unano_val))
             }
@@ -908,21 +1295,43 @@ impl AlbaTypes {
                         if n <= i16::MAX as u16 {
                             n as i16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UShort out of range for i16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UShort out of range for i16",
+                            ));
                         }
                     }
                     AlbaTypes::Int(n) => {
                         if n >= i16::MIN as i32 && n <= i16::MAX as i32 {
                             n as i16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Int out of range for i16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Int out of range for i16",
+                            ));
                         }
                     }
                     AlbaTypes::NanoInt(n) => n as i16,
                     AlbaTypes::UNanoInt(n) => n as i16,
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to Short")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to Short")),
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to Short",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to Short",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::Short(short_val))
             }
@@ -933,34 +1342,62 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Short cannot be converted to u16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Short cannot be converted to u16",
+                            ));
                         }
                     }
                     AlbaTypes::Int(n) => {
                         if n >= 0 && n <= u16::MAX as i32 {
                             n as u16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Int out of range for u16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Int out of range for u16",
+                            ));
                         }
                     }
                     AlbaTypes::UInt(n) => {
                         if n <= u16::MAX as u32 {
                             n as u16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UInt out of range for u16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UInt out of range for u16",
+                            ));
                         }
                     }
                     AlbaTypes::NanoInt(n) => {
                         if n >= 0 {
                             n as u16
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative NanoInt cannot be converted to u16"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative NanoInt cannot be converted to u16",
+                            ));
                         }
                     }
                     AlbaTypes::UNanoInt(n) => n as u16,
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to UShort")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to UShort")),
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
+                    }
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to UShort",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to UShort",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::UShort(ushort_val))
             }
@@ -971,7 +1408,10 @@ impl AlbaTypes {
                         if n <= i128::MAX as u128 {
                             n as i128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "UHugeInt out of range for i128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "UHugeInt out of range for i128",
+                            ));
                         }
                     }
                     AlbaTypes::Bigint(n) => n as i128,
@@ -986,17 +1426,40 @@ impl AlbaTypes {
                         if !f.is_nan() && !f.is_infinite() {
                             f as i128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NaN or infinite float to i128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Cannot convert NaN or infinite float to i128",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<i128>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as i128"))?
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to HugeInt")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to HugeInt")),
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<i128>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as i128")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to HugeInt",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to HugeInt",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::HugeInt(huge_val))
             }
@@ -1007,7 +1470,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative HugeInt cannot be converted to u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative HugeInt cannot be converted to u128",
+                            ));
                         }
                     }
                     AlbaTypes::UBigint(n) => n as u128,
@@ -1015,7 +1481,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Bigint cannot be converted to u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Bigint cannot be converted to u128",
+                            ));
                         }
                     }
                     AlbaTypes::UInt(n) => n as u128,
@@ -1023,7 +1492,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Int cannot be converted to u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Int cannot be converted to u128",
+                            ));
                         }
                     }
                     AlbaTypes::UShort(n) => n as u128,
@@ -1031,7 +1503,10 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative Short cannot be converted to u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative Short cannot be converted to u128",
+                            ));
                         }
                     }
                     AlbaTypes::UNanoInt(n) => n as u128,
@@ -1039,31 +1514,56 @@ impl AlbaTypes {
                         if n >= 0 {
                             n as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Negative NanoInt cannot be converted to u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Negative NanoInt cannot be converted to u128",
+                            ));
                         }
                     }
                     AlbaTypes::Float(f) => {
                         if f >= 0.0 && !f.is_nan() && !f.is_infinite() {
                             f as u128
                         } else {
-                            return Err(Error::new(ErrorKind::InvalidData, "Float out of range for u128"));
+                            return Err(Error::new(
+                                ErrorKind::InvalidData,
+                                "Float out of range for u128",
+                            ));
                         }
                     }
-                    AlbaTypes::Bool(b) => if b { 1 } else { 0 },
-                    AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-                    AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-                    AlbaTypes::Email(s) => {
-                        s.parse::<u128>().map_err(|_| Error::new(ErrorKind::InvalidData, "Failed to parse string as u128"))?
+                    AlbaTypes::Bool(b) => {
+                        if b {
+                            1
+                        } else {
+                            0
+                        }
                     }
-                    AlbaTypes::NONE => return Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to UHugeInt")),
-                    _ => return Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to UHugeInt")),
+                    AlbaTypes::Text(s)
+                    | AlbaTypes::NanoString(s)
+                    | AlbaTypes::SmallString(s)
+                    | AlbaTypes::MediumString(s)
+                    | AlbaTypes::BigString(s)
+                    | AlbaTypes::LargeString(s)
+                    | AlbaTypes::Email(s) => s.parse::<u128>().map_err(|_| {
+                        Error::new(ErrorKind::InvalidData, "Failed to parse string as u128")
+                    })?,
+                    AlbaTypes::NONE => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Cannot convert NONE to UHugeInt",
+                        ));
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::InvalidData,
+                            "Unsupported conversion to UHugeInt",
+                        ));
+                    }
                 };
                 Ok(AlbaTypes::UHugeInt(uhuge_val))
             }
             AlbaTypes::NONE => Ok(AlbaTypes::NONE),
         }
     }
-
 
     pub fn size(&self) -> usize {
         match self {
@@ -1081,12 +1581,12 @@ impl AlbaTypes {
             AlbaTypes::HugeInt(_) => size_of::<i128>(),
             AlbaTypes::UHugeInt(_) => size_of::<u128>(),
             AlbaTypes::Float(_) => size_of::<f64>(),
-            
+
             // Special types
             AlbaTypes::NONE => 0,
             AlbaTypes::Text(_) => MAX_STR_LEN,
             AlbaTypes::Geo(_) => size_of::<f64>() * 2, // (lat, lon) - two f64s
-            
+
             // String types with fixed sizes + length header
             AlbaTypes::NanoString(_) => 10 + size_of::<u64>(),
             AlbaTypes::SmallString(_) => 100 + size_of::<u64>(),
@@ -1094,18 +1594,18 @@ impl AlbaTypes {
             AlbaTypes::BigString(_) => 2_000 + size_of::<u64>(),
             AlbaTypes::LargeString(_) => 3_000 + size_of::<u64>(),
             AlbaTypes::Email(_) => 320, // max 320 chars
-            
+
             // Byte types with fixed sizes + length header
             AlbaTypes::NanoBytes(_) => 10 + size_of::<u64>(),
             AlbaTypes::SmallBytes(_) => 1_000 + size_of::<u64>(),
             AlbaTypes::MediumBytes(_) => 10_000 + size_of::<u64>(),
             AlbaTypes::BigSBytes(_) => 100_000 + size_of::<u64>(),
             AlbaTypes::LargeBytes(_) => 1_000_000 + size_of::<u64>(),
-            
-            AlbaTypes::LightPassword(_) => 32, // [u8;32]
+
+            AlbaTypes::LightPassword(_) => 32,  // [u8;32]
             AlbaTypes::MediumPassword(_) => 64, // [u8;64]
             AlbaTypes::HeavyPassword(_) => 128, // [u8;128]
-            
+
             AlbaTypes::Slice0(_) => 4,  // [4;u8]
             AlbaTypes::Slice1(_) => 6,  // [6;u8]
             AlbaTypes::Slice2(_) => 16, // [16;u8]
@@ -1113,15 +1613,17 @@ impl AlbaTypes {
             AlbaTypes::Slice4(_) => 32, // [32;u8]
         }
     }
-
-
 }
 
 fn get_string_from_alba_type(i: AlbaTypes) -> Result<String, Error> {
     match i {
-        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) |
-        AlbaTypes::Email(s) => Ok(s),
+        AlbaTypes::Text(s)
+        | AlbaTypes::NanoString(s)
+        | AlbaTypes::SmallString(s)
+        | AlbaTypes::MediumString(s)
+        | AlbaTypes::BigString(s)
+        | AlbaTypes::LargeString(s)
+        | AlbaTypes::Email(s) => Ok(s),
         AlbaTypes::Int(n) => Ok(n.to_string()),
         AlbaTypes::Bigint(n) => Ok(n.to_string()),
         AlbaTypes::Float(f) => Ok(f.to_string()),
@@ -1133,23 +1635,30 @@ fn get_string_from_alba_type(i: AlbaTypes) -> Result<String, Error> {
         AlbaTypes::UShort(n) => Ok(n.to_string()),
         AlbaTypes::HugeInt(n) => Ok(n.to_string()),
         AlbaTypes::UHugeInt(n) => Ok(n.to_string()),
-        
-        
+
         AlbaTypes::Bool(b) => Ok(b.to_string()),
         AlbaTypes::Char(c) => Ok(c.to_string()),
-        
+
         AlbaTypes::Geo((lat, lon)) => Ok(format!("({}, {})", lat, lon)),
-        
-        
-        AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
-        AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) | AlbaTypes::LightPassword(b) |
-        AlbaTypes::MediumPassword(b) | AlbaTypes::HeavyPassword(b) | AlbaTypes::Slice4(b) |
-        AlbaTypes::Slice3(b) | AlbaTypes::Slice2(b) | AlbaTypes::Slice1(b) | AlbaTypes::Slice0(b) => {
-            Ok(general_purpose::STANDARD.encode(&b))
-        }
-        
-        
-        AlbaTypes::NONE => Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to string")),
+
+        AlbaTypes::NanoBytes(b)
+        | AlbaTypes::SmallBytes(b)
+        | AlbaTypes::MediumBytes(b)
+        | AlbaTypes::BigSBytes(b)
+        | AlbaTypes::LargeBytes(b)
+        | AlbaTypes::LightPassword(b)
+        | AlbaTypes::MediumPassword(b)
+        | AlbaTypes::HeavyPassword(b)
+        | AlbaTypes::Slice4(b)
+        | AlbaTypes::Slice3(b)
+        | AlbaTypes::Slice2(b)
+        | AlbaTypes::Slice1(b)
+        | AlbaTypes::Slice0(b) => Ok(general_purpose::STANDARD.encode(&b)),
+
+        AlbaTypes::NONE => Err(Error::new(
+            ErrorKind::InvalidData,
+            "Cannot convert NONE to string",
+        )),
     }
 }
 
@@ -1163,16 +1672,27 @@ fn truncate_or_pad_string(s: String, max_len: usize) -> String {
 
 fn get_bytes_from_alba_type(i: AlbaTypes) -> Result<Vec<u8>, Error> {
     match i {
-        AlbaTypes::NanoBytes(b) | AlbaTypes::SmallBytes(b) | AlbaTypes::MediumBytes(b) |
-        AlbaTypes::BigSBytes(b) | AlbaTypes::LargeBytes(b) => Ok(b),
-        AlbaTypes::Text(s) | AlbaTypes::NanoString(s) | AlbaTypes::SmallString(s) |
-        AlbaTypes::MediumString(s) | AlbaTypes::BigString(s) | AlbaTypes::LargeString(s) => {
-            general_purpose::STANDARD
-                .decode(s.as_bytes())
-                .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid base64 string"))
-        }
-        AlbaTypes::NONE => Err(Error::new(ErrorKind::InvalidData, "Cannot convert NONE to bytes")),
-        _ => Err(Error::new(ErrorKind::InvalidData, "Unsupported conversion to bytes")),
+        AlbaTypes::NanoBytes(b)
+        | AlbaTypes::SmallBytes(b)
+        | AlbaTypes::MediumBytes(b)
+        | AlbaTypes::BigSBytes(b)
+        | AlbaTypes::LargeBytes(b) => Ok(b),
+        AlbaTypes::Text(s)
+        | AlbaTypes::NanoString(s)
+        | AlbaTypes::SmallString(s)
+        | AlbaTypes::MediumString(s)
+        | AlbaTypes::BigString(s)
+        | AlbaTypes::LargeString(s) => general_purpose::STANDARD
+            .decode(s.as_bytes())
+            .map_err(|_| Error::new(ErrorKind::InvalidData, "Invalid base64 string")),
+        AlbaTypes::NONE => Err(Error::new(
+            ErrorKind::InvalidData,
+            "Cannot convert NONE to bytes",
+        )),
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            "Unsupported conversion to bytes",
+        )),
     }
 }
 
@@ -1201,34 +1721,31 @@ impl TryFrom<Token> for AlbaTypes {
                 //     _ => unreachable!(),
                 // }
                 let l = b.len();
-                Ok(if l <= 10{
+                Ok(if l <= 10 {
                     AlbaTypes::NanoBytes(b)
-                }else if l > 10 && l <= 1000{
+                } else if l > 10 && l <= 1000 {
                     AlbaTypes::SmallBytes(b)
-                }else if l > 1000 && l <= 10000{
+                } else if l > 1000 && l <= 10000 {
                     AlbaTypes::MediumBytes(b)
-                }else if l > 10000 && l <= 100000{
+                } else if l > 10000 && l <= 100000 {
                     AlbaTypes::BigSBytes(b)
-                }else {
+                } else {
                     AlbaTypes::LargeBytes(b)
                 })
-            },
-            Token::String(s) =>
-                Ok(AlbaTypes::LargeString(s)), // moved, no clone
+            }
+            Token::String(s) => Ok(AlbaTypes::LargeString(s)), // moved, no clone
 
-            Token::Int(i) if (i32::MIN as i64) <= i && i <= (i32::MAX as i64) =>
-                Ok(AlbaTypes::Int(i as i32)),
+            Token::Int(i) if (i32::MIN as i64) <= i && i <= (i32::MAX as i64) => {
+                Ok(AlbaTypes::Int(i as i32))
+            }
 
-            Token::Int(i) =>
-                Ok(AlbaTypes::Bigint(i)),
+            Token::Int(i) => Ok(AlbaTypes::Bigint(i)),
 
-            Token::Float(f) =>
-                Ok(AlbaTypes::Float(f)),
+            Token::Float(f) => Ok(AlbaTypes::Float(f)),
 
-            Token::Bool(b) =>
-                Ok(AlbaTypes::Bool(b)),
+            Token::Bool(b) => Ok(AlbaTypes::Bool(b)),
             Token::Keyword(s) => match s.to_uppercase().as_str().trim() {
-                "INT" => Ok(AlbaTypes::Int(0)),        // default dummy values
+                "INT" => Ok(AlbaTypes::Int(0)), // default dummy values
                 "BIGINT" => Ok(AlbaTypes::Bigint(0)),
                 "FLOAT" => Ok(AlbaTypes::Float(0.0)),
                 "BOOL" => Ok(AlbaTypes::Bool(false)),
@@ -1246,11 +1763,12 @@ impl TryFrom<Token> for AlbaTypes {
                 _ => return Err(format!("Unknown type keyword: {}", s).leak()),
             },
             _ => {
-                let va = format!("Cannot convert token to AlbaTypes: unsupported token type {:#?}. Expected one of: String, Int, Float, Bool, or Keyword (for type definitions).", token);
+                let va = format!(
+                    "Cannot convert token to AlbaTypes: unsupported token type {:#?}. Expected one of: String, Int, Float, Bool, or Keyword (for type definitions).",
+                    token
+                );
                 return Err(va.leak());
             }
         }
     }
 }
-
-

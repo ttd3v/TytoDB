@@ -9,6 +9,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sysinfo::System as SysInfo;
 
 use crate::{
     AST, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback,
@@ -60,6 +61,30 @@ workers: 1
 # + Disk space will not increase during this operation, as it does not create temporary files by design.
 # - For more detailed information, read the documentation.
 vacuum: []
+
+
+
+# Burning Cache Capacity
+# + The count of KiB you want to allocate for BurningCache instances
+# + Each container will have the `cache_size` in-memory allocated 
+# - Do not benefit scan searches, if it is the main worload of your database set it to one.
+# - For more detailed information about the database caching read the documentation
+# - Note: If set to zero it will be rounded up to one.
+cache_size: 10
+
+# Data Set Cache
+#
+# + Algorithm: Uses BurningMap for caching.
+# + Memory Usage: Larger than the indexing cache.
+# + Capacity Formula: (m * (n / 100)) / v
+#   - m: Total system memory (e.g., 8 GiB).
+#   - n: ds_cache percentage (e.g., 15 for 15%).
+#   - v: Number of containers.
+# + Example: For 8 GiB system memory, ds_cache = 15, and 2 containers, each container gets (8 GiB * 0.15) / 2 = 0.6 GiB (614.4 MiB).
+# + Note: Setting ds_cache = 0 will make the database to round up to one.
+# + Note: Setting ds_cache > 100 will reset the configuration to default (15)
+# + Advise: Do not set it to high values if you are expecting to use mostly scan searches, only indexed searches benefit from "ds_cache" having generous sizes
+ds_cache: 15
 "#;
 
 type VacuumSpec = (String, String);
@@ -72,6 +97,8 @@ struct Settings {
     port: u32,
     workers: u32,
     vacuum: Vec<VacuumSpec>,
+    cache_size: u64,
+    ds_cache: u32,
 }
 
 const SECRET_KEY_PATH: &str = "TytoDB/.secret";
@@ -195,7 +222,7 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
 }
 
 /////////////////////////////////////////////////
-/////////////////////////////////////////////////
+////////////////////////////////////////////////
 /////////////////////////////////////////////////
 
 #[repr(C)]
@@ -365,7 +392,7 @@ impl Database {
             for el in he.1.iter() {
                 element_size += el.size();
             }
-
+            let b = SysInfo::new();
             self.container.insert(
                 contain.to_string(),
                 Container::new(
@@ -374,6 +401,10 @@ impl Database {
                     he.1,
                     header_offset,
                     he.0,
+                    self.settings.cache_size,
+                    (b.total_memory() * self.settings.ds_cache as u64)
+                        .saturating_div(100)
+                        .saturating_div(self.containers.len() as u64),
                 )
                 .unwrap(),
             );
@@ -473,6 +504,16 @@ impl Database {
             settings.workers = 1;
             rewrite = true;
         }
+        if settings.ds_cache > 100 {
+            settings.ds_cache = 15;
+            rewrite = true;
+        }
+        if settings.ds_cache < 1{
+            settings.ds_cache = 1;
+        }
+        if settings.cache_size < 1{
+            settings.cache_size = 1;
+        }
 
         if rewrite {
             let new_yaml = serde_yaml::to_string(&settings)
@@ -551,16 +592,25 @@ impl Database {
                 ))
                 .unwrap();
                 self.containers.push(structure.name.clone());
-
                 let c = Container::new(
                     &path,
                     el,
                     structure.col_val,
                     file.metadata()?.len(),
                     structure.col_nam,
+                    self.settings.cache_size,
+                    1,
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
+                let s = SysInfo::new();
+                let ram = s.total_memory();
+                for i in self.container.values() {
+                    i.lock().unwrap().ds_cache.lock().unwrap().capacity(
+                        (ram * (self.settings.ds_cache as u64) / 100)
+                            .saturating_div(self.containers.len() as u64),
+                    );
+                }
             }
             AST::CreateRow(structure) => {
                 let mut container = match self.container.get_mut(&structure.container) {

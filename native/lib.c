@@ -57,7 +57,7 @@ void u64hashmap_rebucket(U64Hashmap *self){
     
     self->array = new_array;
     self->bucket_size = new_bucket_size;
-    u64 old_len = self->len;
+    //u64 old_len = self->len;
     self->len = 0;
     
     
@@ -82,7 +82,7 @@ void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value){
     
     u64 pointer = (digestedkey % (self->bucket_size / HASHMAP_CELL_SIZE)) * HASHMAP_CELL_SIZE;
     
-    int rebucket = 0;
+    //int rebucket = 0;
     for (u64 i = 0; i < HASHMAP_CELL_SIZE; i++){
         hash_cell *cell = &self->array[pointer + i];
         

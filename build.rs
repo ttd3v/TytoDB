@@ -8,6 +8,8 @@ fn main() {
         .file("native/hashmap.h")
         .file("native/lib.c")
         .file("native/lib.h")
+        .file("native/burning_map.h")
+        .file("native/burning_map.c")
         .file("native/hashmap.c")
         .compile("hashmap");
 

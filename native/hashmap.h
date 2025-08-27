@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include "error.h"
+#include "burning_map.h"
 
 // Constants
 extern const unsigned long BUCKET_SIZE_MARGIN;
@@ -28,6 +29,7 @@ struct Hashmap {
     uint64_t len;
     char *path;
     char *temp_path;
+    BurningMap* cache;
 };
 
 typedef struct {
@@ -111,11 +113,11 @@ HashmapMetadata deserialize_hashmapmetadata(unsigned char *const buffer);
 
 // Hashmap Management
 ExecutionProduct hashmap_draw_defaults(FILE *file, uint64_t bucket_size);
-int hashmap_new(struct Hashmap *hashmap);
+int hashmap_new(struct Hashmap *hashmap, u_int64_t KiB);
 ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output);
 ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry);
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries);
-
+ExecutionProduct hashmap_destroy(struct Hashmap *self);
 // Vector Management
 ExecutionProduct new_vector(vector *value);
 int push_vector(vector *value, uint64_t val);

@@ -1,5 +1,6 @@
 #include "lib.h"
 #include "hashmap.h"
+#include "burning_map.h"
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <stddef.h>
@@ -106,7 +107,11 @@ ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
 }
 
 
-int hashmap_new(struct Hashmap *hashmap){
+int hashmap_new(struct Hashmap *hashmap,u_int64_t KiB){
+    hashmap->cache = new_burningmap(KiB);
+    if(!hashmap->cache){
+        return -1;
+    }
     char *path = hashmap->path;
     FILE *existence = fopen(path,"r");
     int exists = existence == NULL?-1:0;
@@ -139,7 +144,7 @@ int hashmap_new(struct Hashmap *hashmap){
             free(buffer);
             return -1;
         } 
-        if (file_stats.st_size < sizeof(HashmapMetadata)){
+        if ((size_t)file_stats.st_size < sizeof(HashmapMetadata)){
             printf("Invalid file size");
             fclose(file);
             free(buffer);
@@ -385,6 +390,8 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
 
     
     for (uint64_t i = 0; i < blocks.count; i++){
+        SomeI64 val = get_burningmap(self->cache, blocks.values[i]);
+        if (val.Some) {output.value[i] = (OptionUINT64){1,val.Value};continue;};
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
@@ -504,20 +511,12 @@ ExecutionProduct hashmap_save_metadata(struct Hashmap *self) {
 
 ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
 
-    //
-    //*
-    //*   ____                        __                          
-    //*  /\  _`\                     /\ \  __                     
-    //*  \ \ \L\ \     __     __     \_\ \/\_\    ___      __     
-    //*   \ \ ,  /   /'__`\ /'__`\   /'_` \/\ \ /' _ `\  /'_ `\ 
-    //*    \ \ \\ \ /\  __//\ \L\.\_/\ \L\ \ \ \/\ \/\ \/\ \L\ \ 
-    //*     \ \_\ \_\ \____\ \__/.\_\ \___,_\ \_\ \_\ \_\ \____ \ 
-    //*      \/_/\/ /\/____/\/__/\/_/\/__,_ /\/_/\/_/\/_/\/___L\ \ 
-    //*                                                    /\____/
-    //*                                                    \_/__/ 
-    //*
-    //
-    //
+
+    
+    /// READING READING READING
+    /// READING READING READING
+    /// READING READING READING
+    /// READING READING READING 
     
     ExecutionProduct product = 0;
     int ring_initialized = -1;
@@ -606,7 +605,16 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
         }
     }
 
+    if (new_vector_cellptr(&cells) < 0){ product = -6; goto clean;}
+
     for (uint64_t i = 0; i < blocks.count; i++){
+        SomeI64 val =  get_burningmap(self->cache, blocks.values[i]);
+        if(val.Some){
+            CellPtr y = {val.Some,blocks.values[i],val.Value,blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell)};
+            if(push_vector_cellptr(&cells, y)<0){ product = -2; goto clean;};
+            deplete_burningmap(self->cache, blocks.values[i]);
+            continue;
+        }
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         io_uring_prep_read(sqe, self->file, &buffers[i], sizeof(Cell)*HASHMAP_BLOCK_SIZE, blocks.values[i]*(sizeof(Cell)*HASHMAP_BLOCK_SIZE));           
     }
@@ -619,13 +627,12 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     }
 
 
-    if (new_vector_cellptr(&cells) < 0){ product = -6; goto clean;}
-
     for (uint64_t i = 0; i < blocks.count; i++){
         //chunks->ptr = blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell);        
         //new_vector_cell(&chunks->cells);
         for (uint64_t j = 0; j < HASHMAP_BLOCK_SIZE; j++){
             Cell v = deserialize_cell(&buffers[i][j*sizeof(Cell)]);
+            add_burningmap(self->cache, v.key, v.value);
             CellPtr y = {v.exists,v.key,v.value,blocks.values[i]*HASHMAP_BLOCK_SIZE*sizeof(Cell)};
             if(push_vector_cellptr(&cells, y)<0){ product = -2; goto clean;}
         }
@@ -644,20 +651,9 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     hm.array = NULL;
 
     
-
-    //
-    //
-    //     __      __             __                            
-    //    /\ \  __/\ \         __/\ \__  __                     
-    //    \ \ \/\ \ \ \  _ __ /\_\ \ ,_\/\_\    ___      __     
-    //     \ \ \ \ \ \ \/\`'__\/\ \ \ \/\/\ \ /' _ `\  /'_ `\ 
-    //      \ \ \_/ \_\ \ \ \/ \ \ \ \ \_\ \ \/\ \/\ \/\ \L\ \ 
-    //       \ `\___x___/\ \_\  \ \_\ \__\\ \_\ \_\ \_\ \____ \ 
-    //       '\/__//__/  \/_/   \/_/\/__/ \/_/\/_/\/_/\/___L\ \ 
-    //                                                  /\____/
-    //                                                  \_/__/
-    //
-    //
+    /// WRITING WRITING WRITING
+    /// WRITING WRITING WRITING
+    /// WRITING WRITING WRITING
 
     
     if (init_customer_list(customers, entry->count)<0){
@@ -692,7 +688,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     for(u64 i = customers->count; i > 0; i--){
         u64 k = entry->key[0+customers->count-i];
         u64 v = entry->value[0+customers->count-i];
-        uint8_t e = entry->exists[0+customers->count-i]; 
+        //uint8_t e = entry->exists[0+customers->count-i]; 
         for(u64 j = 0; j < cells.count; j++){
             if (cells.values[j].exists && cells.values[j].key == k){ 
                 serialize_cell(&(Cell){entry->exists[i],k,v}, writing_buffers[j]);
@@ -705,6 +701,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
                 io_uring_prep_write(sqe, self->file, writing_buffers[j], sizeof(Cell), cells.values[j].ptr);
                 remove_customer(customers, i);
                 remove_cell(&cells, j);
+
                 break;
             }
         }
@@ -712,7 +709,7 @@ ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
     for(u64 i = customers->count; i > 0; i--){
         u64 k = entry->key[0+customers->count-i];
         u64 v = entry->value[0+customers->count-i];
-        uint8_t e = entry->exists[0+customers->count-i];
+        //uint8_t e = entry->exists[0+customers->count-i];
         u64 j =0;
         for(j = 0; j < cells.count; j++){
             if (!cells.values[j].exists){ 
@@ -916,3 +913,12 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
     return 0;
 }
 
+
+
+ExecutionProduct hashmap_destroy(struct Hashmap *self){
+    if(self->cache) destroy_burningmap(self->cache);
+    if(self->file) {
+        close(self->file);
+    }
+    return 0;
+}
