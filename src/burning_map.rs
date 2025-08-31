@@ -26,6 +26,9 @@ impl BurningMap {
         }
     }
     pub fn add(&mut self, key: u64, value: Vec<u8>) {
+        if self.capacity == 0 {
+            return;
+        }
         let val = &mut self.paper_vector[(hash(key) % self.capacity) as usize];
         if val.0 > 0 && val.1 != key {
             val.0 -= 1;
@@ -40,19 +43,25 @@ impl BurningMap {
         }
     }
     pub fn get(&mut self, key: u64, buffer: &mut Vec<u8>) -> bool {
-        let val = &mut self.paper_vector[(hash(key) % self.capacity) as usize];
-        if val.0 > 0 {
-            val.0 -= 1;
+        if self.capacity == 0 {
             return false;
+        }
+        let val = &mut self.paper_vector[(hash(key) % self.capacity) as usize];
+        if val.0 > 0 && val.1 != key {
+            val.0 -= 1;
         };
         if val.1 == key && val.0 > 0 {
             val.0 += 1;
-            buffer.copy_from_slice(&val.2);
+            buffer.clear();
+            buffer.extend_from_slice(&val.2);
             return true;
         }
         return false;
     }
     pub fn deplete(&mut self, key: u64) {
+        if self.capacity == 0 {
+            return;
+        }
         let val = &mut self.paper_vector[(hash(key) % self.capacity) as usize];
         if val.1 == key {
             val.0 = 0;

@@ -5,6 +5,8 @@ use std::{
     ptr::null_mut,
 };
 
+use chrono::OutOfRange;
+
 use crate::gerr;
 
 #[repr(C)]
@@ -31,6 +33,7 @@ struct BurningMap {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct OptionUINT64 {
     pub some: i8,
     pub value: u64,
@@ -137,7 +140,7 @@ impl IndexingHashmap {
         let mut keys = keys;
         let mut input = GetInput {
             count: keys.len() as u32,
-            key: keys.as_mut_ptr(),
+            key: keys.as_ptr() as *mut u64,
         };
         let mut output = GetOutput::default();
 
@@ -154,6 +157,20 @@ impl IndexingHashmap {
             return Err(error_execution_product(execution_product));
         }
         let v = output.value;
+
+        if output.success < 0 {
+            return Err(gerr(&format!(
+                "Error, hashmap returned {} as response",
+                output.success
+            )));
+        }
+
+        if v.is_null() {
+            return Err(gerr(
+                "Error, failed to perform get in the hashmap: Null pointer returned",
+            ));
+        }
+        unsafe{println!("{:?}",*v)};
         Ok(unsafe {
             let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
             let mut b = Vec::new();
@@ -169,7 +186,7 @@ impl IndexingHashmap {
         if entries.is_empty() {
             return Ok(());
         }
-
+        println!("entries {}", entries.len());
         let mut keys: Vec<u64> = Vec::with_capacity(entries.len());
         let mut values: Vec<u64> = Vec::with_capacity(entries.len());
         let mut exists: Vec<u8> = Vec::with_capacity(entries.len());
@@ -179,21 +196,25 @@ impl IndexingHashmap {
             keys.push(key);
             values.push(value);
         }
-
+        println!("ke {}", keys.len());
         let mut input = WriteInput {
             count: keys.len() as u32,
-            key: keys.as_mut_ptr(),
-            value: values.as_mut_ptr(),
-            exists: exists.as_mut_ptr(),
-        };
+            key: keys.as_ptr() as *mut u64,                 
+            value: values.as_ptr() as *mut u64,
+            exists: exists.as_ptr() as *mut u8,
+        }; 
 
+        println!("~");
         let execution_product = unsafe {
             hashmap_write(
                 &mut self.inner as *mut Hashmap,
                 &mut input as *mut WriteInput,
             )
         };
-
+        println!("~");
+        std::mem::drop(keys);
+        std::mem::drop(values);
+        std::mem::drop(exists);
         if execution_product < 0 {
             eprintln!("Failed to run hashmap-write");
             return Err(error_execution_product(execution_product));

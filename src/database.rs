@@ -28,6 +28,7 @@ use rand::{Rng, TryRngCore, rngs::OsRng};
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
 
+const DEBUG : bool = true;
 pub const MAX_STR_LEN: usize = 256;
 const DEFAULT_SETTINGS: &str = r#"
 # Delete the comments if the size of the config file bothers you ;)
@@ -85,6 +86,15 @@ cache_size: 10
 # + Note: Setting ds_cache > 100 will reset the configuration to default (15)
 # + Advise: Do not set it to high values if you are expecting to use mostly scan searches, only indexed searches benefit from "ds_cache" having generous sizes
 ds_cache: 15
+
+# Operation Memory
+# - Limits how much memory an operation may allocate
+# - Not a global limit
+# - If an essential element requires more, only the necessary amount will be allocated
+# - Measured in MiB
+operation_memory: 10
+
+
 "#;
 
 type VacuumSpec = (String, String);
@@ -99,6 +109,7 @@ struct Settings {
     vacuum: Vec<VacuumSpec>,
     cache_size: u64,
     ds_cache: u32,
+    operation_memory: u64,
 }
 
 const SECRET_KEY_PATH: &str = "TytoDB/.secret";
@@ -224,69 +235,63 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
 /////////////////////////////////////////////////
 ////////////////////////////////////////////////
 /////////////////////////////////////////////////
-
 #[repr(C)]
-pub struct WriteEntryC {
-    pub buffer: *const u8,
-    pub length: usize,
-    pub offset: i64,
+pub struct WriteElementC {
+    pub pointer: *const u8,
+    pub offset: usize,
 }
-
-// #[repr(C)]
-// pub struct ReadInstance{
-//     pub size : u64,
-//     pub offset : u64,
-//     pub buffer : *mut u8,
-// }
-
-// #[repr(C)]
-// pub struct ReadEntry{
-//     pub buffer_array : *mut ReadInstance,
-//     pub len : u64
-// }
 
 #[derive(Clone)]
-pub struct WriteEntry {
+pub struct WriteElement {
     pub buffer: Arc<Vec<u8>>,
-    pub length: usize,
     pub offset: i64,
 }
-impl WriteEntry {
-    fn to_c(&self) -> WriteEntryC {
-        WriteEntryC {
-            buffer: self.buffer.as_slice().as_ptr(),
-            length: self.length,
-            offset: self.offset,
+
+impl WriteElement {
+    fn to_c(&self) -> WriteElementC {
+        WriteElementC {
+            pointer: self.buffer.as_slice().as_ptr(),
+            offset: self.offset as usize,
         }
     }
 }
 
 #[link(name = "io", kind = "static")]
 unsafe extern "C" {
-    pub unsafe fn batch_write_data_c(buffer: *const WriteEntryC, len: usize, file: c_int) -> i32;
-    // unsafe fn batch_reads(re : *mut ReadEntry,file : i32) -> i32;
+    unsafe fn batch_write(
+        buffer_size: usize,
+        buffer_length: usize,
+        entries: *const WriteElementC,
+        fd: c_int,
+    ) -> i32;
 }
 
-// pub fn batch_reads_abs(mut read_instances : Vec<ReadInstance>,file : &File) -> Result<(),Error>{
-//     let mut r = ReadEntry{
-//         len : read_instances.len() as u64,
-//         buffer_array: read_instances.as_mut_ptr()
-//     };
-//     let a : i32 = unsafe{batch_reads(&mut r, file.as_raw_fd().clone())};
+pub fn batch_write_data(
+    buffer_size: usize,
+    buffer_length: usize,
+    entries: &[WriteElement],
+    fd: c_int,
+) -> Result<i32, Error> {
+    if entries.is_empty() {
+        return Err(gerr("Entries vector cannot be empty"));
+    }
 
-//     match a {
-//         0 => Ok(()),
-//         -1 => Err(Error::new(ErrorKind::Other, "Failed to get SQE")),
-//         -2 => Err(Error::new(ErrorKind::Other, "Failed to init queue")),
-//         -3 => Err(Error::new(ErrorKind::Other, "Failed to submit io_uring_submit")),
-//         _ => Err(Error::new(ErrorKind::Other, "Something failed :P")),
-//     }
-// }
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.buffer.len() != buffer_size {
+            return Err(gerr(&format!(
+                "Entry {} has buffer size {} but expected {}",
+                i,
+                entry.buffer.len(),
+                buffer_size
+            )));
+        }
+    }
 
-pub fn batch_write_data(entries: Vec<WriteEntry>, len: usize, file: c_int) -> i32 {
-    let c_buffer: Vec<WriteEntryC> = entries.iter().map(|f| f.to_c()).collect();
+    let c_buffer: Vec<WriteElementC> = entries.iter().map(|f| f.to_c()).collect();
 
-    unsafe { batch_write_data_c(c_buffer.as_ptr(), len, file) }
+    let result = unsafe { batch_write(buffer_size, buffer_length, c_buffer.as_ptr(), fd) };
+
+    Ok(result)
 }
 
 pub struct Database {
@@ -405,6 +410,7 @@ impl Database {
                     (b.total_memory() * self.settings.ds_cache as u64)
                         .saturating_div(100)
                         .saturating_div(self.containers.len() as u64),
+                        self.settings.operation_memory
                 )
                 .unwrap(),
             );
@@ -508,10 +514,10 @@ impl Database {
             settings.ds_cache = 15;
             rewrite = true;
         }
-        if settings.ds_cache < 1{
+        if settings.ds_cache < 1 {
             settings.ds_cache = 1;
         }
-        if settings.cache_size < 1{
+        if settings.cache_size < 1 {
             settings.cache_size = 1;
         }
 
@@ -552,6 +558,7 @@ impl Database {
 
         match ast {
             AST::CreateContainer(structure) => {
+                if DEBUG{println!("[CREATE_CONTAINER]");};
                 if structure.name.len() > 60 {
                     return Err(gerr(&format!(
                         "Failed to create container, the maximum length of a container name is 60, the entered is {}",
@@ -600,6 +607,7 @@ impl Database {
                     structure.col_nam,
                     self.settings.cache_size,
                     1,
+                    self.settings.operation_memory
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
@@ -613,6 +621,8 @@ impl Database {
                 }
             }
             AST::CreateRow(structure) => {
+                if DEBUG{println!("[CREATE_ROW]");};
+
                 let mut container = match self.container.get_mut(&structure.container) {
                     None => {
                         return Err(gerr(&format!(
@@ -648,6 +658,8 @@ impl Database {
                 container.push_row(val)?;
             }
             AST::Search(structure) => {
+                if DEBUG{println!("[SEARCH]");};
+
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
                 } else {
@@ -707,6 +719,8 @@ impl Database {
                 return Ok(q);
             }
             AST::EditRow(structure) => {
+                if DEBUG{println!("[EDIT_ROW]");};
+
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
                 } else {
@@ -745,6 +759,7 @@ impl Database {
                 });
             }
             AST::DeleteRow(structure) => {
+                if DEBUG {println!("[DELETE ROW]")};
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
                 } else {
@@ -784,6 +799,7 @@ impl Database {
                 });
             }
             AST::DeleteContainer(structure) => {
+                if DEBUG{println!("[DELETE CONTAINER]");}
                 if self.containers.contains(&structure.container) {
                     let mut ind = Vec::new();
                     for (i, name) in self.containers.iter().enumerate() {
@@ -814,6 +830,7 @@ impl Database {
                 }
             }
             AST::Commit(structure) => match structure.container {
+                
                 Some(container) => match self.container.get_mut(&container) {
                     Some(a) => {
                         a.lock().unwrap().commit().unwrap();
