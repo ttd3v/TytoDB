@@ -28,7 +28,7 @@ use rand::{Rng, TryRngCore, rngs::OsRng};
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
 
-const DEBUG : bool = true;
+const DEBUG : bool = false;
 pub const MAX_STR_LEN: usize = 256;
 const DEFAULT_SETTINGS: &str = r#"
 # Delete the comments if the size of the config file bothers you ;)

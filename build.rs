@@ -28,7 +28,6 @@ fn main() {
         hashmap_build.flag("-O3");
     }
     hashmap_build.compile("hashmap");
-
     println!("cargo:rustc-link-lib=static=io");
     println!("cargo:rustc-link-lib=static=hashmap");
     println!("cargo:rustc-link-lib=static=uring");

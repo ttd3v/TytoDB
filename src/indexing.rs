@@ -5,8 +5,6 @@ use std::{
     ptr::null_mut,
 };
 
-use chrono::OutOfRange;
-
 use crate::gerr;
 
 #[repr(C)]
@@ -137,7 +135,7 @@ impl IndexingHashmap {
         }
     }
     pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>, Error> {
-        let mut keys = keys;
+        let keys = keys;
         let mut input = GetInput {
             count: keys.len() as u32,
             key: keys.as_ptr() as *mut u64,
@@ -170,7 +168,7 @@ impl IndexingHashmap {
                 "Error, failed to perform get in the hashmap: Null pointer returned",
             ));
         }
-        unsafe{println!("{:?}",*v)};
+        unsafe { println!("{:?}", *v) };
         Ok(unsafe {
             let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
             let mut b = Vec::new();
@@ -199,10 +197,10 @@ impl IndexingHashmap {
         println!("ke {}", keys.len());
         let mut input = WriteInput {
             count: keys.len() as u32,
-            key: keys.as_ptr() as *mut u64,                 
+            key: keys.as_ptr() as *mut u64,
             value: values.as_ptr() as *mut u64,
             exists: exists.as_ptr() as *mut u8,
-        }; 
+        };
 
         println!("~");
         let execution_product = unsafe {

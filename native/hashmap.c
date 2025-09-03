@@ -1,6 +1,7 @@
 #include "lib.h"
 #include "hashmap.h"
 #include "burning_map.h"
+
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <stddef.h>
@@ -11,15 +12,15 @@
 #include <sys/types.h>
 #include "error.h"
 #include <fcntl.h>
-#include <sys/stat.h>  // for struct stat, fstat
-#include <string.h>    // for string operations
+#include <sys/stat.h>  
+#include <string.h>   
 #include <stdbool.h>
 #include <inttypes.h>
 
-const unsigned long BUCKET_SIZE_MARGIN = 5;
-const unsigned long DEFAULT_BUCKET_SIZE = 240;
+const unsigned long DEFAULT_BUCKET_SIZE = 1000;
 const unsigned long HASHMAP_BLOCK_SIZE = 32;
-const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 2;
+const unsigned long HASHMAP_REBUCKET_GROWTH_FACTOR = 20;
+
 
 int datasync(int fd) {
 #ifdef _POSIX_SYNCHRONIZED_IO
@@ -68,29 +69,6 @@ HashmapMetadata deserialize_hashmapmetadata(unsigned char*const buffer){
     return value;
 }
 
-/*  Hashmap
- *  
- *  - File
- *  In this structure the file is a descriptor to operate with the disk space
- *  
- *  - Bucket_size
- *  The bucket_size is the size that the hashmap capacity (which is also limited by the margin)
- *  
- *  - Len
- *  Count of elements the hashmap is storing
- *
- *  - BUCKET_SIZE_MARGIN
- *  A constant that limits the len to **bucket_size - bucket_size*(BUCKET_SIZE_MARGIN/100)**. For example, if the value is 25(default) and the bucket size is
- *  1000 then 1000-1000*(25/100) = 750 
- *
- */
-
-
-
-
-
-/// Hashmap_draw_defaults
-///     Sets the file layout of a hashmap file
 ExecutionProduct hashmap_draw_defaults(FILE *file,uint64_t bucket_size){
     int fd = fileno(file);
     off_t total_size = bucket_size * sizeof(Cell) + sizeof(HashmapMetadata);
@@ -323,80 +301,140 @@ ExecutionProduct remove_cell(vector_cellptr *value, uint64_t index) {
 typedef uint64_t u64;
 typedef size_t usize;
 
+
 ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
     ExecutionProduct PRODUCT = 0;
-    u_int8_t e = 0;
-    u_int8_t FLAGS = 0;
+    uint8_t FLAGS = 0;
     unsigned char *reading = NULL;
-    struct io_uring *ring;
+    uint64_t *offsets = NULL;
+    struct io_uring alloc_ring;
+    struct io_uring *ring = &alloc_ring;
+
     clean:
-        if (e>0){
-            if((FLAGS & 64) == 64){free(reading);};
+        if (FLAGS != 0){
+            if((FLAGS & 64) == 64){free(reading);}
             if((FLAGS & 128) == 128){io_uring_queue_exit(ring);}
+            if((FLAGS & 32) == 32){free(offsets);}
             return PRODUCT;
         }
-    e++;
 
-    uint64_t offsets[entry->count];
-    uint64_t offsets_l = 0;
-    { 
-        for(size_t i = 0; i < entry->count; i++){
-            u_int64_t offset = ((self->bucket_size / HASHMAP_BLOCK_SIZE) % entry->key[i]) * sizeof(Cell) * HASHMAP_BLOCK_SIZE;
-            u_int8_t m = 1;
-            for (size_t j = 0; j < offsets_l; j++){
-                if(offsets[j] == offset){m = 0;}
-            }
-            if(m == 1){offsets[offsets_l] = offset; offsets_l++;};
-        }
+    uint64_t cached_results[entry->count];
+    size_t cached_results_length = 0;
+    offsets = (uint64_t*)malloc(entry->count * sizeof(uint64_t));
+    if(!offsets){
+        PRODUCT = -2;
+        goto clean;
+    } else {
+        FLAGS |= 32;
     }
-    reading = malloc(offsets_l*sizeof(Cell)*HASHMAP_BLOCK_SIZE);
-    if(reading){
+
+    uint64_t offsets_l = 0;
+    {
+        uint64_t blocks[entry->count];
+        size_t blocks_length = 0;
+        
+        for(size_t i = 0; i < entry->count; i++){
+            SomeI64 p = get_burningmap(self->cache, entry->key[i]);
+            if(p.Some){
+                cached_results[cached_results_length] = p.Some;
+                cached_results_length++;
+            }
+
+            uint64_t chunk = (self->bucket_size / HASHMAP_BLOCK_SIZE) % entry->key[i];
+            uint64_t offset = chunk * sizeof(Cell) * HASHMAP_BLOCK_SIZE;
+            
+            
+            uint8_t found = 0;
+            for (size_t j = 0; j < blocks_length; j++){
+                if(blocks[j] == chunk){
+                    found = 1;
+                    break;
+                }
+            }
+            
+            if(!found){
+                blocks[blocks_length] = chunk;
+                offsets[blocks_length] = offset;
+                blocks_length++;
+            }
+        }
+        offsets_l = blocks_length;
+    }
+
+    reading = malloc(offsets_l * sizeof(Cell) * HASHMAP_BLOCK_SIZE);
+    if(!reading){
+        PRODUCT = -2;
+        goto clean;
+    } else {
         FLAGS |= 64;
-    }else{
+    }
+
+    
+    PRODUCT = io_uring_queue_init(offsets_l, ring, 0);
+    if (PRODUCT < 0){
+        PRODUCT = -6;
+        goto clean;
+    } else {
+        FLAGS |= 128;
+    }
+
+    
+    for (size_t i = 0; i < offsets_l; i++){
+        struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+        if (!sqe) {
+            PRODUCT = -7;
+            goto clean;
+        }
+        io_uring_prep_read(sqe, self->file, 
+                          reading + (i * sizeof(Cell) * HASHMAP_BLOCK_SIZE), 
+                          sizeof(Cell) * HASHMAP_BLOCK_SIZE, 
+                          offsets[i]);
+    }
+
+    if (io_uring_submit_and_wait(ring, offsets_l) < 0){
+        PRODUCT = -1;
+        goto clean;
+    }
+
+    
+    foreign_output->count = entry->count;
+    foreign_output->success = 1;
+    foreign_output->value = malloc(sizeof(OptionUINT64) * entry->count);
+    if (!foreign_output->value){
         PRODUCT = -2;
         goto clean;
     }
 
     
-    PRODUCT = io_uring_queue_init(offsets_l,ring,0);
-    if (PRODUCT < 0){
-        PRODUCT = -6;
-        goto clean;
-    }else{
-        FLAGS |= 128;
-    }
-
-    for (size_t i = 0; i < offsets_l; i++){
-        struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-        io_uring_prep_read(sqe, self->file, reading+(i*sizeof(Cell)*HASHMAP_BLOCK_SIZE), sizeof(Cell)*HASHMAP_BLOCK_SIZE, offsets[i]);
-    }
-    if (io_uring_submit_and_wait(ring, offsets_l) < 0){PRODUCT = -1;goto clean;}
-
-
-    foreign_output->count = entry->count;
-    foreign_output->success = 1;
-    foreign_output->value = malloc(sizeof(OptionUINT64)*entry->count);
-    if (!foreign_output->value){
-        PRODUCT = -2;
-        goto clean;
-    }
-    for(size_t j = 0; j < entry->count; j++){
-        OptionUINT64 in;
-        in.value = 0;
-        in.some = -1;
-        for(size_t i = 0; i < offsets_l*HASHMAP_BLOCK_SIZE; i ++){
-            Cell c = deserialize_cell(reading + (i*sizeof(Cell)));
+    for(size_t j = 0; j < offsets_l; j++){
+        OptionUINT64 result;
+        result.value = 0;
+        result.some = -1; 
+        
+        
+        for(size_t i = 0; i < offsets_l * HASHMAP_BLOCK_SIZE; i++){
+            Cell c = deserialize_cell(reading + (i * sizeof(Cell)));
             if (c.exists && c.key == entry->key[j]){
-                in.value = c.value;
+                result.value = c.value;
+                result.some = 1;
+                add_burningmap(self->cache, c.key, c.value);
                 break;
             }
         }
-        foreign_output->value[j] = in;
+        
+        foreign_output->value[j] = result;
     }
-   
-    PRODUCT=0;
+    for(size_t i = 0; i<cached_results_length;i++){
+        OptionUINT64 r;
+        r.value = cached_results[i];
+        r.some = 1;
+        foreign_output->value[offsets_l+i] = r;        
+    }
+
+    PRODUCT = 0;
     goto clean;
 }
+
 
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries);
 ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
@@ -406,7 +444,6 @@ ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
     list->capacity = initial_count;
     list->count = initial_count;
     
-    // Initialize with all customer indices
     for (u64 i = 0; i < initial_count; i++) {
         list->indices[i] = i;
     }
@@ -414,7 +451,6 @@ ExecutionProduct init_customer_list(customer_list *list, u64 initial_count) {
 }
 
 void remove_customer(customer_list *list, u64 position) {
-    // Shift remaining customers left
     for (u64 i = position; i < list->count - 1; i++) {
         list->indices[i] = list->indices[i + 1];
     }
@@ -467,135 +503,251 @@ void dump(unsigned char* a, unsigned char* b, size_t size){
 }
 
 ExecutionProduct hashmap_write(struct Hashmap *self, struct WriteInput *entry){
+    printf("== hashmap_write\n");
+    struct io_uring alloc_ring;
     uint8_t FLAGS = 0;
-    struct io_uring *ring;
-    unsigned char *reading_buffer = NULL; 
+    struct io_uring *ring = &alloc_ring;
+    unsigned char *reading_buffer = NULL;
     unsigned char *writing_buffer = NULL;
-    unsigned char *offsets = NULL; 
+    uint64_t *offsets = NULL;
+    uint64_t *writing_offsets = NULL;
+    uint64_t writing_length = 0; 
+    size_t step = 0;
+    printf("i %zu\n",step++); 
     int PRODUCT = 0;
     clean:
         if(FLAGS != 0){
-            if((0x00 | (FLAGS >> 7)) == 1){io_uring_queue_exit(ring);}
-            if(((0x00 | (FLAGS >> 6))&1) == 1){free(offsets);}
-            if(((0x00 | (FLAGS >> 5))&1)  == 1){free(reading_buffer);};
-            if((0x00 | ((FLAGS >> 4)&1)) == 1){free(writing_buffer);};
+            if((FLAGS & 128) == 128){io_uring_queue_exit(ring);}
+            if(offsets != NULL){free(offsets);}
+            if(reading_buffer != NULL){free(reading_buffer);}
+            if(writing_buffer != NULL && (FLAGS & 32) == 32){free(writing_buffer);}
+            if((FLAGS & 16) == 16){free(writing_offsets);}
             return PRODUCT;
         }
+    printf("i %zu\n",step++);
     uint64_t offsets_l = 0;
 
+    
     {
-        u_int64_t blocks[entry->count];
-        size_t blocks_length = 0;  
+        uint64_t blocks[entry->count];
+        size_t blocks_length = 0;
         uint8_t m = 0;
         for(size_t index = 0; index < entry->count; index++){
-            m=1;
+            m = 1;
             size_t chunk = (self->bucket_size/HASHMAP_BLOCK_SIZE) % entry->key[index];
-            for(size_t subidx = 0; subidx < blocks_length;subidx++){
-                if(blocks[subidx] == chunk){m=0;break;};
+            deplete_burningmap(self->cache, entry->key[index]);
+            for(size_t subidx = 0; subidx < blocks_length; subidx++){
+                if(blocks[subidx] == chunk){m = 0; break;}
             }
-            if(m==1){
-                blocks[index] = chunk;
+            if(m == 1){
+                blocks[blocks_length] = chunk; 
                 blocks_length++;
             }
         }
-        offsets = malloc(blocks_length*sizeof(uint64_t));
+        
+        offsets = malloc(blocks_length * sizeof(uint64_t));
         if (!offsets){
             PRODUCT = -2;
             goto clean;
-        }else{
-            FLAGS ^= (1 << 6);
+        } else {
+            FLAGS |= 64;
         }
+        
         for(size_t i = 0; i < blocks_length; i++){
             offsets[i] = blocks[i] * sizeof(Cell) * HASHMAP_BLOCK_SIZE;
         }
         offsets_l = blocks_length;
     }
-
+    printf("i %zu\n",step++);
+    reading_buffer = malloc(offsets_l * sizeof(Cell) * HASHMAP_BLOCK_SIZE);
     if(!reading_buffer){
         PRODUCT = -2;
         goto clean;
-    }else{
-        FLAGS ^= (1 << 5);
+    } else {
+        FLAGS |= 32;
     }
 
-
-    PRODUCT = io_uring_queue_init(offsets_l, ring, 0);
+    writing_offsets = (uint64_t*)malloc(sizeof(uint64_t) * entry->count);
+    if(!writing_offsets){
+        PRODUCT = -2;
+        goto clean;
+    } else {
+        FLAGS |= 16;
+    }
+    printf("i %zu\n",step++);
+    
+    PRODUCT = io_uring_queue_init(entry->count * 2, ring, 0);
     if (PRODUCT < 0){
-        goto clean; 
-    }else{
+        PRODUCT = -6;
+        goto clean;
+    } else {
         FLAGS |= 128;
     }
 
-
+    
     for(size_t index = 0; index < offsets_l; index++){
         struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-        if(!sqe) {PRODUCT = -1;goto clean;};
-        io_uring_prep_read(sqe, self->file, reading_buffer+(index*sizeof(Cell)*HASHMAP_BLOCK_SIZE), sizeof(Cell)*HASHMAP_BLOCK_SIZE, offsets[index]);
+        if(!sqe) {
+            PRODUCT = -1;
+            goto clean;
+        }
+        io_uring_prep_read(sqe, self->file, 
+                          reading_buffer + (index * sizeof(Cell) * HASHMAP_BLOCK_SIZE),
+                          sizeof(Cell) * HASHMAP_BLOCK_SIZE, 
+                          offsets[index]);
     }
-
+    printf("i %zu\n",step++);
     PRODUCT = io_uring_submit_and_wait(ring, offsets_l);
     if (PRODUCT < 0){
         goto clean;
     }
 
-    io_uring_queue_exit(ring);
-    FLAGS ^= 128;
-
-    uint64_t writing_offsets[entry->count];
-    size_t writing_length = 0;
-    writing_buffer = malloc(sizeof(Cell)*writing_length);
-    if(!writing_buffer){PRODUCT=-2; goto clean;}else{FLAGS |= (1 << 4);}
     
-    {
-        uint8_t g = 0;
-        size_t ji = 0;
-        for (size_t i = 0; i < offsets_l * HASHMAP_BLOCK_SIZE;i++){
-            Cell c = deserialize_cell(reading_buffer+i*sizeof(Cell));
-            for(size_t j = ji; j < entry->count;j++){
-                g=0;
-                if (c.key == entry->key[j] && c.exists){
+    writing_buffer = malloc(sizeof(Cell) * entry->count);
+    if(!writing_buffer){
+        PRODUCT = -2; 
+        goto clean;
+    }
+
+    
+    uint64_t entries_written = 0;
+    bool *entry_processed = calloc(entry->count, sizeof(bool));
+    if (!entry_processed) {
+        PRODUCT = -2;
+        goto clean;
+    }
+    printf("i %zu\n",step++);
+    for (size_t i = 0; i < offsets_l * HASHMAP_BLOCK_SIZE; i++){
+        Cell c = deserialize_cell(reading_buffer + (i * sizeof(Cell)));
+        
+        if (c.exists) {
+            
+            for(size_t j = 0; j < entry->count; j++){
+                if (!entry_processed[j] && c.key == entry->key[j]) {
+                    
                     c.value = entry->value[j];
                     c.exists = entry->exists[j];
-                    g=1;
-                }
-                if(!c.exists){
-                    c.exists = 1;
-                    c.value = *entry->value;
-                    c.key = *entry->key;
-                }
-                if(g){
-                    serialize_cell(&c,writing_buffer+writing_length*sizeof(Cell));    
-                    writing_offsets[writing_length] = offsets[i]+(i*sizeof(Cell)*HASHMAP_BLOCK_SIZE);
-                    ji++;
+                    
+                    serialize_cell(&c, writing_buffer + writing_length * sizeof(Cell));
+                    writing_offsets[writing_length] = offsets[i / HASHMAP_BLOCK_SIZE] + 
+                                                     ((i % HASHMAP_BLOCK_SIZE) * sizeof(Cell));
+                    writing_length++; 
+                    entry_processed[j] = true;
                     break;
                 }
             }
         }
-        if(ji < entry->count){
-            PRODUCT = hashmap_rebucket(self, entry);
-            if(PRODUCT < 0){
-                goto clean;
+    }
+    printf("i %zu\n",step++);
+    
+    for (size_t i = 0; i < offsets_l * HASHMAP_BLOCK_SIZE; i++){
+        Cell c = deserialize_cell(reading_buffer + (i * sizeof(Cell)));
+        
+        if (!c.exists) {
+            
+            for(size_t j = 0; j < entry->count; j++){
+                if (!entry_processed[j]) {
+                    
+                    c.exists = entry->exists[j];
+                    c.value = entry->value[j];
+                    c.key = entry->key[j];
+                    
+                    serialize_cell(&c, writing_buffer + writing_length * sizeof(Cell));
+                    writing_offsets[writing_length] = offsets[i / HASHMAP_BLOCK_SIZE] + 
+                                                     ((i % HASHMAP_BLOCK_SIZE) * sizeof(Cell));
+                    writing_length++; 
+                    entry_processed[j] = true;
+                    entries_written++;
+                    break;
+                }
             }
         }
-    } 
+    }
+    printf("i %zu\n",step++);
+    if(entry_processed != NULL)free(entry_processed);
 
-    PRODUCT = io_uring_queue_init(writing_length, ring, 0);
-    if (PRODUCT < 0){
-        goto clean;
-    }else{
-        FLAGS |= 128;
+    
+    self->len += entries_written;
+
+    
+    if(self->len > (self->bucket_size * 57) / 100){
+        
+        struct WriteInput remaining = {0};
+        remaining.count = 0;
+        remaining.key = malloc(sizeof(uint64_t) * entry->count);
+        remaining.value = malloc(sizeof(uint64_t) * entry->count);
+        remaining.exists = malloc(sizeof(uint8_t) * entry->count);
+        
+        if (!remaining.key || !remaining.value || !remaining.exists) {
+            if (remaining.key != NULL) free(remaining.key);
+            if (remaining.value != NULL) free(remaining.value);
+            if (remaining.exists != NULL) free(remaining.exists);
+            PRODUCT = -2;
+            goto clean;
+        }
+        printf("i %zu\n",step++);
+        
+        for (size_t j = 0; j < entry->count; j++) {
+            bool found = false;
+            for (size_t w = 0; w < writing_length; w++) {
+                Cell written_cell;
+                memcpy(&written_cell, writing_buffer + w * sizeof(Cell), sizeof(Cell));
+                if (written_cell.key == entry->key[j]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                remaining.key[remaining.count] = entry->key[j];
+                remaining.value[remaining.count] = entry->value[j];
+                remaining.exists[remaining.count] = entry->exists[j];
+                remaining.count++;
+            }
+        }
+        printf("iy %zu\n",step++);
+        PRODUCT = hashmap_rebucket(self, &remaining);
+        if(remaining.key!=NULL){free(remaining.key);};
+        if(remaining.value!=NULL){free(remaining.value);};
+        if(remaining.exists!=NULL){free(remaining.exists);};
+        
+        if(PRODUCT < 0){
+            goto clean;
+        }
     }
 
+    printf("i %zu\n",step++);  
     for (size_t w = 0; w < writing_length; w++){
         struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-        if (!sqe) {PRODUCT = -1;goto clean;}
-        io_uring_prep_write(sqe, self->file, writing_buffer+w*sizeof(Cell), sizeof(Cell), writing_offsets[w]);
+        if (!sqe) {
+            PRODUCT = -7;
+            goto clean;
+        }
+        io_uring_prep_write(sqe, self->file, 
+                           writing_buffer + w * sizeof(Cell), 
+                           sizeof(Cell), 
+                           writing_offsets[w]);
+    }
+    printf("i %zu\n",step++);
+    if (writing_length > 0) {
+        PRODUCT = io_uring_submit_and_wait(ring, writing_length);
+        if(PRODUCT < 0){
+            PRODUCT = -1;
+            goto clean;
+        }
     }
 
-    PRODUCT = io_uring_submit_and_wait(ring, writing_length);
-    if(PRODUCT < 0){
+    printf("i %zu\n",step++);  
+    PRODUCT = hashmap_save_metadata(self);
+    if (PRODUCT < 0) {
         goto clean;
     }
+    
+    for(size_t i = 0; i < entry->count; i++){
+        if(entry->exists[i]){
+            add_burningmap(self->cache, entry->key[i], entry->value[i]);
+        }
+    }
+    printf("i %zu\n",step++);
     PRODUCT = 0;
     goto clean;
 }
@@ -612,112 +764,113 @@ u64 clamp(u64 m, u64 n, u64 w){
 }
 
 
-
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries) {
-    FILE* temp = fopen(self->temp_path, "wb");
-    if (temp == NULL) return -5;
-    
-    char *temp_path;
-    asprintf(&temp_path, "%s.temp",self->path);
-    struct Hashmap temphm = {
-        .bucket_size = self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR,
-        .path = self->temp_path,
-        .file = fileno(temp),
-        .len = 0,
-        .temp_path = temp_path
-    };
-    ExecutionProduct hm_def = hashmap_draw_defaults(temp, self->bucket_size * HASHMAP_REBUCKET_GROWTH_FACTOR);
-    if (hm_def < 0){
-        printf("rebucket\n");
-        return hm_def;
-    };
-    
+    printf("=== hashmap_rebucket\n");
+    int FLAGS = 0;                                  
     unsigned char *buffer = NULL;
-    FILE *f = fdopen(self->file, "r+b");
-    
-    if(f == NULL){
-        printf("failed to open rebucket file\n");
-        fclose(temp);
-        remove(self->temp_path);
+    FILE* file = fopen(self->temp_path, "wa");
+    if (!file){
+        printf("failed to open file\n");
         return -1;
+    }else{
+        FLAGS |= 128;
     }
+    printf("step 0\n");
+    int PRODUCT = 100000;
+    clean:
+    printf("goto clean\n");
+        if(PRODUCT < 100000){
+            if((FLAGS & 128) == 128){fclose(file);}
+            if((FLAGS & 64) == 64){free(buffer);}
+        }
+
+    printf("step 1\n");
+    struct Hashmap map = (struct Hashmap){
+        fileno(file),
+        self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR,
+        0,
+        self->temp_path,
+        "",
+        self->cache
+    };
+    printf("step 2\n");
+    PRODUCT = hashmap_draw_defaults(file, self->bucket_size*HASHMAP_REBUCKET_GROWTH_FACTOR);
+    if (PRODUCT < 0){
+        goto clean;
+    }
+    printf("step 3\n");
     
-    u64 processed = 0;
-    buffer = malloc(READ_CHUNK + READ_CHUNK % sizeof(Cell));
-    while(processed < self->bucket_size){
-        u64 csize = clamp(self->bucket_size-processed, 1, (READ_CHUNK/sizeof(Cell))+1);
-        if(buffer == NULL){
-            fclose(f);
-            fclose(temp);
-            remove(self->temp_path);
-            return -2;
+    buffer = malloc(102400*sizeof(Cell));
+    if(!buffer){
+        PRODUCT = -2;
+        goto clean;
+    }else{
+        FLAGS |= 64;
+    }
+    printf("step 4\n");
+    for(u_int64_t i = 0; i < self->bucket_size;){
+
+        printf("loop step 0\n");
+        u_int64_t steps = clamp(self->bucket_size,1,102400);
+        int s = pread(self->file, buffer, steps*sizeof(Cell), i*sizeof(Cell));
+        if (s<0){
+            PRODUCT = -1;
+            printf("Failed to pread\n");
+            goto clean;
         }
-        
-        if(fread(buffer, sizeof(Cell), csize, f) != csize) {
-            
-            fclose(f);
-            fclose(temp);
-            remove(self->temp_path);
-            return -3;
+        printf("loop step 1\n");
+        struct WriteInput entry;
+        entry.key = (u_int64_t*)malloc(sizeof(u_int64_t)*steps);
+        entry.value = (u_int64_t*)malloc(sizeof(u_int64_t)*steps);
+        entry.exists = (u_int8_t*)malloc(sizeof(u_int8_t)*steps);
+        entry.count = 0; 
+        if(!entry.key){
+            PRODUCT = -2;
+            goto clean;
         }
-        u_int8_t exists[csize]; 
-        u_int64_t key[csize];
-        u_int64_t value[csize];
-        struct WriteInput a = {
-            .exists = exists,
-            .count = 0,  
-            .key = key,
-            .value = value
-        };
-        
-        
-        
-        
-        u64 valid_count = 0;
-        for(u64 i = 0; i < csize; i++){
-            Cell ce = deserialize_cell(buffer + i * sizeof(Cell));
-            if(ce.exists){
-                a.key[valid_count] = ce.key;     
-                a.value[valid_count] = ce.value;
-                a.exists[valid_count] = ce.exists;
-                valid_count++;
+        if(!entry.value){
+            if(entry.key != NULL){free(entry.key);};
+            PRODUCT = -2;
+            goto clean;
+        }
+        if(!entry.exists){
+            if(entry.key != NULL){free(entry.key);};
+            if(entry.value != NULL){free(entry.value);};
+            PRODUCT = -2;
+            goto clean;
+        }
+        printf("loop step 2\n");
+
+        for (u_int64_t k = 0; k < steps; k++){
+            Cell c = deserialize_cell(buffer + k*sizeof(Cell));
+            if(c.exists){
+                entry.exists[k] = c.exists;
+                entry.value[k] = c.value;
+                entry.key[k] = c.key;
+                entry.count++;
             }
         }
-        a.count = valid_count;  
-
-        ExecutionProduct res = hashmap_write(&temphm, &a);
-        
-        
-        if (res < 0){
-            fclose(f);
-            fclose(temp);
-            remove(self->temp_path);
-            return res;
-        }
-        
-        processed += csize;
+        printf("loop step 3\n");
+        printf("rebucket_hashmap_write 0\n");
+        PRODUCT = hashmap_write(&map, &entry);
+        if (PRODUCT < 0){goto clean;};
+        i += steps;
+        if(entry.key != NULL){free(entry.key);};
+        if(entry.value != NULL){free(entry.value);};
+        if(entry.exists != NULL){free(entry.exists);};
+    printf("loop step 4\n");
     }
-    free(buffer); 
-    fclose(f);
-    fclose(temp);
-    
+
     remove(self->path);
     rename(self->temp_path, self->path);
-    
-    FILE* fi = fopen(self->path, "r+b");
-    if(fi == NULL) {return -5;};      
-    self->file = fileno(fi); 
-    self->bucket_size *= HASHMAP_REBUCKET_GROWTH_FACTOR;
-    
-    if (remaining_entries->count > 0){
-        ExecutionProduct result = hashmap_write(self, remaining_entries);
-        if (result < 0) {
-            return result;
-        }
-
-
+    self->file = fileno(file);
+    self->bucket_size = map.bucket_size;
+    printf("%lu %lu\n",map.bucket_size,map.len);
+    PRODUCT = 0;
+    if(remaining_entries->count > 0){
+        PRODUCT = hashmap_write(self, remaining_entries);
     }
-    return 0;
+    goto clean;
 }
 
 
