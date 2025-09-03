@@ -1,7 +1,6 @@
 #include "lib.h"
 #include "hashmap.h"
 #include "burning_map.h"
-
 #include <liburing.h>
 #include <liburing/io_uring.h>
 #include <stddef.h>
@@ -301,7 +300,6 @@ ExecutionProduct remove_cell(vector_cellptr *value, uint64_t index) {
 typedef uint64_t u64;
 typedef size_t usize;
 
-
 ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struct GetOutput *foreign_output){
     ExecutionProduct PRODUCT = 0;
     uint8_t FLAGS = 0;
@@ -309,16 +307,17 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
     uint64_t *offsets = NULL;
     struct io_uring alloc_ring;
     struct io_uring *ring = &alloc_ring;
-
+    
+    uint64_t* cached_results = (uint64_t*)malloc(sizeof(uint64_t)*entry->count);
     clean:
         if (FLAGS != 0){
             if((FLAGS & 64) == 64){free(reading);}
             if((FLAGS & 128) == 128){io_uring_queue_exit(ring);}
             if((FLAGS & 32) == 32){free(offsets);}
+            if(cached_results != NULL){free(cached_results);};
             return PRODUCT;
         }
-
-    uint64_t cached_results[entry->count];
+    if(!cached_results){goto clean;};
     size_t cached_results_length = 0;
     offsets = (uint64_t*)malloc(entry->count * sizeof(uint64_t));
     if(!offsets){
@@ -428,7 +427,7 @@ ExecutionProduct hashmap_get(struct Hashmap *self, struct GetInput *entry, struc
         OptionUINT64 r;
         r.value = cached_results[i];
         r.some = 1;
-        foreign_output->value[offsets_l+i] = r;        
+        foreign_output->value[--offsets_l+i] = r;        
     }
 
     PRODUCT = 0;
@@ -763,7 +762,6 @@ u64 clamp(u64 m, u64 n, u64 w){
     return m < n?n:w;  
 }
 
-
 ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remaining_entries) {
     printf("=== hashmap_rebucket\n");
     int FLAGS = 0;                                  
@@ -780,9 +778,15 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
     clean:
     printf("goto clean\n");
         if(PRODUCT < 100000){
-            if((FLAGS & 128) == 128){fclose(file);}
+            if((FLAGS & 128) == 128){
+                // Only close the FILE* if we haven't transferred ownership
+                if(!(FLAGS & 256)) {
+                    fclose(file);
+                }
+            }
             if((FLAGS & 64) == 64){free(buffer);}
         }
+        return PRODUCT;
 
     printf("step 1\n");
     struct Hashmap map = (struct Hashmap){
@@ -858,12 +862,18 @@ ExecutionProduct hashmap_rebucket(struct Hashmap *self, struct WriteInput *remai
         if(entry.key != NULL){free(entry.key);};
         if(entry.value != NULL){free(entry.value);};
         if(entry.exists != NULL){free(entry.exists);};
-    printf("loop step 4\n");
+        printf("loop step 4\n");
     }
 
+    // Close the old file descriptor before removing
+    close(self->file);
+    
     remove(self->path);
     rename(self->temp_path, self->path);
+    
+    // Transfer ownership of the file descriptor
     self->file = fileno(file);
+    FLAGS |= 256; // Mark that we've transferred ownership
     self->bucket_size = map.bucket_size;
     printf("%lu %lu\n",map.bucket_size,map.len);
     PRODUCT = 0;

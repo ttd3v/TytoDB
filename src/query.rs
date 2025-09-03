@@ -328,7 +328,7 @@ pub fn search_with_action(
         let mut buffer = vec![0u8; args.element_size * remainder];
         let file_offset = args.header_offset as u64 + (count_its * chunk_size) as u64;
         // println!("Reading remainder at file_offset {}", file_offset);
-        file.read_exact_at(&mut buffer, file_offset).unwrap();
+        file.read_exact_at(&mut buffer, file_offset)?;
         for (j, row_bin) in buffer.chunks_exact(args.element_size).enumerate() {
             let offset_in_file =
                 args.header_offset + count_its * chunk_size + j * args.element_size;
