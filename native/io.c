@@ -4,13 +4,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <liburing.h>
 
 
 typedef struct{
     unsigned char* pointer;
-    size_t offset ;
+    u_int64_t offset ;
 } WriteElement;
 typedef struct {
     size_t order;
@@ -36,6 +37,7 @@ int batch_write(size_t buffer_size, size_t buffer_length, WriteElement* entries,
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
         if (!sqe) goto clean;
         io_uring_prep_write(sqe, fd, el.pointer, buffer_size, el.offset);
+        sqe->flags |= IOSQE_IO_HARDLINK;
     }
    
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);

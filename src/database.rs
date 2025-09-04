@@ -28,7 +28,7 @@ use rand::{Rng, TryRngCore, rngs::OsRng};
 /////////     DEFAULT_SETTINGS    ///////////////
 /////////////////////////////////////////////////
 
-const DEBUG : bool = false;
+const DEBUG: bool = false;
 pub const MAX_STR_LEN: usize = 256;
 const DEFAULT_SETTINGS: &str = r#"
 # Delete the comments if the size of the config file bothers you ;)
@@ -97,6 +97,7 @@ operation_memory: 10
 
 "#;
 
+pub type AbsoluteOffset = u64;
 type VacuumSpec = (String, String);
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -238,20 +239,20 @@ pub fn parse_schedule(input: &str) -> Result<Schedule, ScheduleError> {
 #[repr(C)]
 pub struct WriteElementC {
     pub pointer: *const u8,
-    pub offset: usize,
+    pub offset: u64,
 }
 
 #[derive(Clone)]
 pub struct WriteElement {
     pub buffer: Arc<Vec<u8>>,
-    pub offset: i64,
+    pub offset: AbsoluteOffset,
 }
 
 impl WriteElement {
     fn to_c(&self) -> WriteElementC {
         WriteElementC {
             pointer: self.buffer.as_slice().as_ptr(),
-            offset: self.offset as usize,
+            offset: self.offset,
         }
     }
 }
@@ -265,7 +266,6 @@ unsafe extern "C" {
         fd: c_int,
     ) -> i32;
 }
-
 pub fn batch_write_data(
     buffer_size: usize,
     buffer_length: usize,
@@ -410,7 +410,7 @@ impl Database {
                     (b.total_memory() * self.settings.ds_cache as u64)
                         .saturating_div(100)
                         .saturating_div(self.containers.len() as u64),
-                        self.settings.operation_memory
+                    self.settings.operation_memory,
                 )
                 .unwrap(),
             );
@@ -558,7 +558,9 @@ impl Database {
 
         match ast {
             AST::CreateContainer(structure) => {
-                if DEBUG{println!("[CREATE_CONTAINER]");};
+                if DEBUG {
+                    println!("[CREATE_CONTAINER]");
+                };
                 if structure.name.len() > 60 {
                     return Err(gerr(&format!(
                         "Failed to create container, the maximum length of a container name is 60, the entered is {}",
@@ -607,7 +609,7 @@ impl Database {
                     structure.col_nam,
                     self.settings.cache_size,
                     1,
-                    self.settings.operation_memory
+                    self.settings.operation_memory,
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
@@ -621,7 +623,9 @@ impl Database {
                 }
             }
             AST::CreateRow(structure) => {
-                if DEBUG{println!("[CREATE_ROW]");};
+                if DEBUG {
+                    println!("[CREATE_ROW]");
+                };
 
                 let mut container = match self.container.get_mut(&structure.container) {
                     None => {
@@ -658,7 +662,9 @@ impl Database {
                 container.push_row(val)?;
             }
             AST::Search(structure) => {
-                if DEBUG{println!("[SEARCH]");};
+                if DEBUG {
+                    println!("[SEARCH]");
+                };
 
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
@@ -719,7 +725,9 @@ impl Database {
                 return Ok(q);
             }
             AST::EditRow(structure) => {
-                if DEBUG{println!("[EDIT_ROW]");};
+                if DEBUG {
+                    println!("[EDIT_ROW]");
+                };
 
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
@@ -759,7 +767,9 @@ impl Database {
                 });
             }
             AST::DeleteRow(structure) => {
-                if DEBUG {println!("[DELETE ROW]")};
+                if DEBUG {
+                    println!("[DELETE ROW]")
+                };
                 let container = if let Some(a) = self.container.get(&structure.container) {
                     a
                 } else {
@@ -799,7 +809,9 @@ impl Database {
                 });
             }
             AST::DeleteContainer(structure) => {
-                if DEBUG{println!("[DELETE CONTAINER]");}
+                if DEBUG {
+                    println!("[DELETE CONTAINER]");
+                }
                 if self.containers.contains(&structure.container) {
                     let mut ind = Vec::new();
                     for (i, name) in self.containers.iter().enumerate() {
@@ -830,7 +842,6 @@ impl Database {
                 }
             }
             AST::Commit(structure) => match structure.container {
-                
                 Some(container) => match self.container.get_mut(&container) {
                     Some(a) => {
                         a.lock().unwrap().commit().unwrap();

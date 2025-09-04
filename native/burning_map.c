@@ -17,30 +17,12 @@ BurningMap* new_burningmap(u_int64_t KiB){
    for(u_int64_t i = 0;i<geral_structure->capacity;i++) geral_structure->paper_vector[i] = (Paper){0,0,0};
    return geral_structure;
 }
-#if defined(__AES__)
-//#pragma message("AES-NI path enabled")
-#include <wmmintrin.h>
-
-static inline uint64_t hash(uint64_t x) {
-    __m128i block = _mm_set_epi64x(0, x);
-    block = _mm_aesenc_si128(block, _mm_setzero_si128());
-    uint64_t result;
-    _mm_storel_epi64((__m128i*)&result, block);
-    return result;
-}
-
-#else
-//#pragma message("AES-NI path disabled")
-
-// Fallback if AES-NI not available
 static inline uint64_t hash(uint64_t x) {
     x += 0x9e3779b97f4a7c15;
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9;
     x = (x ^ (x >> 27)) * 0x94d049bb133111eb;
     return x ^ (x >> 31);
 }
-
-#endif
 
 void add_burningmap(BurningMap *self, u_int64_t key, u_int64_t value){
     Paper* p = &self->paper_vector[hash(key)%self->capacity];
