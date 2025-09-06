@@ -7,7 +7,7 @@ use crate::{
 };
 use bitvec::prelude::*;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     hash::{DefaultHasher, Hash, Hasher},
     io::{Error, ErrorKind, Read, Write},
@@ -80,7 +80,7 @@ pub struct Container {
     pub headers: Vec<(String, AlbaTypes)>,
     pub mvcc: MvccType,
     pub headers_offset: u64,
-    pub graveyard: Arc<Mutex<BTreeSet<u64>>>,
+    pub graveyard: Arc<Mutex<HashSet<u64>>>,
     pub index_map: Arc<Mutex<IndexingHashMap>>,
     pub mvcc_record: Arc<Mutex<MvccRecord>>,
     pub ds_cache: Arc<Mutex<BurningMap>>,
@@ -238,7 +238,7 @@ impl Container {
             mvcc: Arc::new(Mutex::new((Vec::new(), HashMap::new()))),
             headers_offset,
             headers,
-            graveyard: Arc::new(Mutex::new(BTreeSet::new())),
+            graveyard: Arc::new(Mutex::new(HashSet::new())),
             mvcc_record: Arc::new(Mutex::new(MvccRecord::new(format!("{}.mr", path))?)),
             index_map: Arc::new(Mutex::new(IndexingHashMap::new(path.to_string(), kib)?)),
             file: Arc::new(Mutex::new(file)),
@@ -363,10 +363,6 @@ const MAX_VACUUM_LENGTH: usize = 625000;
 impl Container {
     pub fn get_next_addr(&self) -> Result<u64, Error> {
         let mv = self.mvcc.lock().unwrap();
-        let mut gy = self.graveyard.lock().unwrap();
-        if let Some(s) = gy.pop_first() {
-            return Ok(s);
-        }
         let m = mv.0.iter().max_by(|a, b| a.0.cmp(&b.0));
         let size = self.file.lock().unwrap().metadata()?.size();
         if let Some(m) = m {
@@ -556,7 +552,6 @@ impl Container {
         let mut gy = self.graveyard.lock().unwrap();
         for i in mvcc.0.iter() {
             let mut value = i.1.1.clone();
-            into_schema(&mut value, &self.columns())?;
             if let MvccState::Delete = i.1.0 {
                 dataset_batch.push(WriteElement {
                     buffer: empty.clone(),
@@ -569,11 +564,13 @@ impl Container {
                 continue;
             }
             if let MvccState::Insert = i.1.0 {
+                into_schema(&mut value, &self.columns())?;
                 let ink = self.serialize_row(&value)?;
                 dataset_batch.push(WriteElement {
                     buffer: ink.clone().into(),
                     offset: i.0.into(),
                 });
+                gy.remove(&i.0);
                 let idx = get_index(value[0].clone());
                 index_batch.push((true, idx, i.0));
                 ds.add(i.0, ink);

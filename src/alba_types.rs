@@ -178,6 +178,7 @@ fn serialize_closed_blob(item_size: usize, mut blob: Vec<u8>, buffer: &mut Vec<u
 
 pub fn into_schema(target: &mut Vec<AlbaTypes>, schema: &Vec<AlbaTypes>) -> Result<(), Error> {
     if target.len() != schema.len() {
+        eprintln!("{:?} | {:?}", target, schema);
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!(

@@ -50,7 +50,7 @@ pub fn search(
         let v = lck.index_map.lock().unwrap().get(u)?;
 
         for offset in v {
-            if gy.contains(&offset) {
+            if gy.get(&offset).is_some() {
                 println!("skipped");
                 continue;
             }
@@ -95,6 +95,7 @@ pub fn search(
 
             if gy.get(&(offset_in_file as u64)).is_some() {
                 continue;
+                println!("skipped");
             }
             if row_bin == empty {
                 if space_gy < MAX_GRAVEYARD_LENGTH_IN_MEMORY {
@@ -198,6 +199,8 @@ pub fn search_with_action(
 
         for offset in v {
             if gy.contains(&offset) {
+                //continue;
+                println!("skipped action index");
                 continue;
             }
             let mut buff = vec![0u8; args.element_size];
@@ -211,18 +214,19 @@ pub fn search_with_action(
             let mut b = Row {
                 data: lck.deserialize_row(&buff)?,
             };
+            println!("b{:?}", b.data);
 
             if args.conditions.row_match(&b, column_names)? {
                 res.0.push(b.clone());
                 res.1.push(offset);
                 match action_type {
                     ActionType::Edit((_, _)) => {
-                        mvcc.0
-                            .push((offset as u64, (MvccState::Delete, b.data.clone())));
-
                         for j in indexes.iter() {
                             b.data[j.0] = j.1.clone();
                         }
+                        println!("be:{:?}", b.data);
+                        mvcc.0
+                            .push((offset as u64, (MvccState::Delete, b.data.clone())));
 
                         mvcc.0
                             .push((offset as u64, (MvccState::Insert, b.data.clone())));
@@ -254,6 +258,8 @@ pub fn search_with_action(
             let offset_in_file = args.header_offset + i * chunk_size + j * args.element_size;
 
             if gy.get(&(offset_in_file as u64)).is_some() {
+                //continue;
+                println!("skipped action");
                 continue;
             }
             if row_bin == empty {
@@ -267,15 +273,16 @@ pub fn search_with_action(
             let bare_row = lck.deserialize_row(row_bin)?;
             let mut row = Row { data: bare_row };
 
+            println!("b1{:?}", row.data);
             if args.conditions.row_match(&row, &column_names)? {
                 match action_type {
                     ActionType::Edit((_, _)) => {
-                        mvcc.0
-                            .push((offset_in_file as u64, (MvccState::Delete, row.data.clone())));
-
                         for j in indexes.iter() {
                             row.data[j.0] = j.1.clone();
                         }
+                        println!("be1:{:?}", row.data);
+                        mvcc.0
+                            .push((offset_in_file as u64, (MvccState::Delete, row.data.clone())));
 
                         mvcc.0
                             .push((offset_in_file as u64, (MvccState::Insert, row.data.clone())));
