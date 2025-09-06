@@ -168,7 +168,6 @@ impl IndexingHashmap {
                 "Error, failed to perform get in the hashmap: Null pointer returned",
             ));
         }
-        unsafe { println!("{:?}", *v) };
         Ok(unsafe {
             let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
             let mut b = Vec::new();
@@ -184,7 +183,7 @@ impl IndexingHashmap {
         if entries.is_empty() {
             return Ok(());
         }
-        println!("entries {}", entries.len());
+        //println!("entries {}", entries.len());
         let mut keys: Vec<u64> = Vec::with_capacity(entries.len());
         let mut values: Vec<u64> = Vec::with_capacity(entries.len());
         let mut exists: Vec<u8> = Vec::with_capacity(entries.len());
@@ -194,7 +193,7 @@ impl IndexingHashmap {
             keys.push(key);
             values.push(value);
         }
-        println!("ke {}", keys.len());
+        //println!("ke {}", keys.len());
         let mut input = WriteInput {
             count: keys.len() as u32,
             key: keys.as_ptr() as *mut u64,
@@ -202,14 +201,14 @@ impl IndexingHashmap {
             exists: exists.as_ptr() as *mut u8,
         };
 
-        println!("~");
+        //println!("~");
         let execution_product = unsafe {
             hashmap_write(
                 &mut self.inner as *mut Hashmap,
                 &mut input as *mut WriteInput,
             )
         };
-        println!("~");
+        //println!("~");
         std::mem::drop(keys);
         std::mem::drop(values);
         std::mem::drop(exists);
