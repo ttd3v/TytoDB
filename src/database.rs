@@ -30,7 +30,7 @@ use rand::{Rng, TryRngCore, rngs::OsRng};
 
 const DEBUG: bool = false;
 pub const MAX_STR_LEN: usize = 256;
-const DEFAULT_SETTINGS: &str = r#"
+static DEFAULT_SETTINGS: &str = r#"
 # Delete the comments if the size of the config file bothers you ;)
 
 # Container Specs
@@ -401,7 +401,7 @@ impl Database {
             self.container.insert(
                 contain.to_string(),
                 Container::new(
-                    &format!("{}/{}", self.location, contain),
+                    &format!("{}/containers/{}/", self.location, contain),
                     element_size,
                     he.1,
                     header_offset,
@@ -541,7 +541,7 @@ impl Database {
         &self,
         container_name: &str,
     ) -> Result<((Vec<String>, Vec<AlbaTypes>), u64), Error> {
-        let path = format!("{}/{}", self.location, container_name);
+        let path = format!("{}/containers/{}/data", self.location, container_name);
         let exists = fs::exists(&path)?;
 
         if exists {
@@ -583,13 +583,15 @@ impl Database {
                         "Failed to create container, the count of columns are higher than the maximum set on the settings file.",
                     ));
                 }
-                let path = format!("{}/{}", self.location, structure.name);
+                let path = format!("{}/containers/{}", self.location, structure.name);
                 if self.container.get(&structure.name).is_some() || fs::exists(&path).unwrap() {
                     return Err(gerr(
                         "Failed to create container, there is already a container with this name or a file with this name on the container directory.",
                     ));
                 }
-                let mut file = fs::File::create_new(&path).unwrap();
+                fs::create_dir_all(format!("{}/containers/{}", self.location, structure.name))
+                    .unwrap();
+                let mut file = fs::File::create_new(&format!("{}/data", path)).unwrap();
                 let mut el: usize = 0;
                 for i in structure.col_val.iter() {
                     el += i.size()
@@ -602,7 +604,7 @@ impl Database {
                 .unwrap();
                 self.containers.push(structure.name.clone());
                 let c = Container::new(
-                    &path,
+                    &format!("{}/containers/{}/", self.location, structure.name),
                     el,
                     structure.col_val,
                     file.metadata()?.len(),
@@ -1347,6 +1349,13 @@ fn process(mtx_db: &'static Arc<Mutex<Database>>, c: commands) -> Result<Query, 
 impl Database {
     pub fn run_database(self) -> Result<(), Error> {
         let mut password: [u8; 32] = [0u8; 32];
+        {
+            let db_path = database_path();
+            if !fs::exists(format!("{}/containers", db_path)).unwrap() {
+                fs::create_dir_all(format!("{}/containers", db_path)).unwrap()
+            }
+        }
+
         if fs::exists(secret_key_path()).unwrap() {
             let mut buffer: Vec<u8> = Vec::new();
             fs::File::open(secret_key_path())

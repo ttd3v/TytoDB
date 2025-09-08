@@ -223,11 +223,18 @@ impl Container {
             }
             headers.push((name.to_owned(), value.to_owned()));
         }
-        let regen_hm = !fs::exists(format!("{}.hashmap", path))? && fs::exists(path.to_string())?;
+        let regen_hm =
+            !fs::exists(format!("{}index.hashmap", path))? && fs::exists(path.to_string())?;
+
+        println!(
+            "{}\n{}",
+            format!("{}index.hashmap", path),
+            format!("{}data", path)
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path)
+            .open(format!("{}data", path))
             .unwrap();
         let mut hash_header = HashMap::new();
         for i in headers.iter() {
