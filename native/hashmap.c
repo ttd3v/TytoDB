@@ -25,6 +25,16 @@
  *
  *  ## save_metadata
  *  flushes metadata into disk, no fsync within.
+ *  
+ *  ## fetch_slots [in-progress]
+ *  Get in-disk slots, a helper function for get and write functions; Batch operations by mergin reads, max batch size being "MAX_BATCH_SIZE" and the maximum
+ *  memory usage per batch is "MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE". Doesn't use io_uring.
+ *
+ *  ## fast_sort
+ *  Perform insertion-sort when N < 100 with a fallback to quicksort if N > 100
+ *
+ *  ## free_array
+ *  Free all memory within an array of memory-allocated buffers.
  *
  *  ### OBSERVATIONS
  *  Slow operations such as fsyncs (regardless of it being faster on "fdata") will always only be run after the end of core-write operations — The ones
@@ -45,6 +55,7 @@
 #define GROWTH_FACTOR 32
 #define DEFAULT_VECTOR_COUNT 32
 #define SPOTS_ARRAY_LENGTH 5
+#define MAX_BATCH_SIZE 8224
 
 typedef struct {
     int file;
@@ -183,33 +194,213 @@ int save_metadata(Hashmap *self){
     return 0;
 }
 
-u_int64_t soft(u_int64_t idx, u_int64_t size){
+inline u_int64_t soft(u_int64_t idx, u_int64_t size){
     return idx > size-1?idx-size:idx;
 }
 
-void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array, int specs){
+inline void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array){
     unsigned char done = 0;
-    u_int64_t offset = 0;
     u_int64_t pivot = hk % self->bucket_size;
-    u_int64_t temp[SPOTS_ARRAY_LENGTH] = {0};
-   if (specs == 0){
-       // find free spot 
-       while (done == 0){
-            #pragma GCC unroll SPOTS_ARRAY_LENGTH
-            for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
-                temp[i] = self->bitmap[soft(pivot+(i*offset), self->bucket_size)];
-                if(temp[i] < 255){
-                    array[0] = temp[i];
-                    done = 1;
+  
+    // return possible spots 
+    #pragma GCC unroll SPOTS_ARRAY_LENGTH
+    for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
+        array[i] = self->bitmap[soft(pivot+i, self->bucket_size)];
+    }
+   
+}
+
+
+// HASH
+#define XXH_PRIME64_2 0xC2B2AE3D27D4EB4FULL
+#define XXH_PRIME64_3 0x165667B19E3779F9ULL
+inline u_int64_t hash64(u_int64_t x) {
+    x ^= x >> 33;
+    x *= XXH_PRIME64_2;
+    x ^= x >> 29;
+    x *= XXH_PRIME64_3;
+    x ^= x >> 32;
+    return x;
+}
+
+
+
+typedef struct{
+    Cell* value;
+    u_int8_t length;
+    u_int64_t index;
+} cell_vector;
+
+typedef struct {
+   cell_vector* value;  
+} cell_fetch;
+
+struct fetch_entry {
+    Cell* request;
+    u_int64_t length;
+    cell_fetch* results;
+}; 
+
+typedef struct {u_int8_t exists; u_int64_t hk;} __hc__; // hash cell
+
+void fast_sort(u_int64_t *array, u_int64_t length) {
+    if (length <= 1) return;
+    
+    if (length < 100) {
+        
+        for (u_int64_t i = 1; i < length; i++) {
+            u_int64_t key = array[i];
+            u_int64_t j = i;
+            
+            while (j > 0 && array[j-1] > key) {
+                array[j] = array[j-1];
+                j--;
+            }
+            array[j] = key;
+        }
+    } else {
+        
+        struct {
+            u_int64_t low, high;
+        } stack[64];          
+        int top = 0;
+        stack[top].low = 0;
+        stack[top].high = length - 1;
+        
+        while (top >= 0) {
+            u_int64_t low = stack[top].low;
+            u_int64_t high = stack[top].high;
+            top--;
+            
+            if (low < high) { 
+                u_int64_t pivot = array[high];  
+                u_int64_t i = low;
+                
+                for (u_int64_t j = low; j < high; j++) {
+                    if (array[j] <= pivot) {
+                        u_int64_t temp = array[i];
+                        array[i] = array[j];
+                        array[j] = temp;
+                        i++;
+                    }
+                }
+                
+                
+                u_int64_t temp = array[i];
+                array[i] = array[high];
+                array[high] = temp;
+                
+                u_int64_t pi = i;  
+                
+                if (pi > low + 1) {
+                    top++;
+                    stack[top].low = low;
+                    stack[top].high = pi - 1;
+                }
+                
+                if (pi + 1 < high) {
+                    top++;
+                    stack[top].low = pi + 1;
+                    stack[top].high = high;
                 }
             }
-            offset++;
-       }
-   }else{
-       // return possible spots 
-        #pragma GCC unroll SPOTS_ARRAY_LENGTH
-        for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
-            array[i] = self->bitmap[soft(pivot+(i*offset), self->bucket_size)];
         }
-   }
+    }
 }
+
+inline void free_array(unsigned char**buffer, u_int64_t len){
+    for(u_int64_t i = 0; i < len;i++){if(buffer[i]!=NULL) free(buffer[i]);}
+}
+
+int fetch_slots(Hashmap *self, struct fetch_entry* entry){
+    u_int64_t *to_read = NULL;
+    u_int64_t trl = 0;
+    {
+        u_int64_t hcs = entry->length*10;
+        __hc__* hashset = calloc(hcs, sizeof(__hc__));
+        if(!hashset){
+            printf("Failed to allocate memory for hashset in fetch slots\n");
+            return  -1;
+        }
+        for(u_int64_t i = 0; i < entry->length; i++){
+            u_int64_t spots[SPOTS_ARRAY_LENGTH]={0};
+            find_spots(self, entry->request[i].hk, spots);
+            #pragma GCC unroll SPOTS_ARRAY_LENGTH
+            for(u_int64_t j = 0; j < SPOTS_ARRAY_LENGTH; j++){
+                u_int64_t offset = 0;
+                u_int64_t pivot = hash64(spots[j]) % hcs;
+                u_int64_t cur_idx = soft(pivot+offset, hcs);
+                __hc__ cur = hashset[cur_idx];
+                while(cur.exists && cur.hk != spots[j]){
+                    offset++;
+                    cur_idx = soft(pivot+offset, hcs);
+                    cur = hashset[cur_idx];
+                }
+                if(cur.exists && cur.hk == spots[j]) continue;
+                hashset[cur_idx] = (__hc__){1,spots[j]};   
+                trl++;
+            }
+        }
+        to_read = (u_int64_t*)malloc(trl*sizeof(u_int64_t));
+        if(!to_read){
+            free(hashset);
+            printf("Failed to allocate memory for \"to_read\" in fetch_slots\n");
+            return -1;
+        }
+        {
+            u_int64_t rel = 0;
+            for(u_int64_t i =0;i<hcs;i++){
+                __hc__ h = hashset[i];
+                if(h.exists){
+                    to_read[rel]=h.hk;rel++;
+                }  
+            }
+        }
+        free(hashset);
+    }
+    fast_sort(to_read, trl);
+    unsigned char *cell_buffer[trl];
+    {
+        u_int64_t i = 0;
+        for(i=0;i<trl;i++){cell_buffer[i]=NULL;};
+        for(i=0;i<trl;i++){
+            cell_buffer[i]=malloc(HASHMAP_VECTOR_SIZE);
+            if(!cell_buffer[i]){
+                free_array(cell_buffer, trl);
+                free(to_read);
+                printf("Failed to allocate cell_buffer\n");
+                return -1;
+            }
+        }
+    }
+
+    u_int64_t readen = 0;
+    
+    while(readen < trl){
+        u_int64_t target = 0;
+        for(u_int64_t i = readen+1; i < trl;i++){
+            if(to_read[i] - to_read[readen] < MAX_BATCH_SIZE){target = i;};
+        }
+        u_int64_t cur = readen;
+        
+        u_int64_t buffer_size = (to_read[target]-to_read[cur])*HASHMAP_VECTOR_SIZE;
+        unsigned char *buffer = malloc(buffer_size);
+        if(!buffer){
+            printf("Failed to allocate reading buffer in fetch_slots\n");
+            free(to_read);
+            free_array(cell_buffer, trl);
+            return -1;
+        }
+        if (pread(self->file, buffer, buffer_size, (self->bucket_size+16)+(to_read[cur]*HASHMAP_VECTOR_SIZE))<0){
+            printf("Failed to read into buffer into buffer in fetch_slots\n");
+            free(to_read);
+            free(buffer);
+            free_array(cell_buffer, trl);
+            return -1;
+        }
+        readen = target;free(buffer);
+    }
+
+
+    return 0;
+} 
