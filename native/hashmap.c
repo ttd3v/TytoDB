@@ -40,12 +40,24 @@
  *  Free all memory in buffers within an "f" object of "fmem"; Mean't to turn the process of dealocating memory from various pointers more reliable, specially
  *  in cases where memory arithmetic couldn't be implemented.
  *
+ *  May contain a self-reference for freeing itself, the reference must always be (and currently are) at the EOA(End of array).
+ *  
  *  ### OBSERVATIONS
  *  Slow operations such as fsyncs (regardless of it being faster on "fdata") will always only be run after the end of core-write operations — The ones
  *  that mutate or insert Cells.
  *  
- *  Without meaningful error returns (-1 only) because after implementing all the intended functions a pattern for all errors will be created based on all
- *  the possible errors that might happen after the code gets fully implemented.
+ *  The code currently remains without any meaningful error returns (-1 only); After implementing all the intended functions a pattern for all errors will
+ *  be created based on all the possible errors that can occur during execution. It has "printf's" as a way of helping me to debug the code. Mean't to be
+ *  poor for ease of iteration during early development.
+ *
+ *  BITMAP - In the HashMap structure, the name is misleading. Was set as is because in the planning phase, it should be a bitmap; Turned into each-byte-a-length
+ *  after thinking further in the middle of the implementation.
+ *
+ *  The current code will always be runned in a syncronous (single-threaded) routine.
+ *  
+ *  
+ *
+ *
  * */
 
 
@@ -81,8 +93,8 @@ typedef struct{void**f;size_t l;} fmem;
 
 inline void free_mem(fmem* mem){
     for(size_t i = 0; i<mem->l; i++) {
-        free(mem->f);
-        mem->f = NULL;
+        free(mem->f[i]);
+        mem->f[i] = NULL;
     }
 }
 
@@ -423,7 +435,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
             return -1;
         }
         for(u_int64_t i = readen; i< trl;i++){
-            memcpy(cell_buffer, buffer + (to_read[i]-readen)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
+            memcpy(cell_buffer[i], buffer + (to_read[i]-readen)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
         }
         readen = target;free(buffer);
     }
