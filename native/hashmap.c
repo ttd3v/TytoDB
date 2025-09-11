@@ -26,7 +26,7 @@
  *  ## save_metadata
  *  flushes metadata into disk, no fsync within.
  *  
- *  ## fetch_slots [in-progress]
+ *  ## fetch_slots
  *  Get in-disk slots, a helper function for get and write functions; Batch operations by mergin reads, max batch size being "MAX_BATCH_SIZE" and the maximum
  *  memory usage per batch is "MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE". Doesn't use io_uring.
  *
@@ -36,14 +36,21 @@
  *  ## free_array
  *  Free all memory within an array of memory-allocated buffers.
  *
+ *  ## free_mem
+ *  Free all memory in buffers within an "f" object of "fmem"; Mean't to turn the process of dealocating memory from various pointers more reliable, specially
+ *  in cases where memory arithmetic couldn't be implemented.
+ *
  *  ### OBSERVATIONS
  *  Slow operations such as fsyncs (regardless of it being faster on "fdata") will always only be run after the end of core-write operations — The ones
  *  that mutate or insert Cells.
- *
+ *  
+ *  Without meaningful error returns (-1 only) because after implementing all the intended functions a pattern for all errors will be created based on all
+ *  the possible errors that might happen after the code gets fully implemented.
  * */
 
 
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,6 +76,15 @@ typedef struct {
     u_int64_t v; // value
 } Cell;
 const u_int64_t c_s = sizeof(Cell);
+
+typedef struct{void**f;size_t l;} fmem;
+
+inline void free_mem(fmem* mem){
+    for(size_t i = 0; i<mem->l; i++) {
+        free(mem->f);
+        mem->f = NULL;
+    }
+}
 
 int new(Hashmap* self, char* path){
     if (access(path, F_OK) == -1){
@@ -232,16 +248,19 @@ typedef struct{
 } cell_vector;
 
 typedef struct {
-   cell_vector* value;  
+   cell_vector* value; 
+   u_int64_t hk;
 } cell_fetch;
 
 struct fetch_entry {
     Cell* request;
     u_int64_t length;
     cell_fetch* results;
+    fmem* mem;
 }; 
 
 typedef struct {u_int8_t exists; u_int64_t hk;} __hc__; // hash cell
+typedef struct {u_int8_t exists; u_int64_t spot; u_int64_t bid;} __hcb__; // hash cell -> buffer pointer
 
 void fast_sort(u_int64_t *array, u_int64_t length) {
     if (length <= 1) return;
@@ -309,7 +328,12 @@ void fast_sort(u_int64_t *array, u_int64_t length) {
 }
 
 inline void free_array(unsigned char**buffer, u_int64_t len){
-    for(u_int64_t i = 0; i < len;i++){if(buffer[i]!=NULL) free(buffer[i]);}
+    for(u_int64_t i = 0; i < len;i++){
+        if(buffer[i]!=NULL){
+            free(buffer[i]);
+            buffer[i]=NULL;
+        };
+    };
 }
 
 int fetch_slots(Hashmap *self, struct fetch_entry* entry){
@@ -379,7 +403,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
     while(readen < trl){
         u_int64_t target = 0;
         for(u_int64_t i = readen+1; i < trl;i++){
-            if(to_read[i] - to_read[readen] < MAX_BATCH_SIZE){target = i;};
+            if(to_read[i] - to_read[readen] <= MAX_BATCH_SIZE){target = i;};
         }
         u_int64_t cur = readen;
         
@@ -398,9 +422,80 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
             free_array(cell_buffer, trl);
             return -1;
         }
+        for(u_int64_t i = readen; i< trl;i++){
+            memcpy(cell_buffer, buffer + (to_read[i]-readen)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
+        }
         readen = target;free(buffer);
     }
-
-
+    
+    __hcb__ *buffer_hashmap = (__hcb__*)calloc(sizeof(__hcb__),trl);
+    if(!buffer_hashmap){
+        free(to_read);
+        free_array(cell_buffer, trl);
+        printf("Failed to allocate memory for buffer_hashmap\n");
+        return -1;
+    }
+    for(u_int64_t i = 0; i < trl; i++){
+        u_int64_t offset = 0;
+        u_int64_t df = hash64(to_read[i])%trl;
+        u_int64_t spot = df;
+        while(buffer_hashmap[spot].exists){
+            offset++;
+            spot = soft(spot+offset, trl);
+        }
+        buffer_hashmap[spot] = (__hcb__){255,to_read[i],i};
+    }
+    free(to_read);to_read = NULL;
+    
+    cell_fetch* fetch = (cell_fetch*)malloc(sizeof(cell_fetch)*entry->length);
+    if(!fetch){
+        free(buffer_hashmap);
+        free_array(cell_buffer, trl);
+        printf("Failed to allocate memory for fetch\n");
+        return -1;
+    }
+    cell_vector* vector_cells = malloc(sizeof(cell_vector)*SPOTS_ARRAY_LENGTH*entry->length);
+    if(!vector_cells){
+        free(buffer_hashmap);
+        free_array(cell_buffer, trl);
+        free(fetch);
+        printf("Failed to allocate memory for vector_cells\n");
+        return -1;
+    }
+    for(size_t i = 0; i<entry->length; i++){
+        fetch[i].hk = entry->request[i].hk;
+        u_int64_t spots[SPOTS_ARRAY_LENGTH];
+        find_spots(self, fetch[i].hk, spots);
+        fetch[i].value = vector_cells + (i*SPOTS_ARRAY_LENGTH);
+        for(size_t j = 0; j < SPOTS_ARRAY_LENGTH; j++){
+            u_int64_t offset = 0;
+            u_int64_t df = hash64(to_read[i])%trl;
+            u_int64_t spot = df;
+            while(!buffer_hashmap[spot].exists || buffer_hashmap[spot].spot != spots[j]){
+                offset++;
+                spot = soft(spot+offset, trl);
+            }
+            u_int64_t bid = buffer_hashmap[spot].bid;
+            fetch[i].value[j].value = (Cell*)cell_buffer[bid];
+            fetch[i].value[j].length = self->bitmap[bid];
+            fetch[i].value[j].index = bid;
+        }
+    }
+    free(buffer_hashmap);
+    entry->mem->f = malloc(sizeof(void*)*(3+trl));
+    if(!entry->mem){
+        printf("Failed to allocate memory for mem\n");
+        free(fetch);
+        free(vector_cells);
+        free_array(cell_buffer, trl);
+        return -1;
+    }
+    entry->mem->l = 3+trl;
+    entry->mem->f[0] = (void*)fetch;
+    entry->mem->f[1] = (void*)vector_cells;
+    for(size_t i = 0; i < trl; i++){
+        entry->mem->f[1+i] = cell_buffer[i];
+    }
+    entry->mem->f[1+trl] = entry->mem->f;
     return 0;
 } 
