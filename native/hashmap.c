@@ -3,7 +3,7 @@
  *  # DOCUMENTATION
  *  
  *  This code is an implementation of an in-disk hashmap. It works with in-disk chunks of 255 cells (each 16 bytes long), the length of every chunk
- *  being tracked by a bitmap, in-memory, and also stored on disk. It searches by gathering the 5 most likely cells, being the pivot and the next 4
+ *  being tracked by a array_len, in-memory, and also stored on disk. It searches by gathering the 5 most likely cells, being the pivot and the next 4
  *  (softened if N > bucket_size). For writes, it takes only the spot between those 5 slots that have free spaces. The "5" mentioned is the default, and can
  *  be altered by changing the "SPOTS_ARRAY_LENGTH" definition.
  *
@@ -17,7 +17,7 @@
  *  "Hashmap"; No sophisticated logic.
  *
  *  ## soft
- *  "softens" indexes bitmap-related, ensuring they stay within its bounds.
+ *  "softens" indexes array_len-related, ensuring they stay within its bounds.
  *
  *  ## find_spot
  *  depending on the spot, write on the given array where the cell might be based on the key; "spec" changes whether the code will return spots for write
@@ -39,6 +39,12 @@
  *  ## free_mem
  *  Free all memory in buffers within an "f" object of "fmem"; Mean't to turn the process of dealocating memory from various pointers more reliable, specially
  *  in cases where memory arithmetic couldn't be implemented.
+ * 
+ *  ## raw_get
+ *  Uses fetch_slots and get existance-value-spot of entries. A helper for both write and get
+ *
+ *  ## get
+ *  Uses raw_get to get the existance-value of entries.
  *
  *  May contain a self-reference for freeing itself, the reference must always be (and currently are) at the EOA(End of array).
  *  
@@ -49,9 +55,6 @@
  *  The code currently remains without any meaningful error returns (-1 only); After implementing all the intended functions a pattern for all errors will
  *  be created based on all the possible errors that can occur during execution. It has "printf's" as a way of helping me to debug the code. Mean't to be
  *  poor for ease of iteration during early development.
- *
- *  BITMAP - In the HashMap structure, the name is misleading. Was set as is because in the planning phase, it should be a bitmap; Turned into each-byte-a-length
- *  after thinking further in the middle of the implementation.
  *
  *  The current code will always be runned in a syncronous (single-threaded) routine.
  *  
@@ -75,10 +78,11 @@
 #define DEFAULT_VECTOR_COUNT 32
 #define SPOTS_ARRAY_LENGTH 5
 #define MAX_BATCH_SIZE 8224
+#define REBUCKET_ON_PERCENTAGE 65
 
 typedef struct {
     int file;
-    unsigned char *bitmap;
+    unsigned char *array_len;
     u_int64_t bucket_size;
     u_int64_t len;
 } Hashmap;
@@ -105,14 +109,14 @@ int new(Hashmap* self, char* path){
             printf("Failed to create hashmap file\n");
             return -1;
         }
-        self->bitmap = calloc((HASHMAP_VECTOR_SIZE/c_s)*DEFAULT_VECTOR_COUNT,sizeof(unsigned char));
+        self->array_len = calloc((HASHMAP_VECTOR_SIZE/c_s)*DEFAULT_VECTOR_COUNT,sizeof(unsigned char));
         self->len = 0;
         self->bucket_size = DEFAULT_VECTOR_COUNT*(HASHMAP_VECTOR_SIZE/c_s);
         self->file = fd;
 
-        if(!self->bitmap){
+        if(!self->array_len){
             close(fd);
-            printf("Failed to allocate bitmap's memory\n");
+            printf("Failed to allocate array_len's memory\n");
             return -1;
         }
         
@@ -120,7 +124,7 @@ int new(Hashmap* self, char* path){
  
         unsigned char* buffer = calloc(buffer_size, sizeof(unsigned char));
         if(!buffer){
-            free(self->bitmap);
+            free(self->array_len);
             close(fd);
             printf("Failed to allocate buffer memory\n");
             return -1;
@@ -135,14 +139,14 @@ int new(Hashmap* self, char* path){
         if(write_result < 0){
             free(buffer);
             close(fd);
-            free(self->bitmap);
+            free(self->array_len);
             printf("Failed to write, error: %i\n",write_result);
             return -1;
         }
         free(buffer);
         unsigned char *vector_buffer = calloc(HASHMAP_VECTOR_SIZE, sizeof(unsigned char));
         if(!vector_buffer){
-            free(self->bitmap);
+            free(self->array_len);
             close(fd);
             printf("Failed to allocate vector buffer\n");
             return -1;
@@ -150,7 +154,7 @@ int new(Hashmap* self, char* path){
         
         struct iovec* list = (struct iovec*)calloc(DEFAULT_VECTOR_COUNT, sizeof(struct iovec));
         if(!list){
-            free(self->bitmap);
+            free(self->array_len);
             close(fd);
             printf("Failed to allocate memory for list\n");
             return -1;
@@ -165,7 +169,7 @@ int new(Hashmap* self, char* path){
         if (pwritev(fd, list, DEFAULT_VECTOR_COUNT, buffer_size) < 0){
             printf("failed to perform the vetorized write\n");
             free(vector_buffer);
-            free(self->bitmap);
+            free(self->array_len);
             close(fd);
             free(list);
             return -1;
@@ -189,16 +193,16 @@ int new(Hashmap* self, char* path){
         }   
         self->len = integer_buffer[0];
         self->bucket_size = integer_buffer[1];
-        self->bitmap = malloc(integer_buffer[1]);
-        if (!self->bitmap){
+        self->array_len = malloc(integer_buffer[1]);
+        if (!self->array_len){
             close(fd);
-            printf("Failed to allocate memory to bitmap\n");
+            printf("Failed to allocate memory to array_len\n");
             return -1;
         }
-        if(pread(fd,self->bitmap,integer_buffer[1],16) < 0){
+        if(pread(fd,self->array_len,integer_buffer[1],16) < 0){
             close(fd);
-            free(self->bitmap);
-            printf("Failed to read bitmap\n");
+            free(self->array_len);
+            printf("Failed to read array_len\n");
             return -1;
         }
         return 0;
@@ -212,7 +216,7 @@ int save_metadata(Hashmap *self){
         b[0] = self->len;
         b[1] = self->bucket_size;
     }
-    memcpy(buffer+16, self->bitmap, self->bucket_size);
+    memcpy(buffer+16, self->array_len, self->bucket_size);
     if (pwrite(self->file, buffer, 16+self->bucket_size, 0) < 0){
         free(buffer);
         printf("Failed to write data from buffer into file\n");
@@ -233,7 +237,7 @@ inline void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array){
     // return possible spots 
     #pragma GCC unroll SPOTS_ARRAY_LENGTH
     for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
-        array[i] = self->bitmap[soft(pivot+i, self->bucket_size)];
+        array[i] = self->array_len[soft(pivot+i, self->bucket_size)];
     }
    
 }
@@ -265,7 +269,7 @@ typedef struct {
 } cell_fetch;
 
 struct fetch_entry {
-    Cell* request;
+    u_int64_t* request;
     u_int64_t length;
     cell_fetch* results;
     fmem* mem;
@@ -349,6 +353,7 @@ inline void free_array(unsigned char**buffer, u_int64_t len){
 }
 
 int fetch_slots(Hashmap *self, struct fetch_entry* entry){
+    entry->mem->f = NULL;
     u_int64_t *to_read = NULL;
     u_int64_t trl = 0;
     {
@@ -360,7 +365,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         }
         for(u_int64_t i = 0; i < entry->length; i++){
             u_int64_t spots[SPOTS_ARRAY_LENGTH]={0};
-            find_spots(self, entry->request[i].hk, spots);
+            find_spots(self, entry->request[i], spots);
             #pragma GCC unroll SPOTS_ARRAY_LENGTH
             for(u_int64_t j = 0; j < SPOTS_ARRAY_LENGTH; j++){
                 u_int64_t offset = 0;
@@ -475,7 +480,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         return -1;
     }
     for(size_t i = 0; i<entry->length; i++){
-        fetch[i].hk = entry->request[i].hk;
+        fetch[i].hk = entry->request[i];
         u_int64_t spots[SPOTS_ARRAY_LENGTH];
         find_spots(self, fetch[i].hk, spots);
         fetch[i].value = vector_cells + (i*SPOTS_ARRAY_LENGTH);
@@ -489,13 +494,13 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
             }
             u_int64_t bid = buffer_hashmap[spot].bid;
             fetch[i].value[j].value = (Cell*)cell_buffer[bid];
-            fetch[i].value[j].length = self->bitmap[bid];
+            fetch[i].value[j].length = self->array_len[bid];
             fetch[i].value[j].index = bid;
         }
     }
     free(buffer_hashmap);
     entry->mem->f = malloc(sizeof(void*)*(3+trl));
-    if(!entry->mem){
+    if(!entry->mem->f){
         printf("Failed to allocate memory for mem\n");
         free(fetch);
         free(vector_cells);
@@ -511,3 +516,58 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
     entry->mem->f[1+trl] = entry->mem->f;
     return 0;
 } 
+
+typedef struct {
+    u_int8_t exists;
+    u_int64_t value;
+} SomeU64;
+typedef struct {
+    u_int8_t exists;
+    u_int64_t value;
+    u_int64_t spot;
+} SomeRawGet;
+
+int raw_get(Hashmap* self, u_int64_t *inputs, SomeRawGet *outputs, u_int64_t length){
+    struct fetch_entry fetch_request;
+    fetch_request.length = length;
+    fetch_request.request = inputs;
+    int fetch_result = fetch_slots(self, &fetch_request);
+    if(fetch_result < 0){
+        return fetch_result;
+    }
+    
+    for(size_t i = 0; i < length; i++){
+        cell_fetch* v = &fetch_request.results[i];
+        SomeRawGet u = {0,0,0};
+        #pragma GCC unroll SPOTS_ARRAY_LENGTH
+        for(size_t j = 0; j < SPOTS_ARRAY_LENGTH;j++){
+            cell_vector *cv = &v->value[j];
+            if(cv->length > 0 && u.exists == 0){
+                for(size_t k = 0; k < cv->length;k++){
+                    if(cv->value[k].hk == v->hk){
+                        u.exists = 1;
+                        u.value = cv->value[k].v;
+                        u.spot = cv->index;
+                    }
+                }
+            }else{
+                break;
+            }
+        }
+        outputs[i] = u;
+    }
+    free_mem(fetch_request.mem);
+    
+    return 0;
+}
+
+int get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length){
+    SomeRawGet raw_output[length];
+    if (raw_get(self, inputs, raw_output, length) < 0){
+        return -1;
+    }
+    for(size_t i = 0; i < length; i++){
+        outputs[i] = (SomeU64){raw_output[i].exists,raw_output[i].value};
+    }
+    return 0;
+}
