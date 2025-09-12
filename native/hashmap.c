@@ -65,6 +65,8 @@
 
 
 #include <fcntl.h>
+#include <liburing/io_uring.h>
+#include <sched.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,6 +74,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <liburing.h>
 
 #define HASHMAP_VECTOR_SIZE 4080
 #define GROWTH_FACTOR 32
@@ -231,7 +234,6 @@ inline u_int64_t soft(u_int64_t idx, u_int64_t size){
 }
 
 inline void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array){
-    unsigned char done = 0;
     u_int64_t pivot = hk % self->bucket_size;
   
     // return possible spots 
@@ -561,7 +563,7 @@ int raw_get(Hashmap* self, u_int64_t *inputs, SomeRawGet *outputs, u_int64_t len
     return 0;
 }
 
-int get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length){
+int hm_get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length){
     SomeRawGet raw_output[length];
     if (raw_get(self, inputs, raw_output, length) < 0){
         return -1;
@@ -569,5 +571,85 @@ int get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length){
     for(size_t i = 0; i < length; i++){
         outputs[i] = (SomeU64){raw_output[i].exists,raw_output[i].value};
     }
+    return 0;
+}
+
+
+
+
+
+int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
+    u_int64_t rqst[length];
+
+    for (size_t i = 0; i < length; i++) {
+        rqst[i] = inputs[i].hk;
+    }
+
+    struct fetch_entry fetch;
+    fetch.length = length;
+    fetch.request = rqst;
+
+    int fetch_code = fetch_slots(self,&fetch);
+    if(fetch_code < 0){
+        return fetch_code;
+    }
+    
+    struct io_uring ring;
+    if (io_uring_queue_init(length, &ring, 0) < 0){
+        free_mem(fetch.mem);
+        return -1;
+    };
+
+    
+    for(size_t idx = 0; idx < length; idx++){
+        cell_fetch *cf = &fetch.results[idx];
+        u_int64_t offset = 16 + self->bucket_size;
+        u_int8_t done = 0;
+        Cell cell = inputs[length];
+
+        for (size_t i = 0; i < SPOTS_ARRAY_LENGTH; i++){
+            cell_vector *v = &cf->value[i];
+            for(size_t j =0; j < cf->value[i].length; j++){
+                if(v->value[j].hk == cell.hk){
+                    offset += v->index*HASHMAP_VECTOR_SIZE+j;
+                    done = 1;
+                    break;
+                }
+            }
+            if(done == 1) break;
+        }
+        if (done == 1){
+            struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_write(sqe, self->file, &cell, sizeof(Cell), offset);
+            continue;
+        }
+        for (size_t i = 0; i < SPOTS_ARRAY_LENGTH; i++){
+            cell_vector *v = &cf->value[i];
+            if(v->length < 255){
+                done = 1;
+                offset += (v->index*HASHMAP_VECTOR_SIZE)+v->length;
+                self->array_len[v->index]++;
+                self->len++;
+            }
+            if(done == 0){
+                break;
+            }
+        }
+        if(done == 1){
+            struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
+            io_uring_prep_write(sqe, self->file, &cell, sizeof(Cell), offset);
+            
+            continue;
+        }
+    }
+  
+
+    int result = io_uring_submit_and_wait(&ring, length);
+    free_mem(fetch.mem);
+    if(result < 0){ 
+        return result;
+    }
+    save_metadata(self);
+    fdatasync(self->file);
     return 0;
 }

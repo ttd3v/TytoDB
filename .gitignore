@@ -1,2 +1,4 @@
 /target
 /ignore
+/.idea
+/CMakeLists.txt
