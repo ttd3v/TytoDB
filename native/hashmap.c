@@ -64,6 +64,30 @@
  * */
 
 
+// General errors
+const int ERROR_GENERAL                = -1;  // Catch-all
+const int ERROR_MEMALLOC               = -2;  // Memory allocation failed
+const int ERROR_NO_DISK_SPACE          = -3;  // Not enough disk space
+const int ERROR_IO_URING_QUEUE         = -4;  // io_uring queue init failed
+const int ERROR_FILE_OPEN              = -5;  // Failed to open file
+const int ERROR_FILE_CREATE            = -6;  // Failed to create file
+const int ERROR_FILE_READ              = -7;  // Failed to read from file
+const int ERROR_FILE_WRITE             = -8;  // Failed to write to file
+const int ERROR_FILE_SYNC              = -9;  // Failed to fsync or fdatasync
+const int ERROR_VECTOR_ALLOC           = -10; // Failed to allocate vector buffer
+const int ERROR_IOVEC_ALLOC            = -11; // Failed to allocate iovec array
+const int ERROR_FETCH_HASHSET_ALLOC    = -12; // Failed to allocate hashset in fetch_slots
+const int ERROR_FETCH_TO_READ_ALLOC    = -13; // Failed to allocate `to_read` array
+const int ERROR_FETCH_CELL_BUFFER_ALLOC= -14; // Failed to allocate cell_buffer array
+const int ERROR_FETCH_BUFFER_HASHMAP   = -15; // Failed to allocate buffer_hashmap
+const int ERROR_FETCH_VECTOR_CELLS     = -16; // Failed to allocate vector_cells
+const int ERROR_FETCH_FETCH_ALLOC      = -17; // Failed to allocate fetch array
+const int ERROR_REBUCKET_BUFFER_ALLOC  = -18; // Failed to allocate buffer in rebucket
+const int ERROR_REBUCKET_CELLS_ALLOC   = -19; // Failed to allocate cells in rebucket
+const int ERROR_WRITE_SLOT_FULL        = -20; // Could not find free spot to write cell
+
+
+
 #include <fcntl.h>
 #include <liburing/io_uring.h>
 #include <sched.h>
@@ -88,6 +112,8 @@ typedef struct {
     unsigned char *array_len;
     u_int64_t bucket_size;
     u_int64_t len;
+    char* path;
+    char* temp;
 } Hashmap;
 
 typedef struct {
@@ -105,16 +131,21 @@ inline void free_mem(fmem* mem){
     }
 }
 
-int new(Hashmap* self, char* path){
-    if (access(path, F_OK) == -1){
-        int fd = open(path, O_CREAT | O_RDWR, 0644);
+
+
+
+
+
+
+int draw_defaults(Hashmap *self, u_int64_t bucket_size){
+    int fd = open(self->path, O_CREAT | O_RDWR, 0644);
         if(fd == -1){
             printf("Failed to create hashmap file\n");
             return -1;
         }
         self->array_len = calloc((HASHMAP_VECTOR_SIZE/c_s)*DEFAULT_VECTOR_COUNT,sizeof(unsigned char));
         self->len = 0;
-        self->bucket_size = DEFAULT_VECTOR_COUNT*(HASHMAP_VECTOR_SIZE/c_s);
+        self->bucket_size = bucket_size;
         self->file = fd;
 
         if(!self->array_len){
@@ -123,7 +154,7 @@ int new(Hashmap* self, char* path){
             return -1;
         }
         
-        u_int64_t buffer_size = (sizeof(u_int64_t)*2) + ((HASHMAP_VECTOR_SIZE/c_s)*DEFAULT_VECTOR_COUNT);
+        u_int64_t buffer_size = (sizeof(u_int64_t)*2) + (self->bucket_size*HASHMAP_VECTOR_SIZE*c_s);
  
         unsigned char* buffer = calloc(buffer_size, sizeof(unsigned char));
         if(!buffer){
@@ -181,6 +212,11 @@ int new(Hashmap* self, char* path){
         free(list);
         free(vector_buffer);
         return 0;
+}
+
+int new(Hashmap* self, char* path){
+    if (access(path, F_OK) == -1){
+        return draw_defaults(self, DEFAULT_VECTOR_COUNT);    
     }else{
         int fd = open(path,  O_RDWR, 0644);
         if(fd == -1){
@@ -576,7 +612,7 @@ int hm_get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length)
 
 
 
-
+int hm_rebucket(Hashmap *self);
 
 int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
     u_int64_t rqst[length];
@@ -605,7 +641,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
         cell_fetch *cf = &fetch.results[idx];
         u_int64_t offset = 16 + self->bucket_size;
         u_int8_t done = 0;
-        Cell cell = inputs[length];
+        Cell cell = inputs[idx];
 
         for (size_t i = 0; i < SPOTS_ARRAY_LENGTH; i++){
             cell_vector *v = &cf->value[i];
@@ -651,5 +687,65 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
     }
     save_metadata(self);
     fdatasync(self->file);
+    if((self->len*100 / self->bucket_size) >= REBUCKET_ON_PERCENTAGE){
+        return hm_rebucket(self);
+    }
     return 0;
 }
+
+
+
+
+int hm_rebucket(Hashmap *self){
+    Cell* buffer = malloc(MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE);
+    Cell* cells = malloc(MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE);
+    if (!buffer){
+        return -1;
+    }
+    if(!cells){
+        return -1;
+    }
+    u_int64_t header_offset = self->bucket_size + 16;
+    Hashmap temp;
+    
+    temp.path = self->temp;
+    int su = draw_defaults(&temp, self->bucket_size*GROWTH_FACTOR);
+    if (su < 0){
+        free(buffer);
+        free(cells);
+        return su;
+    }
+    
+
+    for(u_int64_t i = 0; i < self->bucket_size;){
+        u_int64_t to_read = i+MAX_BATCH_SIZE < self->bucket_size?MAX_BATCH_SIZE: self->bucket_size-i;
+        if (pread(self->file, buffer, to_read*HASHMAP_VECTOR_SIZE, header_offset+(i*HASHMAP_VECTOR_SIZE)) < 0){
+            free(buffer);
+            free(cells);
+            return -1;
+        };
+
+        u_int64_t len = 0;
+        for (u_int64_t j = 0; j < to_read; j ++){
+            if(self->array_len[j]>0){
+                for(u_int64_t k = 0; k < self->array_len[j];k++){
+                    cells[len] = buffer[(j*(HASHMAP_VECTOR_SIZE/sizeof(Cell)))+k];
+                    len++;
+                }
+            }
+        }
+        if(hm_write(self, cells, len) < 0){
+            free(buffer);
+            free(cells);
+            return -1;
+        }
+        i+=to_read;
+    }
+    free(buffer);
+    free(cells);
+    close(self->file);
+    remove(self->path);
+    rename(self->temp, self->path);
+    self->file = temp.file;
+    return 0;
+};
