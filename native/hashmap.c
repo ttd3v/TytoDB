@@ -1,4 +1,3 @@
-
 /*
  *  # DOCUMENTATION
  *  
@@ -43,8 +42,14 @@
  *  ## raw_get
  *  Uses fetch_slots and get existance-value-spot of entries. A helper for both write and get
  *
- *  ## get
+ *  ## hm_get
  *  Uses raw_get to get the existance-value of entries.
+ *
+ *  ## hm_write
+ *  Uses fetch_spots to get the offsets in which it must write into, using io_uring to batch changes. Deletions are done by setting the value 18,446,744,073,709,551,615
+ *
+ *
+ *
  *
  *  May contain a self-reference for freeing itself, the reference must always be (and currently are) at the EOA(End of array).
  *  
@@ -58,6 +63,8 @@
  *
  *  The current code will always be runned in a syncronous (single-threaded) routine.
  *  
+ *  Everything within the Hashmap structure will primarily come from the rust-end, meaning that what is covered by the structure itself also
+ *  have rust memory-safety guarantees; All function arguments come from the rust-end, they do not need validation (specifically in the C code).
  *  
  *
  *
@@ -65,26 +72,26 @@
 
 
 // General errors
-const int ERROR_GENERAL                = -1;  // Catch-all
-const int ERROR_MEMALLOC               = -2;  // Memory allocation failed
-const int ERROR_NO_DISK_SPACE          = -3;  // Not enough disk space
-const int ERROR_IO_URING_QUEUE         = -4;  // io_uring queue init failed
-const int ERROR_FILE_OPEN              = -5;  // Failed to open file
-const int ERROR_FILE_CREATE            = -6;  // Failed to create file
-const int ERROR_FILE_READ              = -7;  // Failed to read from file
-const int ERROR_FILE_WRITE             = -8;  // Failed to write to file
-const int ERROR_FILE_SYNC              = -9;  // Failed to fsync or fdatasync
-const int ERROR_VECTOR_ALLOC           = -10; // Failed to allocate vector buffer
-const int ERROR_IOVEC_ALLOC            = -11; // Failed to allocate iovec array
-const int ERROR_FETCH_HASHSET_ALLOC    = -12; // Failed to allocate hashset in fetch_slots
-const int ERROR_FETCH_TO_READ_ALLOC    = -13; // Failed to allocate `to_read` array
-const int ERROR_FETCH_CELL_BUFFER_ALLOC= -14; // Failed to allocate cell_buffer array
-const int ERROR_FETCH_BUFFER_HASHMAP   = -15; // Failed to allocate buffer_hashmap
-const int ERROR_FETCH_VECTOR_CELLS     = -16; // Failed to allocate vector_cells
-const int ERROR_FETCH_FETCH_ALLOC      = -17; // Failed to allocate fetch array
-const int ERROR_REBUCKET_BUFFER_ALLOC  = -18; // Failed to allocate buffer in rebucket
-const int ERROR_REBUCKET_CELLS_ALLOC   = -19; // Failed to allocate cells in rebucket
-const int ERROR_WRITE_SLOT_FULL        = -20; // Could not find free spot to write cell
+const int ERROR_GENERAL                     = -1;  // Catch-all
+const int ERROR_MEMALLOC                    = -2;  // Memory allocation failed
+const int ERROR_NO_DISK_SPACE               = -3;  // Not enough disk space
+const int ERROR_IO_URING_QUEUE              = -4;  // io_uring queue init failed
+const int ERROR_FILE_OPEN                   = -5;  // Failed to open file
+const int ERROR_FILE_CREATE                 = -6;  // Failed to create file
+const int ERROR_FILE_READ                   = -7;  // Failed to read from file
+const int ERROR_FILE_WRITE                  = -8;  // Failed to write to file
+const int ERROR_FILE_SYNC                   = -9;  // Failed to fsync or fdatasync
+const int ERROR_VECTOR_ALLOC                = -10; // Failed to allocate vector buffer
+const int ERROR_IOVEC_ALLOC                 = -11; // Failed to allocate iovec array
+const int ERROR_FETCH_HASHSET_ALLOC         = -12; // Failed to allocate hashset in fetch_slots
+const int ERROR_FETCH_TO_READ_ALLOC         = -13; // Failed to allocate `to_read` array
+const int ERROR_FETCH_CELL_BUFFER_ALLOC     = -14; // Failed to allocate cell_buffer array
+const int ERROR_FETCH_BUFFER_HASHMAP        = -15; // Failed to allocate buffer_hashmap
+const int ERROR_FETCH_VECTOR_CELLS          = -16; // Failed to allocate vector_cells
+const int ERROR_FETCH_FETCH_ALLOC           = -17; // Failed to allocate fetch array
+const int ERROR_REBUCKET_BUFFER_ALLOC       = -18; // Failed to allocate buffer in rebucket
+const int ERROR_REBUCKET_CELLS_ALLOC        = -19; // Failed to allocate cells in rebucket
+const int ERROR_WRITE_SLOT_FULL             = -20; // Could not find free spot to write cell
 
 
 
@@ -132,18 +139,17 @@ inline void free_mem(fmem* mem){
 }
 
 
-
-
-
-
-
 int draw_defaults(Hashmap *self, u_int64_t bucket_size){
     int fd = open(self->path, O_CREAT | O_RDWR, 0644);
         if(fd == -1){
             printf("Failed to create hashmap file\n");
-            return -1;
+            return ERROR_FILE_CREATE;
         }
         self->array_len = calloc((HASHMAP_VECTOR_SIZE/c_s)*DEFAULT_VECTOR_COUNT,sizeof(unsigned char));
+        if(!self->array_len){
+            close(fd);
+            return ERROR_MEMALLOC;
+        }
         self->len = 0;
         self->bucket_size = bucket_size;
         self->file = fd;
@@ -151,7 +157,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
         if(!self->array_len){
             close(fd);
             printf("Failed to allocate array_len's memory\n");
-            return -1;
+            return ERROR_MEMALLOC;
         }
         
         u_int64_t buffer_size = (sizeof(u_int64_t)*2) + (self->bucket_size*HASHMAP_VECTOR_SIZE*c_s);
@@ -161,7 +167,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
             free(self->array_len);
             close(fd);
             printf("Failed to allocate buffer memory\n");
-            return -1;
+            return ERROR_MEMALLOC;
         }
 
         {
@@ -175,7 +181,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
             close(fd);
             free(self->array_len);
             printf("Failed to write, error: %i\n",write_result);
-            return -1;
+            return ERROR_FILE_WRITE;
         }
         free(buffer);
         unsigned char *vector_buffer = calloc(HASHMAP_VECTOR_SIZE, sizeof(unsigned char));
@@ -183,7 +189,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
             free(self->array_len);
             close(fd);
             printf("Failed to allocate vector buffer\n");
-            return -1;
+            return ERROR_VECTOR_ALLOC;
         }
         
         struct iovec* list = (struct iovec*)calloc(DEFAULT_VECTOR_COUNT, sizeof(struct iovec));
@@ -191,7 +197,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
             free(self->array_len);
             close(fd);
             printf("Failed to allocate memory for list\n");
-            return -1;
+            return ERROR_IOVEC_ALLOC;
         }
 
         //pwritev(int fd, const struct iovec *iovec, int count, __off_t offset)
@@ -206,7 +212,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
             free(self->array_len);
             close(fd);
             free(list);
-            return -1;
+            return ERROR_FILE_WRITE;
         
         }
         free(list);
@@ -221,14 +227,15 @@ int new(Hashmap* self, char* path){
         int fd = open(path,  O_RDWR, 0644);
         if(fd == -1){
             printf("Failed to open hashmap file\n");
-            return -1;
+            return ERROR_FILE_OPEN;
         }
+        self->file = fd;
         u_int64_t integer_buffer[2];
         //pread(int fd, void *buf, size_t nbytes, __off_t offset)
         if(pread(fd, &integer_buffer, 16, 0) < 0){
             close(fd);
             printf("Failed to read hashmap metadata\n");
-            return -1;
+            return ERROR_FILE_READ;
         }   
         self->len = integer_buffer[0];
         self->bucket_size = integer_buffer[1];
@@ -236,17 +243,17 @@ int new(Hashmap* self, char* path){
         if (!self->array_len){
             close(fd);
             printf("Failed to allocate memory to array_len\n");
-            return -1;
+            return ERROR_MEMALLOC;
         }
         if(pread(fd,self->array_len,integer_buffer[1],16) < 0){
             close(fd);
             free(self->array_len);
             printf("Failed to read array_len\n");
-            return -1;
+            return ERROR_FILE_READ;
         }
         return 0;
     }
-    return -1;
+    return ERROR_GENERAL;
 }
 int save_metadata(Hashmap *self){
     unsigned char *buffer = malloc(self->bucket_size + 16);
@@ -259,7 +266,7 @@ int save_metadata(Hashmap *self){
     if (pwrite(self->file, buffer, 16+self->bucket_size, 0) < 0){
         free(buffer);
         printf("Failed to write data from buffer into file\n");
-        return -1;
+        return ERROR_FILE_WRITE;
     }
     free(buffer);
     return 0;
@@ -399,7 +406,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         __hc__* hashset = calloc(hcs, sizeof(__hc__));
         if(!hashset){
             printf("Failed to allocate memory for hashset in fetch slots\n");
-            return  -1;
+            return ERROR_FETCH_HASHSET_ALLOC;
         }
         for(u_int64_t i = 0; i < entry->length; i++){
             u_int64_t spots[SPOTS_ARRAY_LENGTH]={0};
@@ -410,7 +417,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
                 u_int64_t pivot = hash64(spots[j]) % hcs;
                 u_int64_t cur_idx = soft(pivot+offset, hcs);
                 __hc__ cur = hashset[cur_idx];
-                while(cur.exists && cur.hk != spots[j]){
+                while(cur.exists && cur.hk != spots[j] && offset < hcs){
                     offset++;
                     cur_idx = soft(pivot+offset, hcs);
                     cur = hashset[cur_idx];
@@ -424,7 +431,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         if(!to_read){
             free(hashset);
             printf("Failed to allocate memory for \"to_read\" in fetch_slots\n");
-            return -1;
+            return ERROR_FETCH_TO_READ_ALLOC;
         }
         {
             u_int64_t rel = 0;
@@ -448,7 +455,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
                 free_array(cell_buffer, trl);
                 free(to_read);
                 printf("Failed to allocate cell_buffer\n");
-                return -1;
+                return ERROR_FETCH_CELL_BUFFER_ALLOC;
             }
         }
     }
@@ -468,14 +475,14 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
             printf("Failed to allocate reading buffer in fetch_slots\n");
             free(to_read);
             free_array(cell_buffer, trl);
-            return -1;
+            return ERROR_MEMALLOC;
         }
         if (pread(self->file, buffer, buffer_size, (self->bucket_size+16)+(to_read[cur]*HASHMAP_VECTOR_SIZE))<0){
             printf("Failed to read into buffer into buffer in fetch_slots\n");
             free(to_read);
             free(buffer);
             free_array(cell_buffer, trl);
-            return -1;
+            return ERROR_FILE_READ;
         }
         for(u_int64_t i = readen; i< trl;i++){
             memcpy(cell_buffer[i], buffer + (to_read[i]-readen)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
@@ -488,7 +495,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         free(to_read);
         free_array(cell_buffer, trl);
         printf("Failed to allocate memory for buffer_hashmap\n");
-        return -1;
+        return ERROR_FETCH_BUFFER_HASHMAP;
     }
     for(u_int64_t i = 0; i < trl; i++){
         u_int64_t offset = 0;
@@ -500,22 +507,23 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         }
         buffer_hashmap[spot] = (__hcb__){255,to_read[i],i};
     }
-    free(to_read);to_read = NULL;
     
     cell_fetch* fetch = (cell_fetch*)malloc(sizeof(cell_fetch)*entry->length);
     if(!fetch){
         free(buffer_hashmap);
         free_array(cell_buffer, trl);
+        free(to_read);
         printf("Failed to allocate memory for fetch\n");
-        return -1;
+        return ERROR_FETCH_FETCH_ALLOC;
     }
     cell_vector* vector_cells = malloc(sizeof(cell_vector)*SPOTS_ARRAY_LENGTH*entry->length);
     if(!vector_cells){
         free(buffer_hashmap);
         free_array(cell_buffer, trl);
         free(fetch);
+        free(to_read);
         printf("Failed to allocate memory for vector_cells\n");
-        return -1;
+        return ERROR_FETCH_VECTOR_CELLS;
     }
     for(size_t i = 0; i<entry->length; i++){
         fetch[i].hk = entry->request[i];
@@ -524,9 +532,9 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         fetch[i].value = vector_cells + (i*SPOTS_ARRAY_LENGTH);
         for(size_t j = 0; j < SPOTS_ARRAY_LENGTH; j++){
             u_int64_t offset = 0;
-            u_int64_t df = hash64(to_read[i])%trl;
+            u_int64_t df = hash64(spots[j])%trl;
             u_int64_t spot = df;
-            while(!buffer_hashmap[spot].exists || buffer_hashmap[spot].spot != spots[j]){
+            while((!buffer_hashmap[spot].exists || buffer_hashmap[spot].spot != spots[j]) && offset < trl){
                 offset++;
                 spot = soft(spot+offset, trl);
             }
@@ -536,6 +544,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
             fetch[i].value[j].index = bid;
         }
     }
+    free(to_read);to_read = NULL;
     free(buffer_hashmap);
     entry->mem->f = malloc(sizeof(void*)*(3+trl));
     if(!entry->mem->f){
@@ -543,7 +552,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         free(fetch);
         free(vector_cells);
         free_array(cell_buffer, trl);
-        return -1;
+        return ERROR_MEMALLOC;
     }
     entry->mem->l = 3+trl;
     entry->mem->f[0] = (void*)fetch;
@@ -602,7 +611,7 @@ int raw_get(Hashmap* self, u_int64_t *inputs, SomeRawGet *outputs, u_int64_t len
 int hm_get(Hashmap *self, u_int64_t *inputs, SomeU64 *outputs, u_int64_t length){
     SomeRawGet raw_output[length];
     if (raw_get(self, inputs, raw_output, length) < 0){
-        return -1;
+        return ERROR_GENERAL;
     }
     for(size_t i = 0; i < length; i++){
         outputs[i] = (SomeU64){raw_output[i].exists,raw_output[i].value};
@@ -633,7 +642,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
     struct io_uring ring;
     if (io_uring_queue_init(length, &ring, 0) < 0){
         free_mem(fetch.mem);
-        return -1;
+        return ERROR_IO_URING_QUEUE;
     };
 
     
@@ -667,7 +676,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
                 self->array_len[v->index]++;
                 self->len++;
             }
-            if(done == 0){
+            if(done == 1){
                 break;
             }
         }
@@ -677,13 +686,18 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
             
             continue;
         }
+
+        free_mem(fetch.mem);
+        io_uring_queue_exit(&ring);
+        return ERROR_WRITE_SLOT_FULL;
     }
   
 
     int result = io_uring_submit_and_wait(&ring, length);
+    io_uring_queue_exit(&ring);
     free_mem(fetch.mem);
     if(result < 0){ 
-        return result;
+        return ERROR_FILE_WRITE;
     }
     save_metadata(self);
     fdatasync(self->file);
@@ -700,10 +714,11 @@ int hm_rebucket(Hashmap *self){
     Cell* buffer = malloc(MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE);
     Cell* cells = malloc(MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE);
     if (!buffer){
-        return -1;
+        return ERROR_REBUCKET_BUFFER_ALLOC;
     }
     if(!cells){
-        return -1;
+        free(buffer);
+        return ERROR_REBUCKET_CELLS_ALLOC;
     }
     u_int64_t header_offset = self->bucket_size + 16;
     Hashmap temp;
@@ -722,22 +737,22 @@ int hm_rebucket(Hashmap *self){
         if (pread(self->file, buffer, to_read*HASHMAP_VECTOR_SIZE, header_offset+(i*HASHMAP_VECTOR_SIZE)) < 0){
             free(buffer);
             free(cells);
-            return -1;
+            return ERROR_FILE_READ;
         };
 
         u_int64_t len = 0;
         for (u_int64_t j = 0; j < to_read; j ++){
-            if(self->array_len[j]>0){
-                for(u_int64_t k = 0; k < self->array_len[j];k++){
+            if(self->array_len[j+i]>0){
+                for(u_int64_t k = 0; k < self->array_len[j+i];k++){
                     cells[len] = buffer[(j*(HASHMAP_VECTOR_SIZE/sizeof(Cell)))+k];
                     len++;
                 }
             }
         }
-        if(hm_write(self, cells, len) < 0){
+        if(hm_write(&temp, cells, len) < 0){
             free(buffer);
             free(cells);
-            return -1;
+            return ERROR_FILE_WRITE;
         }
         i+=to_read;
     }
