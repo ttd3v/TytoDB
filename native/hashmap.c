@@ -267,7 +267,7 @@ inline void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array){
     // return possible spots 
     #pragma GCC unroll 5
     for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
-        array[i] = self->array_len[soft(pivot+i, self->bucket_size)];
+        array[i] = soft(pivot+i, self->bucket_size);
     }
    
 }
@@ -516,8 +516,8 @@ int fetch_slots(Hashmap *self, fetch_entry* entry){
             }
             u_int64_t bid = buffer_hashmap[spot].bid;
             fetch[i].value[j].value = (Cell*)cell_buffer[bid];
-            fetch[i].value[j].length = self->array_len[bid];
-            fetch[i].value[j].index = bid;
+            fetch[i].value[j].length = self->array_len[spots[j]];
+            fetch[i].value[j].index = spots[j];
         }
     }
     free(to_read);to_read = NULL;
@@ -534,9 +534,9 @@ int fetch_slots(Hashmap *self, fetch_entry* entry){
     entry->mem->f[0] = (void*)fetch;
     entry->mem->f[1] = (void*)vector_cells;
     for(size_t i = 0; i < trl; i++){
-        entry->mem->f[1+i] = cell_buffer[i];
+        entry->mem->f[2+i] = cell_buffer[i];
     }
-    entry->mem->f[1+trl] = entry->mem->f;
+    entry->mem->f[2+trl] = entry->mem->f;
     return 0;
 } 
 
@@ -623,7 +623,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
             cell_vector *v = &cf->value[i];
             for(size_t j =0; j < v->length; j++){
                 if(v->value[j].hk == cell.hk){
-                    offset += v->index*HASHMAP_VECTOR_SIZE+j;
+                    offset += v->index*HASHMAP_VECTOR_SIZE+(j*c_s);
                     done = 1;
                     if(cell.v == UINT64_MAX){
                         cell=v->value[v->length-1];
@@ -643,7 +643,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
             cell_vector *v = &cf->value[i];
             if(v->length < 255){
                 done = 1;
-                offset += (v->index*HASHMAP_VECTOR_SIZE)+v->length;
+                offset += (v->index*HASHMAP_VECTOR_SIZE)+(v->length*c_s);
                 self->array_len[v->index]++;
                 self->len++;
             }
