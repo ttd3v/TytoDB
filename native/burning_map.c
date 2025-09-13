@@ -1,10 +1,19 @@
 #include "burning_map.h"
-#include "hashmap.h"
 #include <stdlib.h>
 #include <sys/types.h>
 
-const u_int64_t MAX_KIB = 1073741824;
-const u_int8_t MAX_HEALTH = 250;
+#define MAX_KIB 1073741824
+#define MAX_HEALTH 250
+
+inline u_int64_t clamp(u_int64_t x, u_int64_t y, u_int64_t z) {
+    if(x >= y && x <= z){
+        return x;
+    }
+    if(x < y){return y;}
+    if(x > z){return z;}
+    return x;
+}
+
 BurningMap* new_burningmap(u_int64_t KiB){
    u_int64_t capacity = clamp(KiB, 1, MAX_KIB);
    Paper* paper_vector = (Paper*)malloc((capacity*1024)- (capacity*1024)%sizeof(Paper));
@@ -17,14 +26,14 @@ BurningMap* new_burningmap(u_int64_t KiB){
    for(u_int64_t i = 0;i<geral_structure->capacity;i++) geral_structure->paper_vector[i] = (Paper){0,0,0};
    return geral_structure;
 }
-static inline uint64_t hash(uint64_t x) {
+static inline u_int64_t hash(u_int64_t x) {
     x += 0x9e3779b97f4a7c15;
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9;
     x = (x ^ (x >> 27)) * 0x94d049bb133111eb;
     return x ^ (x >> 31);
 }
 
-void add_burningmap(BurningMap *self, u_int64_t key, u_int64_t value){
+inline void add_burningmap(BurningMap *self, u_int64_t key, u_int64_t value){
     Paper* p = &self->paper_vector[hash(key)%self->capacity];
     if (p->key == key) {
         if(p->health < MAX_HEALTH){
@@ -42,13 +51,13 @@ void add_burningmap(BurningMap *self, u_int64_t key, u_int64_t value){
     };
     if(p->key != key && p->health>0){p->health--; return;}
 }
-void deplete_burningmap(BurningMap *self, u_int64_t key){
+inline void deplete_burningmap(BurningMap *self, u_int64_t key){
     Paper* p = &self->paper_vector[hash(key)%self->capacity];
     p->health = 0;
     p->pointer = 0;
     p->key = 0;
 }
-SomeI64 get_burningmap(BurningMap *self, u_int64_t key){
+inline SomeI64 get_burningmap(BurningMap *self, u_int64_t key){
     Paper* p = &self->paper_vector[hash(key)%self->capacity];
     if(p->health>0 && p->key == key){
         if (p->health < MAX_HEALTH){

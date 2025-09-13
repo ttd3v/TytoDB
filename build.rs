@@ -17,10 +17,7 @@ fn main() {
     let mut hashmap_build = cc::Build::new();
     hashmap_build
         .include("native")
-        .file("native/hashmap.h")
         .file("native/lib.c")
-        .file("native/lib.h")
-        .file("native/burning_map.h")
         .file("native/burning_map.c")
         .file("native/hashmap.c");
     if optimize_for_machine {
@@ -32,4 +29,3 @@ fn main() {
     println!("cargo:rustc-link-lib=static=hashmap");
     println!("cargo:rustc-link-lib=static=uring");
 }
-

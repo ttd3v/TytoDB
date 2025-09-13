@@ -1,91 +1,71 @@
 use std::{
     ffi::CString,
     io::Error,
-    os::raw::{c_char, c_int},
+    os::raw::{c_char, c_int, c_uchar},
     ptr::null_mut,
 };
-
+use libc;
 use crate::gerr;
 
 #[repr(C)]
 pub struct Hashmap {
     pub file: c_int,
+    pub array_len: *mut c_uchar,
     pub bucket_size: u64,
     pub len: u64,
     pub path: *mut c_char,
-    pub temp_path: *mut c_char,
-    cache: *mut BurningMap,
+    pub temp: *mut c_char,
 }
 
+#[derive(Clone,Copy,Debug)]
 #[repr(C)]
-struct Paper {
-    health: u8,
-    key: u64,
-    value: u64,
+pub struct Cell {
+    pub hk: u64,
+    pub v: u64,
 }
 
+#[derive(Clone,Copy,Debug)]
 #[repr(C)]
-struct BurningMap {
-    capacity: u64,
-    paper_vector: *mut Paper,
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct OptionUINT64 {
-    pub some: i8,
+pub struct SomeU64 {
+    pub exists: u8,
     pub value: u64,
-}
-
-#[repr(C)]
-pub struct GetInput {
-    pub count: u32,
-    pub key: *mut u64,
-}
-
-#[repr(C)]
-#[derive(Default)]
-pub struct GetOutput {
-    pub success: i8,
-    pub count: u32,
-    pub value: *mut OptionUINT64,
-}
-
-#[repr(C)]
-pub struct WriteInput {
-    pub count: u32,
-    pub key: *mut u64,
-    pub value: *mut u64,
-    pub exists: *mut u8,
 }
 
 #[link(name = "hashmap", kind = "static")]
 unsafe extern "C" {
-    fn hashmap_new(hashmap: *mut Hashmap, KiB: u64) -> c_int;
-    fn hashmap_get(
+    fn hm_new(hashmap: *mut Hashmap, path: *const c_char) -> c_int;
+    fn hm_get(
         hashmap: *mut Hashmap,
-        entry: *mut GetInput,
-        foreign_output: *mut GetOutput,
+        inputs: *const u64,
+        outputs: *mut SomeU64,
+        length: u64,
     ) -> c_int;
-    fn hashmap_write(hashmap: *mut Hashmap, entry: *mut WriteInput) -> c_int;
-    fn hashmap_destroy(hashmap: *mut Hashmap) -> c_int;
+    fn hm_write(hashmap: *mut Hashmap, inputs: *const Cell, length: u64) -> c_int;
 }
 
 fn error_execution_product(i: i32) -> Error {
     match i {
         0 => gerr("Hashmap Error(0): Unexpected success code in error handler"),
-        -1 => gerr("Hashmap Error(-1): Something went wrong"),
-        -2 => gerr("Hashmap Error(-2): Failed to allocate memory"),
-        -3 => gerr("Hashmap Error(-3): Disk write failure"),
-        -4 => gerr("Hashmap Error(-4): Disk read failure"),
-        -5 => gerr("Hashmap Error(-5): Failed to open file"),
-        -6 => gerr("Hashmap Error(-6): IoUring queue start failure"),
-        -7 => gerr("Hashmap Error(-7): IoUring SQE failure"),
-        -8 => gerr("Hashmap Error(-8): IoUring CQE file write failure"),
-        -10 => gerr("Hashmap Error(-10): IoUring CQE file read failure"),
-        -11 => gerr("Hashmap Error(-11): Fsync failure"),
-        -12 => gerr("Hashmap Error(-12): Out of disk space"),
-        -13 => gerr("Hashmap Error(-13): IoUring submit failure"),
+        -1 => gerr("Hashmap Error(-1): General error"),
+        -2 => gerr("Hashmap Error(-2): Memory allocation failed"),
+        -3 => gerr("Hashmap Error(-3): No disk space"),
+        -4 => gerr("Hashmap Error(-4): io_uring queue failed"),
+        -5 => gerr("Hashmap Error(-5): File open failed"),
+        -6 => gerr("Hashmap Error(-6): File create failed"),
+        -7 => gerr("Hashmap Error(-7): File read failed"),
+        -8 => gerr("Hashmap Error(-8): File write failed"),
+        -9 => gerr("Hashmap Error(-9): File sync failed"),
+        -10 => gerr("Hashmap Error(-10): Vector allocation failed"),
+        -11 => gerr("Hashmap Error(-11): iovec allocation failed"),
+        -12 => gerr("Hashmap Error(-12): Fetch hashset allocation failed"),
+        -13 => gerr("Hashmap Error(-13): Fetch to read allocation failed"),
+        -14 => gerr("Hashmap Error(-14): Fetch cell buffer allocation failed"),
+        -15 => gerr("Hashmap Error(-15): Fetch buffer hashmap failed"),
+        -16 => gerr("Hashmap Error(-16): Fetch vector cells failed"),
+        -17 => gerr("Hashmap Error(-17): Fetch allocation failed"),
+        -18 => gerr("Hashmap Error(-18): Rebucket buffer allocation failed"),
+        -19 => gerr("Hashmap Error(-19): Rebucket cells allocation failed"),
+        -20 => gerr("Hashmap Error(-20): Write slot full"),
         _ => gerr(&format!("Hashmap Error({}): Unknown error code", i)),
     }
 }
@@ -96,124 +76,91 @@ pub struct IndexingHashmap {
 
 impl Drop for IndexingHashmap {
     fn drop(&mut self) {
-        unsafe { hashmap_destroy(&mut self.inner as *mut Hashmap) };
+        unsafe {
+            if !self.inner.array_len.is_null() {
+                libc::free(self.inner.array_len as *mut libc::c_void);
+            }
+            if self.inner.file != -1 {
+                libc::close(self.inner.file);
+            }
+            if !self.inner.path.is_null() {
+                libc::free(self.inner.path as *mut libc::c_void);
+            }
+            if !self.inner.temp.is_null() {
+                libc::free(self.inner.temp as *mut libc::c_void);
+            }
+        }
     }
 }
 
 unsafe impl Send for IndexingHashmap {}
 unsafe impl Sync for IndexingHashmap {}
+
 impl IndexingHashmap {
-    pub fn new(path: String, kib: u64) -> Result<Self, Error> {
+    pub fn new(path: String, _kib: u64) -> Result<Self, Error> {
         let p = format!("{}.hashmap", path);
         let ptemp = format!("{}.temp", path);
 
-        let c_p = match CString::new(p.clone()) {
-            Ok(a) => a,
-            Err(e) => return Err(gerr(&e.to_string())),
-        };
+        let c_p = CString::new(p).map_err(|e| gerr(&e.to_string()))?;
+        let c_tp = CString::new(ptemp).map_err(|e| gerr(&e.to_string()))?;
 
-        let c_tp = match CString::new(ptemp) {
-            Ok(a) => a,
-            Err(e) => return Err(gerr(&e.to_string())),
-        };
-
-        let mut h: Hashmap = Hashmap {
-            path: c_p.into_raw(),
-            temp_path: c_tp.into_raw(),
+        let path_ptr = c_p.as_ptr();
+        let mut h = Hashmap {
             file: -1,
-            len: 0,
+            array_len: null_mut(),
             bucket_size: 0,
-            cache: null_mut(),
+            len: 0,
+            path: c_p.into_raw(),
+            temp: c_tp.into_raw(),
         };
-        let execution_product = unsafe { hashmap_new((&mut h) as *mut Hashmap, kib) };
+        let execution_product = unsafe { hm_new(&mut h, path_ptr) };
         match execution_product {
             x if x >= 0 => Ok(IndexingHashmap { inner: h }),
-            _ => {
-                eprintln!("Failed to create hashmap-file");
-                Err(error_execution_product(execution_product))
-            }
+            _ => Err(error_execution_product(execution_product)),
         }
     }
-    pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>, Error> {
-        let keys = keys;
-        let mut input = GetInput {
-            count: keys.len() as u32,
-            key: keys.as_ptr() as *mut u64,
-        };
-        let mut output = GetOutput::default();
 
+    pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>, Error> {
+        let length = keys.len() as u64;
+        if length == 0 {
+            return Ok(vec![]);
+        }
+        let mut outputs: Vec<SomeU64> = vec![SomeU64 { exists: 0, value: 0 }; keys.len()];
+        let inputs_ptr = keys.as_ptr();
+        let outputs_ptr = outputs.as_mut_ptr();
         let execution_product = unsafe {
-            hashmap_get(
-                &mut self.inner as *mut Hashmap,
-                &mut input as *mut GetInput,
-                &mut output as *mut GetOutput,
+            hm_get(
+                &mut self.inner,
+                inputs_ptr,
+                outputs_ptr,
+                length,
             )
         };
-
         if execution_product < 0 {
-            eprintln!("Failed to run hashmap-get");
             return Err(error_execution_product(execution_product));
         }
-        let v = output.value;
-
-        if output.success < 0 {
-            return Err(gerr(&format!(
-                "Error, hashmap returned {} as response",
-                output.success
-            )));
-        }
-
-        if v.is_null() {
-            return Err(gerr(
-                "Error, failed to perform get in the hashmap: Null pointer returned",
-            ));
-        }
-        Ok(unsafe {
-            let a = Vec::from_raw_parts(v, output.count as usize, keys.len());
-            let mut b = Vec::new();
-            for i in a {
-                if i.some > 0 {
-                    b.push(i.value);
-                }
+        let out_slice = unsafe { std::slice::from_raw_parts(outputs_ptr, keys.len()) };
+        let mut b = Vec::new();
+        for i in out_slice {
+            if i.exists != 0 {
+                b.push(i.value);
             }
-            b
-        })
+        }
+        Ok(b)
     }
+
     pub fn write(&mut self, entries: Vec<(bool, u64, u64)>) -> Result<(), Error> {
         if entries.is_empty() {
             return Ok(());
         }
-        //println!("entries {}", entries.len());
-        let mut keys: Vec<u64> = Vec::with_capacity(entries.len());
-        let mut values: Vec<u64> = Vec::with_capacity(entries.len());
-        let mut exists: Vec<u8> = Vec::with_capacity(entries.len());
-
-        for (exist, key, value) in entries {
-            exists.push(if exist { 1 } else { 0 });
-            keys.push(key);
-            values.push(value);
+        let length = entries.len() as u64;
+        let mut cells: Vec<Cell> = Vec::with_capacity(entries.len());
+        for (exists, key, value) in entries {
+            cells.push(Cell { hk: key, v: if exists{value}else{u64::MAX} });
         }
-        //println!("ke {}", keys.len());
-        let mut input = WriteInput {
-            count: keys.len() as u32,
-            key: keys.as_ptr() as *mut u64,
-            value: values.as_ptr() as *mut u64,
-            exists: exists.as_ptr() as *mut u8,
-        };
-
-        //println!("~");
-        let execution_product = unsafe {
-            hashmap_write(
-                &mut self.inner as *mut Hashmap,
-                &mut input as *mut WriteInput,
-            )
-        };
-        //println!("~");
-        std::mem::drop(keys);
-        std::mem::drop(values);
-        std::mem::drop(exists);
+        let cells_ptr = cells.as_ptr();
+        let execution_product = unsafe { hm_write(&mut self.inner, cells_ptr, length) };
         if execution_product < 0 {
-            eprintln!("Failed to run hashmap-write");
             return Err(error_execution_product(execution_product));
         }
         Ok(())

@@ -26,7 +26,7 @@
  *  flushes metadata into disk, no fsync within.
  *  
  *  ## fetch_slots
- *  Get in-disk slots, a helper function for get and write functions; Batch operations by mergin reads, max batch size being "MAX_BATCH_SIZE" and the maximum
+ *  Get in-disk slots, a helper function for get and write functions; Batch operations by merging reads, max batch size being "MAX_BATCH_SIZE" and the maximum
  *  memory usage per batch is "MAX_BATCH_SIZE*HASHMAP_VECTOR_SIZE". Doesn't use io_uring.
  *
  *  ## fast_sort
@@ -36,14 +36,14 @@
  *  Free all memory within an array of memory-allocated buffers.
  *
  *  ## free_mem
- *  Free all memory in buffers within an "f" object of "fmem"; Mean't to turn the process of dealocating memory from various pointers more reliable, specially
+ *  Free all memory in buffers within an "f" object of "fmem"; Meant to turn the process of deallocating memory from various pointers more reliable, specially
  *  in cases where memory arithmetic couldn't be implemented.
  * 
  *  ## raw_get
- *  Uses fetch_slots and get existance-value-spot of entries. A helper for both write and get
+ *  Uses fetch_slots and get existence-value-spot of entries. A helper for both write and get
  *
  *  ## hm_get
- *  Uses raw_get to get the existance-value of entries.
+ *  Uses raw_get to get the existence-value of entries.
  *
  *  ## hm_write
  *  Uses fetch_spots to get the offsets in which it must write into, using io_uring to batch changes. Deletions are done by setting the value 18,446,744,073,709,551,615
@@ -58,10 +58,10 @@
  *  that mutate or insert Cells.
  *  
  *  The code currently remains without any meaningful error returns (-1 only); After implementing all the intended functions a pattern for all errors will
- *  be created based on all the possible errors that can occur during execution. It has "printf's" as a way of helping me to debug the code. Mean't to be
+ *  be created based on all the possible errors that can occur during execution. It has "printf's" as a way of helping me to debug the code. Meant to be
  *  poor for ease of iteration during early development.
  *
- *  The current code will always be runned in a syncronous (single-threaded) routine.
+ *  The current code will always be run in a synchronous (single-threaded) routine.
  *  
  *  Everything within the Hashmap structure will primarily come from the rust-end, meaning that what is covered by the structure itself also
  *  have rust memory-safety guarantees; All function arguments come from the rust-end, they do not need validation (specifically in the C code).
@@ -71,30 +71,8 @@
  * */
 
 
-// General errors
-const int ERROR_GENERAL                     = -1;  // Catch-all
-const int ERROR_MEMALLOC                    = -2;  // Memory allocation failed
-const int ERROR_NO_DISK_SPACE               = -3;  // Not enough disk space
-const int ERROR_IO_URING_QUEUE              = -4;  // io_uring queue init failed
-const int ERROR_FILE_OPEN                   = -5;  // Failed to open file
-const int ERROR_FILE_CREATE                 = -6;  // Failed to create file
-const int ERROR_FILE_READ                   = -7;  // Failed to read from file
-const int ERROR_FILE_WRITE                  = -8;  // Failed to write to file
-const int ERROR_FILE_SYNC                   = -9;  // Failed to fsync or fdatasync
-const int ERROR_VECTOR_ALLOC                = -10; // Failed to allocate vector buffer
-const int ERROR_IOVEC_ALLOC                 = -11; // Failed to allocate iovec array
-const int ERROR_FETCH_HASHSET_ALLOC         = -12; // Failed to allocate hashset in fetch_slots
-const int ERROR_FETCH_TO_READ_ALLOC         = -13; // Failed to allocate `to_read` array
-const int ERROR_FETCH_CELL_BUFFER_ALLOC     = -14; // Failed to allocate cell_buffer array
-const int ERROR_FETCH_BUFFER_HASHMAP        = -15; // Failed to allocate buffer_hashmap
-const int ERROR_FETCH_VECTOR_CELLS          = -16; // Failed to allocate vector_cells
-const int ERROR_FETCH_FETCH_ALLOC           = -17; // Failed to allocate fetch array
-const int ERROR_REBUCKET_BUFFER_ALLOC       = -18; // Failed to allocate buffer in rebucket
-const int ERROR_REBUCKET_CELLS_ALLOC        = -19; // Failed to allocate cells in rebucket
-const int ERROR_WRITE_SLOT_FULL             = -20; // Could not find free spot to write cell
-
-
-
+#include <stdint.h>
+#include "hashmap.h"
 #include <fcntl.h>
 #include <liburing/io_uring.h>
 #include <sched.h>
@@ -110,26 +88,33 @@ const int ERROR_WRITE_SLOT_FULL             = -20; // Could not find free spot t
 #define HASHMAP_VECTOR_SIZE 4080
 #define GROWTH_FACTOR 32
 #define DEFAULT_VECTOR_COUNT 32
-#define SPOTS_ARRAY_LENGTH 5
 #define MAX_BATCH_SIZE 8224
 #define REBUCKET_ON_PERCENTAGE 65
+#define SPOTS_ARRAY_LENGTH 5
 
-typedef struct {
-    int file;
-    unsigned char *array_len;
-    u_int64_t bucket_size;
-    u_int64_t len;
-    char* path;
-    char* temp;
-} Hashmap;
+// Error codes
+#define ERROR_GENERAL -1
+#define ERROR_MEMALLOC -2
+#define ERROR_NO_DISK_SPACE -3
+#define ERROR_IO_URING_QUEUE -4
+#define ERROR_FILE_OPEN -5
+#define ERROR_FILE_CREATE -6
+#define ERROR_FILE_READ -7
+#define ERROR_FILE_WRITE -8
+#define ERROR_FILE_SYNC -9
+#define ERROR_VECTOR_ALLOC -10
+#define ERROR_IOVEC_ALLOC -11
+#define ERROR_FETCH_HASHSET_ALLOC -12
+#define ERROR_FETCH_TO_READ_ALLOC -13
+#define ERROR_FETCH_CELL_BUFFER_ALLOC -14
+#define ERROR_FETCH_BUFFER_HASHMAP -15
+#define ERROR_FETCH_VECTOR_CELLS -16
+#define ERROR_FETCH_FETCH_ALLOC -17
+#define ERROR_REBUCKET_BUFFER_ALLOC -18
+#define ERROR_REBUCKET_CELLS_ALLOC -19
+#define ERROR_WRITE_SLOT_FULL -20
 
-typedef struct {
-    u_int64_t hk; // hashed key
-    u_int64_t v; // value
-} Cell;
-const u_int64_t c_s = sizeof(Cell);
-
-typedef struct{void**f;size_t l;} fmem;
+#define c_s sizeof(Cell)
 
 inline void free_mem(fmem* mem){
     for(size_t i = 0; i<mem->l; i++) {
@@ -220,7 +205,7 @@ int draw_defaults(Hashmap *self, u_int64_t bucket_size){
         return 0;
 }
 
-int new(Hashmap* self, char* path){
+int hm_new(Hashmap* self, char* path){
     if (access(path, F_OK) == -1){
         return draw_defaults(self, DEFAULT_VECTOR_COUNT);    
     }else{
@@ -280,7 +265,7 @@ inline void find_spots(Hashmap *self, u_int64_t hk, u_int64_t *array){
     u_int64_t pivot = hk % self->bucket_size;
   
     // return possible spots 
-    #pragma GCC unroll SPOTS_ARRAY_LENGTH
+    #pragma GCC unroll 5
     for(u_int64_t i = 0; i<SPOTS_ARRAY_LENGTH;i++){
         array[i] = self->array_len[soft(pivot+i, self->bucket_size)];
     }
@@ -301,18 +286,6 @@ inline u_int64_t hash64(u_int64_t x) {
 }
 
 
-
-typedef struct{
-    Cell* value;
-    u_int8_t length;
-    u_int64_t index;
-} cell_vector;
-
-typedef struct {
-   cell_vector* value; 
-   u_int64_t hk;
-} cell_fetch;
-
 struct fetch_entry {
     u_int64_t* request;
     u_int64_t length;
@@ -320,8 +293,6 @@ struct fetch_entry {
     fmem* mem;
 }; 
 
-typedef struct {u_int8_t exists; u_int64_t hk;} __hc__; // hash cell
-typedef struct {u_int8_t exists; u_int64_t spot; u_int64_t bid;} __hcb__; // hash cell -> buffer pointer
 
 void fast_sort(u_int64_t *array, u_int64_t length) {
     if (length <= 1) return;
@@ -397,7 +368,7 @@ inline void free_array(unsigned char**buffer, u_int64_t len){
     };
 }
 
-int fetch_slots(Hashmap *self, struct fetch_entry* entry){
+int fetch_slots(Hashmap *self, fetch_entry* entry){
     entry->mem->f = NULL;
     u_int64_t *to_read = NULL;
     u_int64_t trl = 0;
@@ -411,7 +382,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         for(u_int64_t i = 0; i < entry->length; i++){
             u_int64_t spots[SPOTS_ARRAY_LENGTH]={0};
             find_spots(self, entry->request[i], spots);
-            #pragma GCC unroll SPOTS_ARRAY_LENGTH
+            #pragma GCC unroll 5
             for(u_int64_t j = 0; j < SPOTS_ARRAY_LENGTH; j++){
                 u_int64_t offset = 0;
                 u_int64_t pivot = hash64(spots[j]) % hcs;
@@ -490,7 +461,7 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
         readen = target;free(buffer);
     }
     
-    __hcb__ *buffer_hashmap = (__hcb__*)calloc(sizeof(__hcb__),trl);
+    __hcb__ *buffer_hashmap = (__hcb__*)calloc(trl,sizeof(__hcb__));
     if(!buffer_hashmap){
         free(to_read);
         free_array(cell_buffer, trl);
@@ -564,18 +535,9 @@ int fetch_slots(Hashmap *self, struct fetch_entry* entry){
     return 0;
 } 
 
-typedef struct {
-    u_int8_t exists;
-    u_int64_t value;
-} SomeU64;
-typedef struct {
-    u_int8_t exists;
-    u_int64_t value;
-    u_int64_t spot;
-} SomeRawGet;
 
 int raw_get(Hashmap* self, u_int64_t *inputs, SomeRawGet *outputs, u_int64_t length){
-    struct fetch_entry fetch_request;
+    fetch_entry fetch_request;
     fetch_request.length = length;
     fetch_request.request = inputs;
     int fetch_result = fetch_slots(self, &fetch_request);
@@ -586,7 +548,7 @@ int raw_get(Hashmap* self, u_int64_t *inputs, SomeRawGet *outputs, u_int64_t len
     for(size_t i = 0; i < length; i++){
         cell_fetch* v = &fetch_request.results[i];
         SomeRawGet u = {0,0,0};
-        #pragma GCC unroll SPOTS_ARRAY_LENGTH
+        #pragma GCC unroll 5
         for(size_t j = 0; j < SPOTS_ARRAY_LENGTH;j++){
             cell_vector *cv = &v->value[j];
             if(cv->length > 0 && u.exists == 0){
@@ -630,7 +592,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
         rqst[i] = inputs[i].hk;
     }
 
-    struct fetch_entry fetch;
+    fetch_entry fetch;
     fetch.length = length;
     fetch.request = rqst;
 
@@ -640,7 +602,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
     }
     
     struct io_uring ring;
-    if (io_uring_queue_init(length, &ring, 0) < 0){
+    if (io_uring_queue_init(length*5, &ring, 0) < 0){
         free_mem(fetch.mem);
         return ERROR_IO_URING_QUEUE;
     };
@@ -654,10 +616,14 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
 
         for (size_t i = 0; i < SPOTS_ARRAY_LENGTH; i++){
             cell_vector *v = &cf->value[i];
-            for(size_t j =0; j < cf->value[i].length; j++){
+            for(size_t j =0; j < v->length; j++){
                 if(v->value[j].hk == cell.hk){
                     offset += v->index*HASHMAP_VECTOR_SIZE+j;
                     done = 1;
+                    if(cell.v == UINT64_MAX){
+                        cell=v->value[v->length-1];
+                        self->array_len[v->index]--;
+                    }
                     break;
                 }
             }
@@ -665,7 +631,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
         }
         if (done == 1){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_write(sqe, self->file, &cell, sizeof(Cell), offset);
+            io_uring_prep_write(sqe, self->file, &cell, c_s, offset);
             continue;
         }
         for (size_t i = 0; i < SPOTS_ARRAY_LENGTH; i++){
@@ -682,7 +648,7 @@ int hm_write(Hashmap *self, Cell* inputs, u_int64_t length){
         }
         if(done == 1){
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            io_uring_prep_write(sqe, self->file, &cell, sizeof(Cell), offset);
+            io_uring_prep_write(sqe, self->file, &cell, c_s, offset);
             
             continue;
         }
@@ -744,7 +710,7 @@ int hm_rebucket(Hashmap *self){
         for (u_int64_t j = 0; j < to_read; j ++){
             if(self->array_len[j+i]>0){
                 for(u_int64_t k = 0; k < self->array_len[j+i];k++){
-                    cells[len] = buffer[(j*(HASHMAP_VECTOR_SIZE/sizeof(Cell)))+k];
+                    cells[len] = buffer[(j*(HASHMAP_VECTOR_SIZE/c_s))+k];
                     len++;
                 }
             }
@@ -758,9 +724,11 @@ int hm_rebucket(Hashmap *self){
     }
     free(buffer);
     free(cells);
+    free(self->array_len);
     close(self->file);
     remove(self->path);
     rename(self->temp, self->path);
     self->file = temp.file;
+    self->array_len = temp.array_len;
     return 0;
 };
