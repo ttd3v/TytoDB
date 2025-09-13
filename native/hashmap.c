@@ -434,13 +434,16 @@ int fetch_slots(Hashmap *self, fetch_entry* entry){
     u_int64_t readen = 0;
     
     while(readen < trl){
-        u_int64_t target = 0;
+        u_int64_t target = readen;
         for(u_int64_t i = readen+1; i < trl;i++){
             if(to_read[i] - to_read[readen] <= MAX_BATCH_SIZE){target = i;};
         }
         u_int64_t cur = readen;
-        
-        u_int64_t buffer_size = (to_read[target]-to_read[cur])*HASHMAP_VECTOR_SIZE;
+        u_int64_t count = target - cur + 1;
+        u_int64_t first_bucket = to_read[cur];
+        u_int64_t last_bucket = to_read[target];
+        u_int64_t buffer_size = (last_bucket - first_bucket + 1) * HASHMAP_VECTOR_SIZE;
+
         unsigned char *buffer = malloc(buffer_size);
         if(!buffer){
             printf("Failed to allocate reading buffer in fetch_slots\n");
@@ -448,17 +451,18 @@ int fetch_slots(Hashmap *self, fetch_entry* entry){
             free_array(cell_buffer, trl);
             return ERROR_MEMALLOC;
         }
-        if (pread(self->file, buffer, buffer_size, (self->bucket_size+16)+(to_read[cur]*HASHMAP_VECTOR_SIZE))<0){
+        if (pread(self->file, buffer, buffer_size, (self->bucket_size+16)+(first_bucket*HASHMAP_VECTOR_SIZE))<0){
             printf("Failed to read into buffer into buffer in fetch_slots\n");
             free(to_read);
             free(buffer);
             free_array(cell_buffer, trl);
             return ERROR_FILE_READ;
         }
-        for(u_int64_t i = readen; i< trl;i++){
-            memcpy(cell_buffer[i], buffer + (to_read[i]-readen)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
+        for(u_int64_t i = cur; i <= target; i++){
+            memcpy(cell_buffer[i], buffer + (to_read[i]-first_bucket)*HASHMAP_VECTOR_SIZE, HASHMAP_VECTOR_SIZE);
         }
-        readen = target;free(buffer);
+        readen = target + 1;
+        free(buffer);
     }
     
     __hcb__ *buffer_hashmap = (__hcb__*)calloc(trl,sizeof(__hcb__));
@@ -487,6 +491,7 @@ int fetch_slots(Hashmap *self, fetch_entry* entry){
         printf("Failed to allocate memory for fetch\n");
         return ERROR_FETCH_FETCH_ALLOC;
     }
+    entry->results = fetch;
     cell_vector* vector_cells = malloc(sizeof(cell_vector)*SPOTS_ARRAY_LENGTH*entry->length);
     if(!vector_cells){
         free(buffer_hashmap);
