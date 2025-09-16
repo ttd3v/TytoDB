@@ -31,43 +31,27 @@ void insert_u64hashmap(U64Hashmap *self, u64 key, u64 value);
 
 void u64hashmap_rebucket(U64Hashmap *self){
     if (!self || !self->array) return;
-    
+
     u64 old_bucket_size = self->bucket_size;
+    hash_cell *old_array = self->array;
+
     u64 new_bucket_size = self->bucket_size * 2;
-    
-    
-    hash_cell *new_array = realloc(self->array, new_bucket_size * sizeof(hash_cell));
+    hash_cell *new_array = calloc(new_bucket_size, sizeof(hash_cell));
     if (!new_array) {
         return;
     }
-    
-    for (u64 i = old_bucket_size; i < new_bucket_size; i++) {
-        new_array[i] = (hash_cell){0, 0, 0};
-    }
-    
-    hash_cell *old_array = malloc(old_bucket_size * sizeof(hash_cell));
-    if (!old_array) {
-        return;
-    }
-    
-    for (u64 i = 0; i < old_bucket_size; i++) {
-        old_array[i] = new_array[i];
-        new_array[i] = (hash_cell){0, 0, 0}; 
-    }
-    
+
     self->array = new_array;
     self->bucket_size = new_bucket_size;
-    //u64 old_len = self->len;
     self->len = 0;
-    
-    
+
     for (u64 i = 0; i < old_bucket_size; i++){
         hash_cell c = old_array[i];
         if (c.exist) {
             insert_u64hashmap(self, c.key, c.value);
         }
     }
-    
+
     free(old_array);
 }
 

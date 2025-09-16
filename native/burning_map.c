@@ -71,6 +71,7 @@ inline SomeI64 get_burningmap(BurningMap *self, u_int64_t key){
 }
 
 void destroy_burningmap(BurningMap *self){
+    if(!self) return;
     if(self->paper_vector) free(self->paper_vector);
-    if(self) free(self);
+    free(self);
 }
