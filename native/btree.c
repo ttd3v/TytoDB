@@ -1,11 +1,10 @@
-
-
 #include "vector.h"
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <liburing.h>
+#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -160,6 +159,7 @@ i32 load_metadata(BTree *self){
         code = handle_err(pread(self->file, buffer, len*sizeof(meta), self->status.st_size-sizeof(len)-(len*sizeof(meta))));
         self->m = (meta*)buffer;
     }   
+    self->ml = len;
     self->length = 0;
     for(u32 i = 0; i<self->ml;i++){
         self->length += self->m[i].len;
@@ -211,7 +211,7 @@ i32 create(BTree *self,char* path){
         return handle_err(f);
     }
     u32 len = 0;
-    i32 code = handle_err(pwrite(self->file, &len, sizeof(len), 0));
+    i32 code = handle_err(pwrite(f, &len, sizeof(len), 0));
     if(code < 0){return code;}
     self->file = f;
     self->ml = len;
@@ -315,7 +315,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             u64* k = (u64*)vec.buffer;
             instance[i].pointer = k[i];
             instance[i].length = self->m[k[i]/VECTOR_SIZE].len;
-            io_uring_prep_read(sqe, self->file, instance[i].vector, sizeof(disk_fetch), k[i]);
+            io_uring_prep_read(sqe, self->file, instance[i].vector, VECTOR_SIZE, k[i]);
         }
         u64 code = io_uring_submit_and_wait(&ring, length);
         if (code < 0){
@@ -399,6 +399,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             
             {
                 u64* t = (u64*)torem.buffer;
+                if (torem.len == 0) continue;
                 for(usize i = torem.len-1; i >= 0; i--){
                     if(vec_remove(&to_proc, t[i]) < 0){
                         sfree(mutation.buffer);
@@ -433,6 +434,10 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     for(usize i = 0; i < mutation.len; i++){
         disk_fetch* k = &instance[mu[i]];
         qsort(k->vector, k->length, sizeof(Cell), cmp_cell_asc);
+        if(k->length < ELEMENTS_PER_VECTOR){
+            // Fill out of bonds with UINT64_MAX, the tombstone
+            memset((k->vector)+k->length, 255, (ELEMENTS_PER_VECTOR-k->length)*sizeof(u64));
+        }
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         self->m[k->pointer/VECTOR_SIZE].max = k->vector[k->length-1].key;
         self->m[k->pointer/VECTOR_SIZE].min = k->vector[0].key;
@@ -465,3 +470,63 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     return 0;
 }
 
+
+
+const float THRESHOLD = 2.0; 
+const u64 MAX_PAGES = 16384;
+i32 normalize(BTree *self){
+    if(self->ml <= 3){
+        return 0;
+    }
+    // gradient study
+    float* gradient = calloc(self->ml/2, sizeof(float));
+    if (gradient == NULL){
+        errno = ENOMEM;
+        return handle_err(-1);
+    }
+    
+    vector anomalies;
+    if(vec_new(&anomalies, sizeof(u64))<0){
+        return handle_err(-1);
+    }
+
+    {
+        for(usize i = 0; i < (self->ml/2)-1;i++){
+            float a = (float)self->m[i].max;
+            float b = (float)self->m[i+1].max;
+            float a1 = (float)self->m[i].min;
+            float b1 = (float)self->m[i+1].min;
+            float mid_a = 0.5f*(a + a1);
+            float mid_b = 0.5f*(b + b1);
+            gradient[i] = fabsf(mid_b - mid_a);
+        }
+    }
+    float max = 0;
+    float sum = 0;
+    
+    for(size_t i = 0; i < (self->ml/2) -1; i++){
+        if(gradient[i] > max){
+            max = gradient[i];
+        }
+        sum += gradient[i];
+    }
+    float mean = sum/(float)self->ml/2; 
+    for(u64 i = 0; i < (self->ml/2)-1;i++){
+        float deviate = fabsf(mean-gradient[i]);
+        if(deviate > THRESHOLD * mean){
+            unsigned char buffer[8] = {0};
+            u64_to_unsigned_char(buffer, i);
+            if (vec_push(&anomalies, &buffer)<0){
+                free(gradient);
+                vec_destroy(&anomalies);
+                return handle_err(-1);
+            }
+        }
+    }
+
+
+    
+
+
+    return 0;
+}
