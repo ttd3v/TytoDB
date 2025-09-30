@@ -2,10 +2,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/types.h>
-
-typedef u_int64_t u64;
-typedef struct {u64 exists;u64 value;} cell;
-typedef struct {cell* entries; u64 length; u64 capacity;} hashset;
+#include "hashset.h"
 
 
 static inline u64 hash(u64 key) {

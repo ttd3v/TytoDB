@@ -1,15 +1,18 @@
 #include "vector.h"
+#include "hashset.h"
 #include <asm-generic/errno-base.h>
 #include <asm-generic/errno.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <liburing.h>
+#include <liburing/io_uring.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <sys/uio.h>
 typedef uint64_t u64;
@@ -19,7 +22,7 @@ typedef int32_t i32;
 typedef uint8_t u8;
 typedef size_t usize;
 
-#define ELEMENTS_PER_VECTOR 1024
+#define ELEMENTS_PER_VECTOR 256
 
 typedef struct {
     u64 key;
@@ -485,10 +488,11 @@ i32 normalize(BTree *self){
         return handle_err(-1);
     }
     
-    vector anomalies;
-    if(vec_new(&anomalies, sizeof(u64))<0){
+    hashset offsets;
+    if (hashset_new_wise(&offsets, self->ml/2) < 0){
         return handle_err(-1);
-    }
+    };
+
 
     {
         for(usize i = 0; i < (self->ml/2)-1;i++){
@@ -511,22 +515,151 @@ i32 normalize(BTree *self){
         sum += gradient[i];
     }
     float mean = sum/(float)self->ml/2; 
-    for(u64 i = 0; i < (self->ml/2)-1;i++){
+    for(u64 i = 0; (i < (self->ml/2)-1) && offsets.length < MAX_PAGES;i++){
         float deviate = fabsf(mean-gradient[i]);
         if(deviate > THRESHOLD * mean){
-            unsigned char buffer[8] = {0};
-            u64_to_unsigned_char(buffer, i);
-            if (vec_push(&anomalies, &buffer)<0){
-                free(gradient);
-                vec_destroy(&anomalies);
-                return handle_err(-1);
+            #pragma GCC unroll 5
+            for (size_t j = 0; j < 5; j++){
+                hashset_push(&offsets, (i+j)%self->ml);
             }
+
         }
     }
 
+    free(gradient);
+    if(offsets.length == 0){
+        hashset_destroy(&offsets);
+        return 0;
+    }
 
+    disk_fetch *fetch = malloc(sizeof(disk_fetch)*offsets.length);
+    if(!fetch){
+        errno = ENOMEM;
+        return handle_err(-1);
+    }
+
+    struct io_uring *ring = malloc(sizeof(struct io_uring));
+    if(!ring){
+        free(fetch);
+        hashset_destroy(&offsets);
+        errno = ENOMEM;
+        return 0;
+    }
+    if (io_uring_queue_init(offsets.length, ring, 0) < 0){
+        free(ring);
+        free(fetch);
+        hashset_destroy(&offsets);
+        return  handle_err(-1);
+    }
+    size_t len = 0;
     
+    for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
+        cell c = offsets.entries[i];
+        if(c.exists){
+            struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+            fetch[len].length = self->m[c.value].len;
+            fetch[len].pointer = c.value;
+            io_uring_prep_read(sqe, self->file, fetch[len].vector, VECTOR_SIZE, VECTOR_SIZE*c.value);
+            len++;
+        }
+    }
 
+    if (io_uring_submit_and_wait(ring, offsets.length) < 0){
+        free(fetch);
+        hashset_destroy(&offsets);
+        return handle_err(-1);
+    }
 
+    io_uring_queue_exit(ring);
+    free(ring);
+
+    Cell *plain_vector = malloc(sizeof(Cell)*ELEMENTS_PER_VECTOR*offsets.length);
+    for(size_t i = 0; i < offsets.length; i++){
+        memcpy(plain_vector+(i*VECTOR_SIZE), fetch[i].vector, VECTOR_SIZE);
+    }
+
+    qsort(plain_vector, offsets.length*ELEMENTS_PER_VECTOR, sizeof(Cell), cmp_cell_asc);
+    
+    for(size_t i = 0; i < offsets.length; i++){
+        memcpy(fetch[i].vector, plain_vector+i*VECTOR_SIZE, VECTOR_SIZE);
+    }
+
+    free(plain_vector);
+    ring = malloc(sizeof(struct io_uring));
+    if(!ring){
+        free(fetch);
+        errno = ENOMEM;
+        hashset_destroy(&offsets);
+        return 0;
+    }
+    if (io_uring_queue_init((offsets.length*2)+1, ring, 0) < 0){
+        free(ring);
+        free(fetch);
+        hashset_destroy(&offsets);
+        return  handle_err(-1);
+    }
+    len = 0;
+    
+    for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
+        cell c = offsets.entries[i];
+        if(c.exists){
+            struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+            fetch[len].length = self->m[c.value].len;
+            fetch[len].pointer = c.value;
+            io_uring_prep_write(sqe, self->file, fetch[len].vector, VECTOR_SIZE, VECTOR_SIZE*c.value);
+            len++;
+        }
+    }
+    
+    
+    u_int8_t full = 0;
+    for(size_t i = offsets.length-1; i-- >0;){
+        size_t j;
+        if (full == 0){
+            for(j = ELEMENTS_PER_VECTOR-1; j-- > 0;){
+                if(fetch[i].vector[j].key != UINT64_MAX){
+                    break;
+                }
+            }
+        }else{
+            j = ELEMENTS_PER_VECTOR -1;
+        }
+        if(j == ELEMENTS_PER_VECTOR -1){full = 1;}
+        Cell*vector= fetch[i].vector;
+        u64 pointer = fetch[i].pointer;
+        self->m[pointer] = (meta){vector[j].key,vector[0].key,j};
+    }
+    
+    u64 mlc = self->ml*sizeof(meta);
+    unsigned char *memory = malloc(sizeof(u32)+mlc);
+    if(!memory){
+        free(fetch);
+        hashset_destroy(&offsets);
+        io_uring_queue_exit(ring);
+        errno = ENOMEM;
+        return handle_err(-1);
+    }
+    memcpy(memory, self->m, mlc);
+    memcpy(memory+mlc, &(unsigned char){self->ml}, sizeof(u32));
+
+    struct io_uring_sqe *meta_sqe = io_uring_get_sqe(ring);
+    io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
+
+    {
+        struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+        io_uring_prep_fsync(sqe, self->file, 0);
+        sqe->flags |= IOSQE_IO_DRAIN;
+    }
+    if (io_uring_submit_and_wait(ring, (offsets.length*2)+1) < 0){
+        free(fetch);
+        hashset_destroy(&offsets);
+        free(memory);
+        io_uring_queue_exit(ring);
+        return handle_err(-1);
+    }
+    free(memory);
+    free(fetch);
+    hashset_destroy(&offsets);
+    io_uring_queue_exit(ring);
     return 0;
 }
