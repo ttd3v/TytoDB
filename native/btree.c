@@ -15,94 +15,20 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/uio.h>
-typedef uint64_t u64;
-typedef uint8_t u8;
-typedef uint32_t u32;
-typedef int32_t i32;
-typedef uint8_t u8;
-typedef size_t usize;
-
+#include "btree.h"
 #define ELEMENTS_PER_VECTOR 256
 
-typedef struct {
-    u64 key;
-    u64 value;
-}Cell;
 
-const size_t VECTOR_SIZE = sizeof(Cell)*ELEMENTS_PER_VECTOR;
-typedef struct{
-    u64 max;
-    u64 min;
-    u64 len;
-} meta;
+static inline void sfree(void *ptr){
+    free(ptr);
+    ptr = NULL;
+}
 
-typedef struct{
-    i32 file;
-    struct stat status;
-    meta *m;
-    u32 ml;
-    u64 length;
-    char* path;
-    unsigned char const*empty;
-} BTree;
-
-enum RequestMethods {
-    RQ_READ = 1,
-    RQ_WRITE = 2,
-    RQ_DELETE = 0,
-};
-
-typedef struct{
-    usize method;
-    u64 key;
-    u64 value;
-} Request;
-typedef struct{
-    u64 value;
-    u64 exists;
-} GetResponse;
-
-enum ERROR {
-    SOMETHING_WENT_WRONG = -1,
-    PERMISSION_DENIED = -2,
-    FILE_DOES_NOT_EXISTS = -3,
-    FILE_EXISTS = -4,
-    PROCESS_HAVE_TOO_MANY_OPEN_FILES = -5,
-    SYSTEM_WIDE_LIMIT_ON_OPEN_FILES = -6,
-    TRIED_OPENING_A_DIRECTORY = -7,
-    INVALID_MEMORY = -8,
-    INVALID_ARGUMENT = -9,
-    NO_SPACE_LEFT = -10,
-    IO_ERROR = -11,
-    INTERRUPTED_BY_SIGNAL = -12,
-    BROKEN_PIPE = -13,
-    FAILED_TO_ALLOCATE_MEMORY = -14,
-    RESOURCE_TEMPORARILY_UNAVAILABLE = -15,
-    BAD_FILE_DESCRIPTOR = -16,
-    ARGUMENT_LIST_TOO_LONG = -17,
-    EXEC_FORMAT_ERROR = -18,
-    NO_CHILD_PROCESSES = -19,
-    ADDRESS_ALREADY_IN_USE = -20,
-    ADDRESS_NOT_AVAILABLE = -21,
-    ADDRESS_FAMILY_NOT_SUPPORTED = -22,
-    ALREADY_IN_PROGRESS = -23,
-    BAD_MESSAGE = -24,
-    INVALID_REQUEST_DESCRIPTOR = -25,
-    INVALID_EXCHANGE = -26,
-    BAD_FILE_DESCRIPTOR_STATE = -27,
-    TOO_MANY_SYMBOLIC_LINKS = -29,
-    FILE_TOO_LARGE = -30,
-    NO_SPACE_LEFT_ON_DEVICE = -31,
-    INVALID_SEEK = -32,
-    READ_ONLY_FILE_SYSTEM = -33,
-    TOO_MANY_LINKS = -34,
-    NUMERIC_RESULT_TOO_LARGE = -36,
-    NO_LOCKS_AVAILABLE = -37,
-    FUNCTION_NOT_IMPLEMENTED = -38,
-    DIRECTORY_NOT_EMPTY = -39,
-    TOO_MANY_LEVELS_OF_SYMBOLIC_LINKS = -40,
-    UNKNOWN_ERROR = -41
-};
+static inline void u64_to_unsigned_char(unsigned char *value, u64 u){
+    for(usize i = 0; i < 8; i++){
+        value[i] = (u >> (i * 8)) & 0xFF;
+    }
+}
 
 i32 handle_err(i32 f) {
     if (f >= 0) return 0;
@@ -218,6 +144,7 @@ i32 create(BTree *self,char* path){
     if(code < 0){return code;}
     self->file = f;
     self->ml = len;
+    self->length = len;
     self->m = NULL;
     return 0;
 }
@@ -255,180 +182,145 @@ int cmp_cell_asc(const void *a, const void *b) {
     return (ra->key > rb->key) - (ra->key < rb->key);
 }
 
-typedef struct {
-    u64 pointer;
-    u64 length;
-    Cell vector[ELEMENTS_PER_VECTOR];
-} disk_fetch;
 
-inline void sfree(void *ptr){
-    free(ptr);
-    ptr = NULL;
-}
-
-inline void u64_to_unsigned_char(unsigned char *value, u64 u){
-    for(usize i = 0; i < 8; i++){
-        value[i] = (u >> (i * 8)) & 0xFF;
-    }
-}
 
 i32 bt_request(BTree *self,Request *req,usize req_count){ 
-    vector vec;
+    hashset vectors;
     usize __write_ops__ = 0;
     usize increase = 0;
     usize decrease = 0;
-    if(vec_new(&vec, sizeof(u64))<0){return handle_err(-1);};
-    for(usize i = 0; i < self->ml; i++){
-        if(self->m[i].len > 0){
-           for(usize j = 0; j < req_count; j++){
-               if(req[j].key >= self->m[i].min && req[j].key <= self->m[i].max){
-                   if(req[j].method == RQ_WRITE){
-                        __write_ops__++;
-                   }
-                   unsigned char in[8];
-                    u64_to_unsigned_char(in, i);
-                   if(vec_push(&vec, in) < 0){
-                       return handle_err(-1);
-                   };
-                   break;
-               }
-           } 
+
+    for(usize j = 0; j < req_count; j++){
+        if(req[j].method == RQ_WRITE){
+            __write_ops__++;
         }
     }
+
     if(self->length+__write_ops__ > self->ml*ELEMENTS_PER_VECTOR){
-        if(extend(self, __write_ops__) < 0){
-            vec_destroy(&vec);
+        if(extend(self, ((__write_ops__>256?__write_ops__:256)/ELEMENTS_PER_VECTOR)*2) < 0){
             return handle_err(-1);
         };
     }
-    disk_fetch *instance = malloc(sizeof(disk_fetch)*vec.len);
+
+    if(hashset_new_wise(&vectors,self->ml)<0){return handle_err(-1);};
+    
+    __builtin_prefetch(self->m,0,1);
+    __builtin_prefetch(req,0,2);
+
+    usize proc_wri = 0;
+    for (usize i = self->ml; i-- > 0;){
+        meta me = self->m[i];
+        if (me.len < ELEMENTS_PER_VECTOR && proc_wri < __write_ops__) {
+            hashset_push(&vectors, i*VECTOR_SIZE);
+            proc_wri += ELEMENTS_PER_VECTOR - me.len;
+            continue;
+        }
+        for(usize j = 0; j < req_count; j++) {
+            Request r = req[j];
+            if(r.value >= me.min && r.value <= me.max){
+                hashset_push(&vectors, i*VECTOR_SIZE);
+                continue;
+            }
+        }
+    } 
+    
+    
+    disk_fetch *instance = malloc(sizeof(disk_fetch)*vectors.length);
     if(!instance){
         errno = ENOMEM;
         return handle_err(-1);
     }
 
-    u64 length = vec.len;
+    u64 length = vectors.length;
     {
         struct io_uring ring;
         if(io_uring_queue_init(length, &ring, 0) < 0){
             return handle_err(-1);
         };
-        for(usize i = 0; i < length; i++){
+        usize dflen = 0;
+        for(usize i = 0; i < vectors.capacity; i++){
+            hashset_cell cell = vectors.entries[i];
+            if(!cell.exists) continue;
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            u64* k = (u64*)vec.buffer;
-            instance[i].pointer = k[i];
-            instance[i].length = self->m[k[i]/VECTOR_SIZE].len;
-            io_uring_prep_read(sqe, self->file, instance[i].vector, VECTOR_SIZE, k[i]);
+            instance[i].pointer = cell.value;
+            instance[i].length = self->m[cell.value/VECTOR_SIZE].len;
+            io_uring_prep_read(sqe, self->file, instance[dflen].vector, VECTOR_SIZE, cell.value);
+            dflen++;
         }
         u64 code = io_uring_submit_and_wait(&ring, length);
         if (code < 0){
+            io_uring_queue_exit(&ring);
             return handle_err(code);
         }
+        io_uring_queue_exit(&ring);
     }
-    vec_destroy(&vec);
+    hashset_destroy(&vectors);
 
     vector mutation;
-    vector to_proc;
-    if(vec_new(&mutation,sizeof(u64))<0){return handle_err(-1);};
-    if(vec_new(&to_proc,sizeof(u64))<0){return handle_err(-1);};
+    u64* to_proc = malloc(req_count*sizeof(u64));
+    u64 to_procl = req_count;
+
+    #define DELETE_PROC to_proc[j] = to_proc[--to_procl];
+
+    if(!to_proc){
+        free(instance);
+        errno = ENOMEM;
+        return handle_err(-1);
+    }
+    if(vec_new(&mutation,sizeof(u64))<0){free(instance);return handle_err(-1);};
     for(usize i = 0; i<req_count;i++){
-        if(req[i].method != RQ_WRITE){
-            unsigned char in[8];
-            u64_to_unsigned_char(in, i);
-            if(vec_push(&to_proc, &in)<0){
-                return handle_err(-1);
-            }
-        };
+        to_proc[i] = i;
     }
     {
-        vector torem;
-        if(vec_new(&torem, sizeof(u64))<0){return handle_err(-1);};
-        for(usize f = 0; (f < length && to_proc.len>0); f++){
+        for(usize f = 0; (f < length && to_procl>0); f++){
             disk_fetch *container = &instance[f];
             u8 changed = 0; 
             usize cl = container->length;
+            
             for(usize i = 0; i<cl;i++){
                 Cell *c = &container->vector[i];
-                for(usize j=0;j<to_proc.len;j++){
-                    u64 k;
-                    memcpy(&k, &to_proc.buffer[j * 8], 8);  
-                    Request rq = req[k];
-                    if(rq.key == c->key){
-                        if(rq.method == RQ_READ){
-                            req[k].value = c->value;
-                            unsigned char in[8];
-                            u64_to_unsigned_char(in, i);
-                            if(vec_push(&torem, in)<0){
-                                sfree(mutation.buffer);
-                                sfree(torem.buffer);
-                                sfree(instance);
-                                return handle_err(-1);
-                            }
-                        }
-                        if(rq.method == RQ_DELETE){
-                            c->key = container->vector[cl-1].key;
-                            c->value = container->vector[cl-1].value;
-                            cl--;
-                            i--;
-                            changed = 255;
-                            decrease++;
-                            unsigned char in[8];
-                            u64_to_unsigned_char(in, i);
-                            if(vec_push(&torem, in)<0){
-                                sfree(mutation.buffer);
-                                sfree(torem.buffer);
-                                sfree(instance);
-                                return handle_err(-1);
-                            }
-                        }
-                        continue;
-                    }
+                for(usize j=0;j<to_procl;j++){
+                    Request rq = req[j];
+                    u64 v = to_proc[j];
+
                     if(rq.method == RQ_WRITE && container->length < ELEMENTS_PER_VECTOR){
                         container->vector[container->length] = (Cell){rq.key,rq.value};
                         container->length++;
                         increase++;
                         changed=255;
-                        unsigned char in[8];
-                        u64_to_unsigned_char(in, j);
-                        if(vec_push(&torem, &in)<0){
-                            sfree(mutation.buffer);
-                            sfree(torem.buffer);
-                            sfree(instance);
-                            return handle_err(-1);
-                        }
+                        DELETE_PROC 
+                        continue;
                     }
+
+                    if(rq.key == c->key){
+                        if(rq.method == RQ_READ){
+                            req[j].value = c->value;
+                            unsigned char in[8];
+                            u64_to_unsigned_char(in, j);
+                            DELETE_PROC
+                            continue;
+                        }
+                        if(rq.method == RQ_DELETE){
+                            c->key = container->vector[cl-1].key;
+                            c->value = container->vector[cl-1].value;
+                            container->length--;
+                            i--;
+                            changed = 255;
+                            decrease++;
+                            DELETE_PROC    
+                        }
+                        continue;
+                    }
+                    
                 }
             }
-            
-            {
-                u64* t = (u64*)torem.buffer;
-                if (torem.len == 0) continue;
-                for(usize i = torem.len-1; i >= 0; i--){
-                    if(vec_remove(&to_proc, t[i]) < 0){
-                        sfree(mutation.buffer);
-                        sfree(torem.buffer);
-                        sfree(instance);
-                        return handle_err(-1);
-                    };
-                }
-            }
-            vec_clear(&torem);
-            if(changed == 255){
-                unsigned char in[8];
-                u64_to_unsigned_char(in, f);
-                if(vec_push(&mutation, in)<0){
-                    sfree(mutation.buffer);
-                    sfree(torem.buffer);
-                    sfree(instance);
-                    return handle_err(-1);
-                };
-            }
-            container->length = cl;
+             
+            self->m[container->pointer/VECTOR_SIZE].len = container->length;
         }
-        sfree(torem.buffer);     
     }
+    free(to_proc);
     struct io_uring ring;
-    if(io_uring_queue_init(mutation.len+1, &ring, 0) < 0){
+    if(io_uring_queue_init(mutation.len, &ring, 0) < 0){
         sfree(mutation.buffer);
         sfree(instance);
         return handle_err(-1);
@@ -439,7 +331,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         qsort(k->vector, k->length, sizeof(Cell), cmp_cell_asc);
         if(k->length < ELEMENTS_PER_VECTOR){
             // Fill out of bonds with UINT64_MAX, the tombstone
-            memset((k->vector)+k->length, 255, (ELEMENTS_PER_VECTOR-k->length)*sizeof(u64));
+            memset((k->vector)+k->length, 255, (ELEMENTS_PER_VECTOR-k->length)*sizeof(Cell));
         }
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
         self->m[k->pointer/VECTOR_SIZE].max = k->vector[k->length-1].key;
@@ -457,7 +349,9 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         return handle_err(-1);
     }
     memcpy(memory, self->m, mlc);
-    memcpy(memory+mlc, &(unsigned char){self->ml}, sizeof(u32));
+    u32 ml_temp = self->ml;
+    memcpy(memory+mlc, &ml_temp, sizeof(u32));
+    
     struct io_uring_sqe *meta_sqe = io_uring_get_sqe(&ring);
     io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
     if(io_uring_submit_and_wait(&ring,mutation.len)<0){
@@ -474,9 +368,6 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 }
 
 
-
-const float THRESHOLD = 2.0; 
-const u64 MAX_PAGES = 16384;
 i32 normalize(BTree *self){
     if(self->ml <= 3){
         return 0;
@@ -554,7 +445,7 @@ i32 normalize(BTree *self){
     size_t len = 0;
     
     for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
-        cell c = offsets.entries[i];
+        hashset_cell c = offsets.entries[i];
         if(c.exists){
             struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
             fetch[len].length = self->m[c.value].len;
@@ -601,7 +492,7 @@ i32 normalize(BTree *self){
     len = 0;
     
     for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
-        cell c = offsets.entries[i];
+        hashset_cell c = offsets.entries[i];
         if(c.exists){
             struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
             fetch[len].length = self->m[c.value].len;
@@ -620,7 +511,7 @@ i32 normalize(BTree *self){
                 if(fetch[i].vector[j].key != UINT64_MAX){
                     break;
                 }
-            }
+    }
         }else{
             j = ELEMENTS_PER_VECTOR -1;
         }
@@ -640,7 +531,8 @@ i32 normalize(BTree *self){
         return handle_err(-1);
     }
     memcpy(memory, self->m, mlc);
-    memcpy(memory+mlc, &(unsigned char){self->ml}, sizeof(u32));
+    u32 ml_temp = self->ml;
+    memcpy(memory+mlc, &ml_temp, sizeof(u32));
 
     struct io_uring_sqe *meta_sqe = io_uring_get_sqe(ring);
     io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
