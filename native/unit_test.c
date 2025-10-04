@@ -1,11 +1,14 @@
 #include "hashset.h"
 #include "vector.h"
 #include "btree.h"
+#include <asm-generic/errno-base.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
-
-#define count 800
+#include <time.h>
+#include <unistd.h>
+u64 count = 4096;
 
 typedef u64 u_int64_t;
 
@@ -75,7 +78,7 @@ int test_vector(){
             return product;
         }
 
-    if (vec_new(&vec, 8) < 0){
+    if (vec_wc(&vec, 8,count) < 0){
         product = -1;
         printf("ERROR: Failed to create a \"vec\" structure\n");
         goto clean;
@@ -136,11 +139,13 @@ int test_btree() {
         return -2;
     }
     Request req[count];
+    
     for (u64 i = 0; i < count; i++) {
-        req[i] = (Request){i, i * 2, RQ_WRITE};
+        req[i] = (Request){RQ_WRITE,i, i * 2};
     }
-    if (bt_request(&inst, req, count) < 0) {
-        printf("ERROR: Failed to write to BTree\n");
+    int a = bt_request(&inst, req, count);
+    if (a < 0) {
+        printf("ERROR: Failed to write to BTree %i\n",a);
         product = -3;
         goto clean;
     }
@@ -150,7 +155,7 @@ int test_btree() {
         goto clean;
     }
     for (u64 i = 0; i < count; i++) {
-        req[i] = (Request){i, 0, RQ_READ};
+        req[i] = (Request){RQ_READ,i,UINT64_MAX};
     }
     if (bt_request(&inst, req, count) < 0) {
         printf("ERROR: Failed to read from BTree\n");
@@ -165,7 +170,7 @@ int test_btree() {
         }
     }
     for (u64 i = 0; i < count / 2; i++) {
-        req[i] = (Request){i, 0, RQ_DELETE};
+        req[i] = (Request){RQ_DELETE,i,0};
     }
     if (bt_request(&inst, req, count / 2) < 0) {
         printf("ERROR: Failed to delete from BTree\n");
@@ -192,12 +197,14 @@ clean:
 #define RED   "\x1b[31m"
 #define GREEN "\x1b[32m"
 #define RESET "\x1b[0m"
+#define PROGRESS printf(".");fflush(stdout);;
 
 int main() {
+    printf("😎 Count: %lu",count);
     printf(RED "\n");
-    int _l_xx0 = test_hashset();
-    int _l_xx1 = test_vector();
-    int _l_xx2 = test_btree();
+    int _l_xx0 = test_hashset(); PROGRESS
+    int _l_xx1 = test_vector(); PROGRESS
+    int _l_xx2 = test_btree(); PROGRESS
     printf(RESET "\n");
 
     char* SUCCESS;
@@ -217,25 +224,55 @@ int main() {
         ERRORS  = "3";
     }
 
-    printf(
-"┌──────────────┤ TESTING ROUTINE ├────────────────┐\n"
-"│                                                  │\n"
-"│    HASHSET: %s%-5s%s                              │\n"
-"│    VECTOR:  %s%-5s%s                              │\n"
-"│    BTREE:   %s%-5s%s                              │\n"
-"│    ──────────────────────────────────────        │\n"
-"│    OVERALL: %s%-5s%s                              │\n"
-"│    ERRORS:  %-5s                                │\n"
-"│    SUCCESS: %-5s                                │\n"
-"│                                                  │\n"
-"└──────────────────────────────────────────────────┘\n\n",
+    printf("\n=== TESTING ROUTINE ===\n"
+       "HASHSET: %s%-5s%s\n"
+       "VECTOR:  %s%-5s%s\n"
+       "BTREE:   %s%-5s%s\n"
+       "------------------------\n"
+       "OVERALL: %s%-5s%s\n"
+       "ERRORS:  %s\n"
+       "SUCCESS: %s\n\n",
     (_l_xx0>=0?GREEN:RED), (_l_xx0>=0?"OK":"ERROR"), RESET,
     (_l_xx1>=0?GREEN:RED), (_l_xx1>=0?"OK":"ERROR"), RESET,
     (_l_xx2>=0?GREEN:RED), (_l_xx2>=0?"OK":"ERROR"), RESET,
-    (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?GREEN:RED), (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?"OK":"ERROR"), RESET,
+    (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?GREEN:RED), 
+    (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?"OK":"ERROR"), RESET,
     ERRORS,
-    SUCCESS
-    );
+    SUCCESS);
+    
+    const u64 steps = 10;
+    const u64 growth = 1024;
+    const u64 start_count = 512;
+    count = start_count;
+    printf("\n\n\n==== STRESS TEST ====\n");
+    printf("``` VECTOR ```\n");
+    for(u64 i = 0; i < steps; i++){
+        u64 start = clock();
+        count *= growth;
+        test_vector();
+        u64 end = clock();
+        printf("$%lu\t%lu\n",count,end-start);
+    }
+    count = start_count;
+    
+    printf("``` HASHSET ```\n");
+    for(u64 i = 0; i < steps; i++){
+        u64 start = clock();
+        count *= growth;
+        test_hashset();
+        u64 end = clock();
+        printf("$%lu\t%lu\n",count,end-start);
+    }
+    count = start_count;
 
+    printf("``` BTREE ```\n");
+    for(u64 i = 0; i < steps; i++){
+        u64 start = clock();
+        count *= growth;
+        test_btree();
+        u64 end = clock();
+        printf("$%lu\t%lu\n",count,end-start);
+    }
+    count = start_count;
     return 0;
 }

@@ -9,6 +9,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -17,7 +18,7 @@
 #include <sys/uio.h>
 #include "btree.h"
 #define ELEMENTS_PER_VECTOR 256
-
+#define GROWTH_OVERHEAD 10
 
 static inline void sfree(void *ptr){
     free(ptr);
@@ -97,14 +98,13 @@ i32 load_metadata(BTree *self){
 }
 i32 extend(BTree *self, u64 growth_count){
     i32 code = 0;
-    
-    meta* new_metadata = malloc(sizeof(meta)*(self->ml+growth_count));
+    //printf("DEBUG: growth_count -> %lu\n",growth_count); 
+    meta* new_metadata = calloc((self->ml+growth_count),sizeof(meta));
     if(!new_metadata){
         errno = ENOMEM;
         return handle_err(-1);
     }
     memcpy(new_metadata, self->m, self->ml*sizeof(meta));
-    memset(new_metadata + self->ml, 0, growth_count * sizeof(meta)); 
     free(self->m);
     self->m = new_metadata;
     {
@@ -128,7 +128,8 @@ i32 extend(BTree *self, u64 growth_count){
         memcpy(buffer+ sizeof(meta)*pl,&pl, sizeof(u32));
         code = handle_err(pwrite(self->file, buffer, buf_size, pl*(ELEMENTS_PER_VECTOR*sizeof(Cell))));
         if(code < 0){free(buffer);return code;};
-        self->ml+=growth_count;
+        //printf("DEBUG: pl %u\n",pl);
+        self->ml=pl;
         free(buffer);
     }
     return handle_err(fsync(self->file));
@@ -182,9 +183,14 @@ int cmp_cell_asc(const void *a, const void *b) {
     return (ra->key > rb->key) - (ra->key < rb->key);
 }
 
+#define DEBUG_START printf("HEARTBEATS == ");
+#define DEBUG_PRINT printf("💖 %lu\n",++DEBUG_STEP_COUNTER);
+#define DEBUG_S u64 DEBUG_STEP_COUNTER = 0;;
 
-
-i32 bt_request(BTree *self,Request *req,usize req_count){ 
+i32 bt_request(BTree *self,Request *req,usize req_count){
+    DEBUG_S
+    DEBUG_START
+    printf("bt_request\n");
     hashset vectors;
     usize __write_ops__ = 0;
     usize increase = 0;
@@ -192,15 +198,24 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 
     for(usize j = 0; j < req_count; j++){
         if(req[j].method == RQ_WRITE){
-            __write_ops__++;
+            __write_ops__+=1;
         }
     }
 
-    if(self->length+__write_ops__ > self->ml*ELEMENTS_PER_VECTOR){
-        if(extend(self, ((__write_ops__>256?__write_ops__:256)/ELEMENTS_PER_VECTOR)*2) < 0){
+    //printf("DEBUG: req_count->%lu\n",req_count);
+    
+    //printf("DEBUG: __write_ops__->%lu\n",__write_ops__);
+    
+    
+    if(self->length+__write_ops__ >= self->ml*ELEMENTS_PER_VECTOR){
+        u64 growth_increase = GROWTH_OVERHEAD + ( (__write_ops__/ELEMENTS_PER_VECTOR) +1);
+        if(extend(self, growth_increase) < 0){
             return handle_err(-1);
         };
+        //printf("DEBUG: EXTEND\n");
     }
+
+    DEBUG_PRINT
 
     if(hashset_new_wise(&vectors,self->ml)<0){return handle_err(-1);};
     
@@ -209,22 +224,25 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 
     usize proc_wri = 0;
     for (usize i = self->ml; i-- > 0;){
+        //printf("DEBUG: ml i %lu\n",i);
         meta me = self->m[i];
+        //printf("DEBUG: me-> %lu, %lu, %lu\n",me.len,me.min,me.max);
         if (me.len < ELEMENTS_PER_VECTOR && proc_wri < __write_ops__) {
             hashset_push(&vectors, i*VECTOR_SIZE);
             proc_wri += ELEMENTS_PER_VECTOR - me.len;
+            //printf("DEBUG: proc_wri->%lu\n",proc_wri);
             continue;
         }
         for(usize j = 0; j < req_count; j++) {
             Request r = req[j];
-            if(r.value >= me.min && r.value <= me.max){
+            if(r.key >= me.min && r.key <= me.max){
                 hashset_push(&vectors, i*VECTOR_SIZE);
-                continue;
+                break;
             }
         }
-    } 
+    }
     
-    
+    DEBUG_PRINT
     disk_fetch *instance = malloc(sizeof(disk_fetch)*vectors.length);
     if(!instance){
         errno = ENOMEM;
@@ -242,8 +260,8 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             hashset_cell cell = vectors.entries[i];
             if(!cell.exists) continue;
             struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-            instance[i].pointer = cell.value;
-            instance[i].length = self->m[cell.value/VECTOR_SIZE].len;
+            instance[dflen].pointer = cell.value;
+            instance[dflen].length = self->m[cell.value/VECTOR_SIZE].len;
             io_uring_prep_read(sqe, self->file, instance[dflen].vector, VECTOR_SIZE, cell.value);
             dflen++;
         }
@@ -253,8 +271,12 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             return handle_err(code);
         }
         io_uring_queue_exit(&ring);
+        //printf("DEBUG: dflen->%lu\n",dflen);
     }
     hashset_destroy(&vectors);
+
+
+    DEBUG_PRINT
 
     vector mutation;
     u64* to_proc = malloc(req_count*sizeof(u64));
@@ -267,60 +289,69 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         errno = ENOMEM;
         return handle_err(-1);
     }
-    if(vec_new(&mutation,sizeof(u64))<0){free(instance);return handle_err(-1);};
+    if(vec_new(&mutation,sizeof(u64))<0){free(instance);free(to_proc);return handle_err(-1);};
     for(usize i = 0; i<req_count;i++){
         to_proc[i] = i;
     }
+    DEBUG_PRINT
     {
         for(usize f = 0; (f < length && to_procl>0); f++){
             disk_fetch *container = &instance[f];
             u8 changed = 0; 
-            usize cl = container->length;
-            
-            for(usize i = 0; i<cl;i++){
+            //printf("DEBUG: + container.length -> %lu\n",container->length);
+            u8 recheck = 0;
+            for(usize i = 0; i<container->length;){
                 Cell *c = &container->vector[i];
-                for(usize j=0;j<to_procl;j++){
-                    Request rq = req[j];
+                for(usize j=0;j<to_procl;){
                     u64 v = to_proc[j];
-
-                    if(rq.method == RQ_WRITE && container->length < ELEMENTS_PER_VECTOR){
+                    Request rq = req[v];
+                    if(rq.key == c->key){
+                        if(rq.method == RQ_READ){
+                            req[v].value = c->value;
+                            DELETE_PROC
+                            ;continue;
+                        }
+                        if(rq.method == RQ_DELETE){
+                            c->key = container->vector[container->length-1].key;
+                            c->value = container->vector[container->length-1].value;
+                            container->length--;
+                            changed = 255;
+                            decrease++;
+                            recheck = 255;
+                            DELETE_PROC  
+                            ;continue;
+                        }
+                    }
+                    j++;
+                    
+                }
+                if (recheck == 255){recheck = 0;}else{i++;};
+            }
+            if (container->length < ELEMENTS_PER_VECTOR){
+                for(usize j = 0; j < to_procl && container->length < ELEMENTS_PER_VECTOR; j++){
+                    u64 v = to_proc[j];
+                    Request rq = req[v];
+                    if(rq.method == RQ_WRITE){
                         container->vector[container->length] = (Cell){rq.key,rq.value};
                         container->length++;
                         increase++;
                         changed=255;
                         DELETE_PROC 
-                        continue;
+                        ;continue;
                     }
-
-                    if(rq.key == c->key){
-                        if(rq.method == RQ_READ){
-                            req[j].value = c->value;
-                            unsigned char in[8];
-                            u64_to_unsigned_char(in, j);
-                            DELETE_PROC
-                            continue;
-                        }
-                        if(rq.method == RQ_DELETE){
-                            c->key = container->vector[cl-1].key;
-                            c->value = container->vector[cl-1].value;
-                            container->length--;
-                            i--;
-                            changed = 255;
-                            decrease++;
-                            DELETE_PROC    
-                        }
-                        continue;
-                    }
-                    
                 }
             }
-             
-            self->m[container->pointer/VECTOR_SIZE].len = container->length;
+            if(changed==255){
+                vec_push(&mutation, &f);
+                self->m[container->pointer/VECTOR_SIZE].len = container->length;
+            } 
+            //printf("DEBUG: - container.length -> %lu\n",container->length);
         }
     }
     free(to_proc);
+    DEBUG_PRINT
     struct io_uring ring;
-    if(io_uring_queue_init(mutation.len, &ring, 0) < 0){
+    if(io_uring_queue_init(mutation.len+1, &ring, 0) < 0){
         sfree(mutation.buffer);
         sfree(instance);
         return handle_err(-1);
@@ -338,7 +369,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         self->m[k->pointer/VECTOR_SIZE].min = k->vector[0].key;
         io_uring_prep_write(sqe, self->file, k->vector, VECTOR_SIZE, k->pointer);
     }
-
+    DEBUG_PRINT
     u64 mlc = self->ml*sizeof(meta);
     unsigned char *memory = malloc(sizeof(u32)+mlc);
     if(!memory){
@@ -354,14 +385,16 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     
     struct io_uring_sqe *meta_sqe = io_uring_get_sqe(&ring);
     io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
-    if(io_uring_submit_and_wait(&ring,mutation.len)<0){
+    if(io_uring_submit_and_wait(&ring,mutation.len+1)<0){
         sfree(mutation.buffer);
         sfree(instance);
         return handle_err(-1);
     }
+    DEBUG_PRINT
     fsync(self->file); // metadata is important for initializing
     self->length += increase;
     self->length -= decrease;
+    printf("%lu %lu %lu\n",self->length,increase,decrease);
     sfree(mutation.buffer);
     sfree(instance);
     return 0;
@@ -369,10 +402,12 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 
 
 i32 normalize(BTree *self){
+    DEBUG_S
+    DEBUG_START
+    printf("normalize\n");
     if(self->ml <= 3){
         return 0;
     }
-    // gradient study
     float* gradient = calloc(self->ml/2, sizeof(float));
     if (gradient == NULL){
         errno = ENOMEM;
@@ -398,6 +433,8 @@ i32 normalize(BTree *self){
     }
     float max = 0;
     float sum = 0;
+
+    DEBUG_PRINT // 1
     
     for(size_t i = 0; i < (self->ml/2) -1; i++){
         if(gradient[i] > max){
@@ -405,6 +442,9 @@ i32 normalize(BTree *self){
         }
         sum += gradient[i];
     }
+
+    DEBUG_PRINT // 2
+
     float mean = sum/(float)self->ml/2; 
     for(u64 i = 0; (i < (self->ml/2)-1) && offsets.length < MAX_PAGES;i++){
         float deviate = fabsf(mean-gradient[i]);
@@ -417,17 +457,23 @@ i32 normalize(BTree *self){
         }
     }
 
+    DEBUG_PRINT // 3
+
     free(gradient);
     if(offsets.length == 0){
         hashset_destroy(&offsets);
         return 0;
     }
 
+    DEBUG_PRINT // 4
+
     disk_fetch *fetch = malloc(sizeof(disk_fetch)*offsets.length);
     if(!fetch){
         errno = ENOMEM;
         return handle_err(-1);
     }
+
+    DEBUG_PRINT // 5
 
     struct io_uring *ring = malloc(sizeof(struct io_uring));
     if(!ring){
@@ -442,38 +488,58 @@ i32 normalize(BTree *self){
         hashset_destroy(&offsets);
         return  handle_err(-1);
     }
+
+    DEBUG_PRINT // 6
+
     size_t len = 0;
-    
     for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
         hashset_cell c = offsets.entries[i];
         if(c.exists){
             struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
-            fetch[len].length = self->m[c.value].len;
+            fetch[len].length = self->m[c.value/VECTOR_SIZE].len;
             fetch[len].pointer = c.value;
             io_uring_prep_read(sqe, self->file, fetch[len].vector, VECTOR_SIZE, VECTOR_SIZE*c.value);
             len++;
         }
     }
 
-    if (io_uring_submit_and_wait(ring, offsets.length) < 0){
+    DEBUG_PRINT // 7
+    //printf("DEBUG: spot 7\n");
+
+    if (io_uring_submit_and_wait(ring, len) < 0){
         free(fetch);
         hashset_destroy(&offsets);
         return handle_err(-1);
     }
 
+    DEBUG_PRINT // 8
+    //printf("DEBUG: spot 7 was fine B)\n");
     io_uring_queue_exit(ring);
     free(ring);
 
-    Cell *plain_vector = malloc(sizeof(Cell)*ELEMENTS_PER_VECTOR*offsets.length);
-    for(size_t i = 0; i < offsets.length; i++){
-        memcpy(plain_vector+(i*VECTOR_SIZE), fetch[i].vector, VECTOR_SIZE);
+    u64 omaga = offsets.length * ELEMENTS_PER_VECTOR * sizeof(Cell);
+    Cell *plain_vector = malloc(omaga+sizeof(u64));
+    if (!plain_vector){
+        free(fetch);
+        hashset_destroy(&offsets);
+        errno = ENOMEM;
+        return handle_err(-1);
+    }
+    
+    for(size_t i = 0; i < len; i++){
+        memcpy(plain_vector + (i * ELEMENTS_PER_VECTOR), fetch[i].vector, ELEMENTS_PER_VECTOR * sizeof(Cell));
     }
 
-    qsort(plain_vector, offsets.length*ELEMENTS_PER_VECTOR, sizeof(Cell), cmp_cell_asc);
-    
-    for(size_t i = 0; i < offsets.length; i++){
-        memcpy(fetch[i].vector, plain_vector+i*VECTOR_SIZE, VECTOR_SIZE);
+    DEBUG_PRINT;
+    qsort(plain_vector, len * ELEMENTS_PER_VECTOR, sizeof(Cell), cmp_cell_asc);
+    DEBUG_PRINT;
+
+    // Copy sorted data back
+    for(size_t i = 0; i < len; i++){
+        memcpy(fetch[i].vector, plain_vector + (i * ELEMENTS_PER_VECTOR), ELEMENTS_PER_VECTOR * sizeof(Cell));
     }
+
+    DEBUG_PRINT
 
     free(plain_vector);
     ring = malloc(sizeof(struct io_uring));
@@ -483,14 +549,14 @@ i32 normalize(BTree *self){
         hashset_destroy(&offsets);
         return 0;
     }
-    if (io_uring_queue_init((offsets.length*2)+1, ring, 0) < 0){
+    if (io_uring_queue_init(offsets.length+2, ring, 0) < 0){
         free(ring);
         free(fetch);
         hashset_destroy(&offsets);
         return  handle_err(-1);
     }
     len = 0;
-    
+    DEBUG_PRINT
     for(size_t i = 0; (i < offsets.capacity && len != offsets.length); i++){
         hashset_cell c = offsets.entries[i];
         if(c.exists){
@@ -502,25 +568,25 @@ i32 normalize(BTree *self){
         }
     }
     
-    
-    u_int8_t full = 0;
-    for(size_t i = offsets.length-1; i-- >0;){
-        size_t j;
+    DEBUG_PRINT
+    u8 full = 0;
+    for(size_t i = 0; i < offsets.length; i++){
+        size_t j = ELEMENTS_PER_VECTOR - 1;
         if (full == 0){
-            for(j = ELEMENTS_PER_VECTOR-1; j-- > 0;){
-                if(fetch[i].vector[j].key != UINT64_MAX){
-                    break;
-                }
-    }
-        }else{
-            j = ELEMENTS_PER_VECTOR -1;
+            while(j > 0 && fetch[i].vector[j].key == UINT64_MAX){
+                j--;
+            }
+            if(j == ELEMENTS_PER_VECTOR - 1){
+                full = 1;
+            }
         }
-        if(j == ELEMENTS_PER_VECTOR -1){full = 1;}
-        Cell*vector= fetch[i].vector;
+
+        Cell *vector = fetch[i].vector;
         u64 pointer = fetch[i].pointer;
-        self->m[pointer] = (meta){vector[j].key,vector[0].key,j};
-    }
-    
+        self->m[pointer/VECTOR_SIZE] = (meta){vector[0].key, vector[j].key, j+1};
+    } 
+   
+    DEBUG_PRINT
     u64 mlc = self->ml*sizeof(meta);
     unsigned char *memory = malloc(sizeof(u32)+mlc);
     if(!memory){
@@ -533,22 +599,22 @@ i32 normalize(BTree *self){
     memcpy(memory, self->m, mlc);
     u32 ml_temp = self->ml;
     memcpy(memory+mlc, &ml_temp, sizeof(u32));
-
+    DEBUG_PRINT
     struct io_uring_sqe *meta_sqe = io_uring_get_sqe(ring);
     io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
-
+    DEBUG_PRINT
     {
         struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
         io_uring_prep_fsync(sqe, self->file, 0);
         sqe->flags |= IOSQE_IO_DRAIN;
     }
-    if (io_uring_submit_and_wait(ring, (offsets.length*2)+1) < 0){
+    if (io_uring_submit_and_wait(ring, offsets.length + 2) < 0){
         free(fetch);
         hashset_destroy(&offsets);
         free(memory);
         io_uring_queue_exit(ring);
         return handle_err(-1);
-    }
+    } 
     free(memory);
     free(fetch);
     hashset_destroy(&offsets);

@@ -5,17 +5,19 @@
 #include <string.h>
 #include "vector.h"
 
-inline int vec_new(vector *self,size_t element_size){
-    self->buffer = calloc(10, element_size);
+inline int vec_wc(vector *self,size_t element_size,size_t capacity){
+    self->buffer = calloc(capacity, element_size);
     if(!self->buffer){
         errno = ENOMEM;
         return -1;
     }
     self->len = 0;
     self->element_size = element_size;
-    self->capacity = 10;
+    self->capacity = capacity;
     return 0;
 }
+inline int vec_new(vector *self, size_t element_size) {return vec_wc(self, element_size, 16);};
+
 inline int vec_push(vector *self, void *input){
     if(self->capacity >= self->len+1){
         memcpy(self->buffer+(self->len*self->element_size), input, self->element_size);

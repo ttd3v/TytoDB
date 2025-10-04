@@ -12,6 +12,7 @@ typedef struct{
 } vector;
 
 int vec_new(vector *self,size_t element_size);
+int vec_wc(vector *self,size_t element_size, size_t capacity);
 int vec_push(vector *self, void*input);
 void vec_destroy(vector *self);
 int vec_remove(vector *self, size_t index);
