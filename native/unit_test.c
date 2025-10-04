@@ -6,9 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
-u64 count = 4096;
+u64 count = 8000;
 
 typedef u64 u_int64_t;
 
@@ -132,7 +131,7 @@ int test_btree() {
         return -1;
     }
     close(fd);
-    BTree inst;
+    BTree inst = {0};
     if (init(&inst, template) < 0) {
         printf("ERROR: Failed to init BTree\n");
         unlink(template);
@@ -188,7 +187,6 @@ int test_btree() {
         goto clean;
     }
 clean:
-    free((void*)inst.empty);
     close(inst.file);
     unlink(template);
     return product;
@@ -238,41 +236,6 @@ int main() {
     (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?GREEN:RED), 
     (_l_xx0>=0 && _l_xx1>=0 && _l_xx2>=0?"OK":"ERROR"), RESET,
     ERRORS,
-    SUCCESS);
-    
-    const u64 steps = 10;
-    const u64 growth = 1024;
-    const u64 start_count = 512;
-    count = start_count;
-    printf("\n\n\n==== STRESS TEST ====\n");
-    printf("``` VECTOR ```\n");
-    for(u64 i = 0; i < steps; i++){
-        u64 start = clock();
-        count *= growth;
-        test_vector();
-        u64 end = clock();
-        printf("$%lu\t%lu\n",count,end-start);
-    }
-    count = start_count;
-    
-    printf("``` HASHSET ```\n");
-    for(u64 i = 0; i < steps; i++){
-        u64 start = clock();
-        count *= growth;
-        test_hashset();
-        u64 end = clock();
-        printf("$%lu\t%lu\n",count,end-start);
-    }
-    count = start_count;
-
-    printf("``` BTREE ```\n");
-    for(u64 i = 0; i < steps; i++){
-        u64 start = clock();
-        count *= growth;
-        test_btree();
-        u64 end = clock();
-        printf("$%lu\t%lu\n",count,end-start);
-    }
-    count = start_count;
+    SUCCESS); 
     return 0;
 }

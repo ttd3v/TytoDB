@@ -98,7 +98,8 @@ i32 load_metadata(BTree *self){
 }
 i32 extend(BTree *self, u64 growth_count){
     i32 code = 0;
-    //printf("DEBUG: growth_count -> %lu\n",growth_count); 
+    unsigned char empty[VECTOR_SIZE] = {0};
+    ////printf("DEBUG: growth_count -> %lu\n",growth_count); 
     meta* new_metadata = calloc((self->ml+growth_count),sizeof(meta));
     if(!new_metadata){
         errno = ENOMEM;
@@ -110,7 +111,7 @@ i32 extend(BTree *self, u64 growth_count){
     {
         struct iovec iov[growth_count];
         for(u32 i = 0; i < growth_count; i++){
-            iov[i].iov_base = (void*)self->empty;
+            iov[i].iov_base = (void*)(&empty);
             iov[i].iov_len = ELEMENTS_PER_VECTOR*sizeof(Cell);
         }
         code = handle_err(pwritev(self->file, iov, growth_count, self->ml*ELEMENTS_PER_VECTOR*sizeof(Cell)));
@@ -128,7 +129,7 @@ i32 extend(BTree *self, u64 growth_count){
         memcpy(buffer+ sizeof(meta)*pl,&pl, sizeof(u32));
         code = handle_err(pwrite(self->file, buffer, buf_size, pl*(ELEMENTS_PER_VECTOR*sizeof(Cell))));
         if(code < 0){free(buffer);return code;};
-        //printf("DEBUG: pl %u\n",pl);
+        ////printf("DEBUG: pl %u\n",pl);
         self->ml=pl;
         free(buffer);
     }
@@ -147,16 +148,16 @@ i32 create(BTree *self,char* path){
     self->ml = len;
     self->length = len;
     self->m = NULL;
+    
+    if(extend(self, GROWTH_OVERHEAD) < 0){
+        return handle_err(-1);
+    }
+    
     return 0;
 }
 
-i32 init(BTree *self,char* path){
-    self->empty = calloc(VECTOR_SIZE, sizeof(unsigned char));
+i32 init(BTree *self,char* path){ 
     self->path = path;
-    if(!self->empty){
-        errno = ENOMEM;
-        return handle_err(-1);
-    }
     i32 f = open(path, O_RDWR);
     if(f < 0){
         f = handle_err(f);
@@ -183,15 +184,15 @@ int cmp_cell_asc(const void *a, const void *b) {
     return (ra->key > rb->key) - (ra->key < rb->key);
 }
 
-#define DEBUG_START printf("HEARTBEATS == ");
-#define DEBUG_PRINT printf("💖 %lu\n",++DEBUG_STEP_COUNTER);
-#define DEBUG_S u64 DEBUG_STEP_COUNTER = 0;;
+#define DEBUG_START //printf("HEARTBEATS == ");
+#define DEBUG_PRINT //printf("💖 %lu\n",++DEBUG_STEP_COUNTER);
+#define DEBUG_S //u64 DEBUG_STEP_COUNTER = 0;;
 
 i32 bt_request(BTree *self,Request *req,usize req_count){
     DEBUG_S
     DEBUG_START
-    printf("bt_request\n");
-    hashset vectors;
+    //printf("bt_request\n");
+    hashset vectors = {0};
     usize __write_ops__ = 0;
     usize increase = 0;
     usize decrease = 0;
@@ -202,9 +203,9 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         }
     }
 
-    //printf("DEBUG: req_count->%lu\n",req_count);
+    ////printf("DEBUG: req_count->%lu\n",req_count);
     
-    //printf("DEBUG: __write_ops__->%lu\n",__write_ops__);
+    ////printf("DEBUG: __write_ops__->%lu\n",__write_ops__);
     
     
     if(self->length+__write_ops__ >= self->ml*ELEMENTS_PER_VECTOR){
@@ -212,10 +213,10 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         if(extend(self, growth_increase) < 0){
             return handle_err(-1);
         };
-        //printf("DEBUG: EXTEND\n");
+        ////printf("DEBUG: EXTEND\n");
     }
 
-    DEBUG_PRINT
+    DEBUG_PRINT // 1
 
     if(hashset_new_wise(&vectors,self->ml)<0){return handle_err(-1);};
     
@@ -224,13 +225,13 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 
     usize proc_wri = 0;
     for (usize i = self->ml; i-- > 0;){
-        //printf("DEBUG: ml i %lu\n",i);
+        ////printf("DEBUG: ml i %lu\n",i);
         meta me = self->m[i];
-        //printf("DEBUG: me-> %lu, %lu, %lu\n",me.len,me.min,me.max);
+        ////printf("DEBUG: me-> %lu, %lu, %lu\n",me.len,me.min,me.max);
         if (me.len < ELEMENTS_PER_VECTOR && proc_wri < __write_ops__) {
             hashset_push(&vectors, i*VECTOR_SIZE);
             proc_wri += ELEMENTS_PER_VECTOR - me.len;
-            //printf("DEBUG: proc_wri->%lu\n",proc_wri);
+            ////printf("DEBUG: proc_wri->%lu\n",proc_wri);
             continue;
         }
         for(usize j = 0; j < req_count; j++) {
@@ -242,7 +243,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         }
     }
     
-    DEBUG_PRINT
+    DEBUG_PRINT // 2
     disk_fetch *instance = malloc(sizeof(disk_fetch)*vectors.length);
     if(!instance){
         errno = ENOMEM;
@@ -271,14 +272,14 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             return handle_err(code);
         }
         io_uring_queue_exit(&ring);
-        //printf("DEBUG: dflen->%lu\n",dflen);
+        ////printf("DEBUG: dflen->%lu\n",dflen);
     }
     hashset_destroy(&vectors);
 
 
-    DEBUG_PRINT
+    DEBUG_PRINT // 3
 
-    vector mutation;
+    vector mutation={0};
     u64* to_proc = malloc(req_count*sizeof(u64));
     u64 to_procl = req_count;
 
@@ -293,16 +294,16 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     for(usize i = 0; i<req_count;i++){
         to_proc[i] = i;
     }
-    DEBUG_PRINT
+    DEBUG_PRINT // 4
     {
         for(usize f = 0; (f < length && to_procl>0); f++){
             disk_fetch *container = &instance[f];
             u8 changed = 0; 
-            //printf("DEBUG: + container.length -> %lu\n",container->length);
+            ////printf("DEBUG: + container.length -> %lu\n",container->length);
             u8 recheck = 0;
             for(usize i = 0; i<container->length;){
                 Cell *c = &container->vector[i];
-                for(usize j=0;j<to_procl;){
+                for(usize j=0;j<to_procl;j++){
                     u64 v = to_proc[j];
                     Request rq = req[v];
                     if(rq.key == c->key){
@@ -319,10 +320,9 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
                             decrease++;
                             recheck = 255;
                             DELETE_PROC  
-                            ;continue;
+                            ;break;
                         }
                     }
-                    j++;
                     
                 }
                 if (recheck == 255){recheck = 0;}else{i++;};
@@ -345,7 +345,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
                 vec_push(&mutation, &f);
                 self->m[container->pointer/VECTOR_SIZE].len = container->length;
             } 
-            //printf("DEBUG: - container.length -> %lu\n",container->length);
+            ////printf("DEBUG: - container.length -> %lu\n",container->length);
         }
     }
     free(to_proc);
@@ -394,7 +394,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     fsync(self->file); // metadata is important for initializing
     self->length += increase;
     self->length -= decrease;
-    printf("%lu %lu %lu\n",self->length,increase,decrease);
+    //printf("%lu %lu %lu\n",self->length,increase,decrease);
     sfree(mutation.buffer);
     sfree(instance);
     return 0;
@@ -404,7 +404,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
 i32 normalize(BTree *self){
     DEBUG_S
     DEBUG_START
-    printf("normalize\n");
+    //printf("normalize\n");
     if(self->ml <= 3){
         return 0;
     }
@@ -504,7 +504,7 @@ i32 normalize(BTree *self){
     }
 
     DEBUG_PRINT // 7
-    //printf("DEBUG: spot 7\n");
+    ////printf("DEBUG: spot 7\n");
 
     if (io_uring_submit_and_wait(ring, len) < 0){
         free(fetch);
@@ -513,7 +513,7 @@ i32 normalize(BTree *self){
     }
 
     DEBUG_PRINT // 8
-    //printf("DEBUG: spot 7 was fine B)\n");
+    ////printf("DEBUG: spot 7 was fine B)\n");
     io_uring_queue_exit(ring);
     free(ring);
 

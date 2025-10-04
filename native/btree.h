@@ -45,7 +45,6 @@ typedef struct {
     u32 ml;
     u64 length;
     char* path;
-    const unsigned char* empty;
 } BTree;
 
 typedef struct {
