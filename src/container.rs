@@ -244,7 +244,10 @@ impl Container {
             headers,
             graveyard: Arc::new(Mutex::new(HashSet::new())),
             mvcc_record: Arc::new(Mutex::new(MvccRecord::new(format!("{}.mr", path))?)),
-            index_map: Arc::new(Mutex::new(BTree::new(path.to_string())?)),
+            index_map: Arc::new(Mutex::new(BTree::new(format!(
+                "{}btree",
+                path.to_string()
+            ))?)),
             file: Arc::new(Mutex::new(file)),
             ds_cache: Arc::new(Mutex::new({
                 let mut b = BurningMap::new();
