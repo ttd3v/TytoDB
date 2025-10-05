@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
-u64 count = 8000;
+u64 count = 50000;
 
 typedef u64 u_int64_t;
 

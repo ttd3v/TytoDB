@@ -63,7 +63,6 @@ inline void vec_clear(vector *self){
 
 inline int vec_contain(vector *self, unsigned char* cmp){
     for (size_t i = 0; i < self->len; i++){
-        size_t pointer = i * self->element_size; 
         if (memcmp(self->buffer + i * self->element_size, cmp, self->element_size) == 0){
             return 1;
         }

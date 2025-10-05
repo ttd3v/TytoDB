@@ -76,9 +76,10 @@ i32 handle_err(i32 f) {
 
 i32 load_metadata(BTree *self){
     u32 len = 0;
-    i32 code = handle_err(stat(self->path, &self->status));
+    struct stat status = {0};
+    i32 code = handle_err(stat(self->path, &status));
     if(code < 0){return code;};
-    code = handle_err(pread(self->file, &len, sizeof(u32),self->status.st_size-sizeof(len)));
+    code = handle_err(pread(self->file, &len, sizeof(u32),status.st_size-sizeof(len)));
     if(code < 0){return code;}
     if (len > 0){
         unsigned char* buffer = malloc(len*sizeof(meta));
@@ -86,7 +87,7 @@ i32 load_metadata(BTree *self){
             errno = ENOMEM;
             return handle_err(-1);
         }
-        code = handle_err(pread(self->file, buffer, len*sizeof(meta), self->status.st_size-sizeof(len)-(len*sizeof(meta))));
+        code = handle_err(pread(self->file, buffer, len*sizeof(meta), status.st_size-sizeof(len)-(len*sizeof(meta))));
         self->m = (meta*)buffer;
     }   
     self->ml = len;
@@ -266,7 +267,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             io_uring_prep_read(sqe, self->file, instance[dflen].vector, VECTOR_SIZE, cell.value);
             dflen++;
         }
-        u64 code = io_uring_submit_and_wait(&ring, length);
+        int code = io_uring_submit_and_wait(&ring, length);
         if (code < 0){
             io_uring_queue_exit(&ring);
             return handle_err(code);

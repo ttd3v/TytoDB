@@ -72,29 +72,6 @@ vacuum: []
 # - For more detailed information about the database caching read the documentation
 # - Note: If set to zero it will be rounded up to one.
 cache_size: 10
-
-# Data Set Cache
-#
-# + Algorithm: Uses BurningMap for caching.
-# + Memory Usage: Larger than the indexing cache.
-# + Capacity Formula: (m * (n / 100)) / v
-#   - m: Total system memory (e.g., 8 GiB).
-#   - n: ds_cache percentage (e.g., 15 for 15%).
-#   - v: Number of containers.
-# + Example: For 8 GiB system memory, ds_cache = 15, and 2 containers, each container gets (8 GiB * 0.15) / 2 = 0.6 GiB (614.4 MiB).
-# + Note: Setting ds_cache = 0 will make the database to round up to one.
-# + Note: Setting ds_cache > 100 will reset the configuration to default (15)
-# + Advise: Do not set it to high values if you are expecting to use mostly scan searches, only indexed searches benefit from "ds_cache" having generous sizes
-ds_cache: 15
-
-# Operation Memory
-# - Limits how much memory an operation may allocate
-# - Not a global limit
-# - If an essential element requires more, only the necessary amount will be allocated
-# - Measured in MiB
-operation_memory: 10
-
-
 "#;
 
 pub type AbsoluteOffset = u64;
@@ -397,7 +374,6 @@ impl Database {
             for el in he.1.iter() {
                 element_size += el.size();
             }
-            let b = SysInfo::new();
             self.container.insert(
                 contain.to_string(),
                 Container::new(
@@ -407,10 +383,6 @@ impl Database {
                     header_offset,
                     he.0,
                     self.settings.cache_size,
-                    (b.total_memory() * self.settings.ds_cache as u64)
-                        .saturating_div(100)
-                        .saturating_div(self.containers.len() as u64),
-                    self.settings.operation_memory,
                 )
                 .unwrap(),
             );
@@ -610,8 +582,6 @@ impl Database {
                     file.metadata()?.len(),
                     structure.col_nam,
                     self.settings.cache_size,
-                    1,
-                    self.settings.operation_memory,
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();

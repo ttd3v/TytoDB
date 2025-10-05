@@ -1,5 +1,6 @@
 use crate::alba_types::AlbaTypes;
 use crate::container::MvccState;
+use crate::indexing::{Request, RequestMethods};
 use std::sync::Mutex;
 use std::{fs::File, io::Error, os::unix::fs::FileExt, sync::Arc, vec};
 
@@ -47,9 +48,23 @@ pub fn search(
     let mut ds_cache = lck.ds_cache.lock().unwrap();
     if let QueryType::Indexed(QueryIndexType::Strict(u)) = qt {
         let mut res = (Vec::new(), Vec::new());
-        let v = lck.index_map.lock().unwrap().get(u)?;
+        let mut req = u
+            .iter()
+            .map(|i| Request {
+                method: RequestMethods::Read,
+                key: i.clone(),
+                value: u64::MAX,
+            })
+            .collect();
+        lck.index_map.lock().unwrap().request(&mut req)?;
 
-        for offset in v {
+        let mut g = Vec::with_capacity(req.len());
+        for i in req {
+            if i.value != u64::MAX {
+                g.push(i.value);
+            }
+        }
+        for offset in g {
             if gy.get(&offset).is_some() {
                 //println!("skipped");
                 continue;
@@ -196,9 +211,24 @@ pub fn search_with_action(
         let mut res = (Vec::new(), Vec::new());
         let mut vi = lck.index_map.lock().unwrap();
 
-        let v = vi.get(u)?;
+        let mut req = u
+            .iter()
+            .map(|i| Request {
+                method: RequestMethods::Read,
+                key: i.clone(),
+                value: u64::MAX,
+            })
+            .collect();
+        vi.request(&mut req)?;
 
-        for offset in v {
+        let mut g = Vec::with_capacity(req.len());
+        for i in req {
+            if i.value != u64::MAX {
+                g.push(i.value);
+            }
+        }
+
+        for offset in g {
             if gy.contains(&offset) {
                 //continue;
                 //println!("skipped action index");

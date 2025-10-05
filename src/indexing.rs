@@ -1,168 +1,198 @@
 use std::{
     ffi::CString,
-    io::Error,
-    os::raw::{c_char, c_int, c_uchar},
+    fs::File,
+    io::{self, Error, ErrorKind},
+    os::{fd::FromRawFd, raw::c_char},
     ptr::null_mut,
+    str::FromStr,
 };
-use libc;
-use crate::gerr;
 
 #[repr(C)]
-pub struct Hashmap {
-    pub file: c_int,
-    pub array_len: *mut c_uchar,
-    pub bucket_size: u64,
-    pub len: u64,
-    pub path: *mut c_char,
-    pub temp: *mut c_char,
+pub struct BTree {
+    a: i32,
+    b: *mut Meta,
+    c: u32,
+    d: u64,
+    path: *mut c_char,
 }
 
-#[derive(Clone,Copy,Debug)]
-#[repr(C)]
-pub struct Cell {
-    pub hk: u64,
-    pub v: u64,
+#[repr(i32)]
+pub enum RequestMethods {
+    Read = 1,
+    Write = 2,
+    Delete = 0,
 }
-
-#[derive(Clone,Copy,Debug)]
 #[repr(C)]
-pub struct SomeU64 {
-    pub exists: u8,
+pub struct Request {
+    pub method: RequestMethods,
+    pub key: u64,
     pub value: u64,
 }
 
-#[link(name = "hashmap", kind = "static")]
+#[repr(C)]
+pub struct Meta {
+    pub max: u64,
+    pub min: u64,
+    pub len: u64,
+}
 unsafe extern "C" {
-    fn hm_new(hashmap: *mut Hashmap, path: *const c_char) -> c_int;
-    fn hm_get(
-        hashmap: *mut Hashmap,
-        inputs: *const u64,
-        outputs: *mut SomeU64,
-        length: u64,
-    ) -> c_int;
-    fn hm_write(hashmap: *mut Hashmap, inputs: *const Cell, length: u64) -> c_int;
+    pub fn init(self_: *mut BTree, path: *mut c_char) -> DBTreeError;
+    pub fn bt_request(self_: *mut BTree, req: *mut Request, req_count: usize) -> DBTreeError;
+    pub fn normalize(self_: *mut BTree) -> DBTreeError;
 }
 
-fn error_execution_product(i: i32) -> Error {
-    match i {
-        0 => gerr("Hashmap Error(0): Unexpected success code in error handler"),
-        -1 => gerr("Hashmap Error(-1): General error"),
-        -2 => gerr("Hashmap Error(-2): Memory allocation failed"),
-        -3 => gerr("Hashmap Error(-3): No disk space"),
-        -4 => gerr("Hashmap Error(-4): io_uring queue failed"),
-        -5 => gerr("Hashmap Error(-5): File open failed"),
-        -6 => gerr("Hashmap Error(-6): File create failed"),
-        -7 => gerr("Hashmap Error(-7): File read failed"),
-        -8 => gerr("Hashmap Error(-8): File write failed"),
-        -9 => gerr("Hashmap Error(-9): File sync failed"),
-        -10 => gerr("Hashmap Error(-10): Vector allocation failed"),
-        -11 => gerr("Hashmap Error(-11): iovec allocation failed"),
-        -12 => gerr("Hashmap Error(-12): Fetch hashset allocation failed"),
-        -13 => gerr("Hashmap Error(-13): Fetch to read allocation failed"),
-        -14 => gerr("Hashmap Error(-14): Fetch cell buffer allocation failed"),
-        -15 => gerr("Hashmap Error(-15): Fetch buffer hashmap failed"),
-        -16 => gerr("Hashmap Error(-16): Fetch vector cells failed"),
-        -17 => gerr("Hashmap Error(-17): Fetch allocation failed"),
-        -18 => gerr("Hashmap Error(-18): Rebucket buffer allocation failed"),
-        -19 => gerr("Hashmap Error(-19): Rebucket cells allocation failed"),
-        -20 => gerr("Hashmap Error(-20): Write slot full"),
-        _ => gerr(&format!("Hashmap Error({}): Unknown error code", i)),
-    }
-}
-
-pub struct IndexingHashmap {
-    inner: Hashmap,
-}
-
-impl Drop for IndexingHashmap {
+impl Drop for BTree {
     fn drop(&mut self) {
         unsafe {
-            if !self.inner.array_len.is_null() {
-                libc::free(self.inner.array_len as *mut libc::c_void);
+            if !self.path.is_null() {
+                let _ = CString::from_raw(self.path);
             }
-            if self.inner.file != -1 {
-                libc::close(self.inner.file);
+            if !self.b.is_null() && self.c > 0 {
+                let _ = Vec::from_raw_parts(self.b, self.c as usize, self.c as usize);
             }
-            if !self.inner.path.is_null() {
-                libc::free(self.inner.path as *mut libc::c_void);
-            }
-            if !self.inner.temp.is_null() {
-                libc::free(self.inner.temp as *mut libc::c_void);
+            if self.a >= 0 {
+                let _ = File::from_raw_fd(self.a);
+                self.a = -1;
             }
         }
     }
 }
 
-unsafe impl Send for IndexingHashmap {}
-unsafe impl Sync for IndexingHashmap {}
+unsafe impl Send for BTree {}
+unsafe impl Sync for BTree {}
 
-impl IndexingHashmap {
-    pub fn new(path: String, _kib: u64) -> Result<Self, Error> {
-        let p = format!("{}.hashmap", path);
-        let ptemp = format!("{}.temp", path);
-
-        let c_p = CString::new(p).map_err(|e| gerr(&e.to_string()))?;
-        let c_tp = CString::new(ptemp).map_err(|e| gerr(&e.to_string()))?;
-
-        let path_ptr = c_p.as_ptr();
-        let mut h = Hashmap {
-            file: -1,
-            array_len: null_mut(),
-            bucket_size: 0,
-            len: 0,
-            path: c_p.into_raw(),
-            temp: c_tp.into_raw(),
+impl BTree {
+    pub fn new(path: String) -> Result<Self, Error> {
+        let mut s = BTree {
+            a: 0,
+            b: null_mut(),
+            c: 0,
+            d: 0,
+            path: null_mut(),
         };
-        let execution_product = unsafe { hm_new(&mut h, path_ptr) };
-        match execution_product {
-            x if x >= 0 => Ok(IndexingHashmap { inner: h }),
-            _ => Err(error_execution_product(execution_product)),
+        let path: *mut c_char = CString::from_str(&path.replace("\0", ""))
+            .unwrap()
+            .into_raw();
+        let res = unsafe { init(&mut s, path) };
+        if res == DBTreeError::Success {
+            return Ok(s);
+        } else {
+            return Err(res.tio());
         }
     }
-
-    pub fn get(&mut self, keys: Vec<u64>) -> Result<Vec<u64>, Error> {
-        let length = keys.len() as u64;
-        if length == 0 {
-            return Ok(vec![]);
-        }
-        let mut outputs: Vec<SomeU64> = vec![SomeU64 { exists: 0, value: 0 }; keys.len()];
-        let inputs_ptr = keys.as_ptr();
-        let outputs_ptr = outputs.as_mut_ptr();
-        let execution_product = unsafe {
-            hm_get(
-                &mut self.inner,
-                inputs_ptr,
-                outputs_ptr,
-                length,
-            )
+    pub fn request(&mut self, entries: &mut Vec<Request>) -> Result<(), Error> {
+        let count = entries.len();
+        let r = entries.as_mut_ptr();
+        let b = unsafe { bt_request(self, r, count) };
+        return if b == DBTreeError::Success {
+            Ok(())
+        } else {
+            Err(b.tio())
         };
-        if execution_product < 0 {
-            return Err(error_execution_product(execution_product));
+    }
+    pub fn normalize(&mut self) -> Result<(), Error> {
+        let b = unsafe { normalize(self) };
+        match b {
+            DBTreeError::Success => Ok(()),
+            _ => Err(b.tio()),
         }
-        let out_slice = unsafe { std::slice::from_raw_parts(outputs_ptr, keys.len()) };
-        let mut b = Vec::new();
-        for i in out_slice {
-            if i.exists != 0 {
-                b.push(i.value);
+    }
+}
+
+#[allow(dead_code)]
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DBTreeError {
+    Success = 0,
+    SomethingWentWrong = -1,
+    PermissionDenied = -2,
+    FileDoesNotExist = -3,
+    FileExists = -4,
+    ProcessHaveTooManyOpenFiles = -5,
+    SystemWideLimitOnOpenFiles = -6,
+    TriedOpeningADirectory = -7,
+    InvalidMemory = -8,
+    InvalidArgument = -9,
+    NoSpaceLeft = -10,
+    IoError = -11,
+    InterruptedBySignal = -12,
+    BrokenPipe = -13,
+    FailedToAllocateMemory = -14,
+    ResourceTemporarilyUnavailable = -15,
+    BadFileDescriptor = -16,
+    ArgumentListTooLong = -17,
+    ExecFormatError = -18,
+    NoChildProcesses = -19,
+    AddressAlreadyInUse = -20,
+    AddressNotAvailable = -21,
+    AddressFamilyNotSupported = -22,
+    AlreadyInProgress = -23,
+    BadMessage = -24,
+    InvalidRequestDescriptor = -25,
+    InvalidExchange = -26,
+    BadFileDescriptorState = -27,
+    TooManySymbolicLinks = -29,
+    FileTooLarge = -30,
+    NoSpaceLeftOnDevice = -31,
+    InvalidSeek = -32,
+    ReadOnlyFileSystem = -33,
+    TooManyLinks = -34,
+    NumericResultTooLarge = -36,
+    NoLocksAvailable = -37,
+    FunctionNotImplemented = -38,
+    DirectoryNotEmpty = -39,
+    TooManyLevelsOfSymbolicLinks = -40,
+    UnknownError = -41,
+}
+
+impl DBTreeError {
+    pub fn tio(self) -> io::Error {
+        let kind = match self {
+            DBTreeError::Success => ErrorKind::Other,
+            DBTreeError::SomethingWentWrong => ErrorKind::Other,
+            DBTreeError::PermissionDenied => ErrorKind::PermissionDenied,
+            DBTreeError::FileDoesNotExist => ErrorKind::NotFound,
+            DBTreeError::FileExists => ErrorKind::AlreadyExists,
+            DBTreeError::ProcessHaveTooManyOpenFiles | DBTreeError::SystemWideLimitOnOpenFiles => {
+                ErrorKind::WouldBlock
             }
-        }
-        Ok(b)
-    }
-
-    pub fn write(&mut self, entries: Vec<(bool, u64, u64)>) -> Result<(), Error> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let length = entries.len() as u64;
-        let mut cells: Vec<Cell> = Vec::with_capacity(entries.len());
-        for (exists, key, value) in entries {
-            cells.push(Cell { hk: key, v: if exists{value}else{u64::MAX} });
-        }
-        let cells_ptr = cells.as_ptr();
-        let execution_product = unsafe { hm_write(&mut self.inner, cells_ptr, length) };
-        if execution_product < 0 {
-            return Err(error_execution_product(execution_product));
-        }
-        Ok(())
+            DBTreeError::TriedOpeningADirectory => ErrorKind::Other,
+            DBTreeError::InvalidMemory => ErrorKind::Other,
+            DBTreeError::InvalidArgument
+            | DBTreeError::InvalidRequestDescriptor
+            | DBTreeError::InvalidExchange
+            | DBTreeError::InvalidSeek
+            | DBTreeError::ArgumentListTooLong => ErrorKind::InvalidInput,
+            DBTreeError::NoSpaceLeft | DBTreeError::NoSpaceLeftOnDevice => ErrorKind::WriteZero,
+            DBTreeError::IoError => ErrorKind::Other,
+            DBTreeError::InterruptedBySignal => ErrorKind::Interrupted,
+            DBTreeError::BrokenPipe => ErrorKind::BrokenPipe,
+            DBTreeError::FailedToAllocateMemory => ErrorKind::Other,
+            DBTreeError::ResourceTemporarilyUnavailable | DBTreeError::AlreadyInProgress => {
+                ErrorKind::WouldBlock
+            }
+            DBTreeError::BadFileDescriptor | DBTreeError::BadFileDescriptorState => {
+                ErrorKind::Other
+            }
+            DBTreeError::ExecFormatError | DBTreeError::FunctionNotImplemented => {
+                ErrorKind::Unsupported
+            }
+            DBTreeError::NoChildProcesses => ErrorKind::Other,
+            DBTreeError::AddressAlreadyInUse => ErrorKind::AddrInUse,
+            DBTreeError::AddressNotAvailable => ErrorKind::AddrNotAvailable,
+            DBTreeError::AddressFamilyNotSupported => ErrorKind::AddrNotAvailable,
+            DBTreeError::BadMessage => ErrorKind::InvalidData,
+            DBTreeError::TooManySymbolicLinks | DBTreeError::TooManyLevelsOfSymbolicLinks => {
+                ErrorKind::Other
+            }
+            DBTreeError::FileTooLarge => ErrorKind::Other,
+            DBTreeError::ReadOnlyFileSystem => ErrorKind::PermissionDenied,
+            DBTreeError::TooManyLinks => ErrorKind::Other,
+            DBTreeError::NumericResultTooLarge => ErrorKind::Other,
+            DBTreeError::NoLocksAvailable => ErrorKind::Other,
+            DBTreeError::DirectoryNotEmpty => ErrorKind::Other,
+            DBTreeError::UnknownError => ErrorKind::Other,
+        };
+        Error::new(kind, format!("{:?}", self))
     }
 }

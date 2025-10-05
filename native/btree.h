@@ -40,7 +40,6 @@ typedef struct {
 
 typedef struct {
     i32 file;
-    struct stat status;
     meta *m;
     u32 ml;
     u64 length;

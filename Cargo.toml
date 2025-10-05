@@ -10,10 +10,7 @@ cc = "1.0"
 
 [profile.release]
 opt-level = 3
-lto = true
 codegen-units = 1
-debug = false
-panic = "abort"
 
 [dependencies]
 serde = {version="1.0.219", features=["derive"]}
@@ -33,5 +30,3 @@ chrono = "0.4.41"
 unidecode = "0.3.0"
 sysinfo = "0.37.0"
 libc = "0.2.175"
-[dev-dependencies]
-tempfile = "3.0"
