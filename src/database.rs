@@ -8,9 +8,6 @@ use std::{
     thread,
 };
 
-use serde::{Deserialize, Serialize};
-use sysinfo::System as SysInfo;
-
 use crate::{
     AST, AstCommit, AstCreateRow, AstDeleteContainer, AstDeleteRow, AstEditRow, AstRollback,
     AstSearch, Token,
@@ -23,6 +20,7 @@ use crate::{
 };
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use rand::{Rng, TryRngCore, rngs::OsRng};
+use serde::{Deserialize, Serialize};
 
 /////////////////////////////////////////////////
 /////////     DEFAULT_SETTINGS    ///////////////
@@ -480,9 +478,6 @@ impl Database {
             settings.workers = 1;
             rewrite = true;
         }
-        if settings.ds_cache < 1 {
-            settings.ds_cache = 1;
-        }
         if settings.cache_size < 1 {
             settings.cache_size = 1;
         }
@@ -579,14 +574,6 @@ impl Database {
                 )?;
                 self.container.insert(structure.name, c);
                 self.save_containers().unwrap();
-                let s = SysInfo::new();
-                let ram = s.total_memory();
-                for i in self.container.values() {
-                    i.lock().unwrap().ds_cache.lock().unwrap().capacity(
-                        (ram * (self.settings.ds_cache as u64) / 100)
-                            .saturating_div(self.containers.len() as u64),
-                    );
-                }
             }
             AST::CreateRow(structure) => {
                 if DEBUG {
