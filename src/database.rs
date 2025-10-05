@@ -86,8 +86,6 @@ struct Settings {
     workers: u32,
     vacuum: Vec<VacuumSpec>,
     cache_size: u64,
-    ds_cache: u32,
-    operation_memory: u64,
 }
 
 const SECRET_KEY_PATH: &str = "TytoDB/.secret";
@@ -480,10 +478,6 @@ impl Database {
                 "Failed to load settings, rewriting.\nERROR: \"workers\" cannot be lower than zero."
             );
             settings.workers = 1;
-            rewrite = true;
-        }
-        if settings.ds_cache > 100 {
-            settings.ds_cache = 15;
             rewrite = true;
         }
         if settings.ds_cache < 1 {
