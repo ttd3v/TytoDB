@@ -47,7 +47,7 @@ typedef struct {
 } BTree;
 
 typedef struct {
-    usize method;
+    u64 method;
     u64 key;
     u64 value;
 } Request;
@@ -121,7 +121,7 @@ enum ERROR {
 i32 handle_err(i32 f);
 i32 load_metadata(BTree *self);
 i32 extend(BTree *self, u64 growth_count);
-i32 create(BTree *self, char* path);
+i32 create(BTree *self);
 i32 init(BTree *self, char* path);
 int cmp_request_method_asc(const void *a, const void *b);
 int cmp_cell_asc(const void *a, const void *b);

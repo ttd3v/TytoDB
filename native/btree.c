@@ -18,7 +18,7 @@
 #include <sys/uio.h>
 #include "btree.h"
 #define ELEMENTS_PER_VECTOR 256
-#define GROWTH_OVERHEAD 10
+#define GROWTH_OVERHEAD 20
 
 static inline void sfree(void *ptr){
     free(ptr);
@@ -99,14 +99,21 @@ i32 load_metadata(BTree *self){
 }
 i32 extend(BTree *self, u64 growth_count){
     i32 code = 0;
-    unsigned char empty[VECTOR_SIZE] = {0};
+    Cell empty[ELEMENTS_PER_VECTOR];
+    memset(empty, 0xFF, sizeof(empty));
+
     ////printf("DEBUG: growth_count -> %lu\n",growth_count); 
-    meta* new_metadata = calloc((self->ml+growth_count),sizeof(meta));
+    meta* new_metadata = malloc((self->ml+growth_count)*sizeof(meta));
     if(!new_metadata){
         errno = ENOMEM;
         return handle_err(-1);
     }
     memcpy(new_metadata, self->m, self->ml*sizeof(meta));
+    for (u32 i = self->ml; i < self->ml + growth_count; i++) {
+        new_metadata[i].min = UINT64_MAX;
+        new_metadata[i].max = 0;
+        new_metadata[i].len = 0;
+    }
     free(self->m);
     self->m = new_metadata;
     {
@@ -137,21 +144,32 @@ i32 extend(BTree *self, u64 growth_count){
     return handle_err(fsync(self->file));
 }
 
-i32 create(BTree *self,char* path){
-    int f = open(path, O_RDWR | O_CREAT,0644);
+#define DG "\x1b[34m[DEBUG]\x1b[0m"
+i32 create(BTree *self){
+    printf(DG" create() called, path: %s\n", self->path);
+    int f = open(self->path, O_RDWR | O_CREAT,0644);
+    printf(DG" create: open() returned: %d, errno: %d\n", f, errno);
     if (f < 0){
         return handle_err(f);
     }
     u32 len = 0;
     i32 code = handle_err(pwrite(f, &len, sizeof(len), 0));
-    if(code < 0){return code;}
+    printf(DG" create: pwrite returned: %d\n", code);
+    if(code < 0){
+        close(f); 
+        return code;
+    } 
     self->file = f;
     self->ml = len;
     self->length = len;
     self->m = NULL;
     
-    if(extend(self, GROWTH_OVERHEAD) < 0){
-        return handle_err(-1);
+    i32 r = extend(self, GROWTH_OVERHEAD);
+    printf(DG" create: extend returned: %d\n", r); 
+    if (r < 0){
+        close(f);
+        self->file = -1; 
+        return r; 
     }
     
     return 0;
@@ -159,18 +177,20 @@ i32 create(BTree *self,char* path){
 
 i32 init(BTree *self,char* path){ 
     self->path = path;
+    printf(DG" init() called with path: %s\n", path);
+
     i32 f = open(path, O_RDWR);
+
     if(f < 0){
         f = handle_err(f);
-        if(f != FILE_DOES_NOT_EXISTS){
-            return f;
+        if(f == FILE_DOES_NOT_EXISTS){
+            return create(self);
         }else{
-            return create(self,path);
+            return f;
         }
     }
     self->file = f;
-    load_metadata(self);
-    return 0;
+    return load_metadata(self);
 }
 
 int cmp_request_method_asc(const void *a, const void *b) {
@@ -184,6 +204,11 @@ int cmp_cell_asc(const void *a, const void *b) {
     const Cell *rb = b;
     return (ra->key > rb->key) - (ra->key < rb->key);
 }
+int cmp_u64_asc(const void *a, const void *b) {
+    const u64 *ra = a;
+    const u64 *rb = b;
+    return (ra > rb) - (ra < rb);
+}
 
 #define DEBUG_START //printf("HEARTBEATS == ");
 #define DEBUG_PRINT //printf("💖 %lu\n",++DEBUG_STEP_COUNTER);
@@ -192,11 +217,10 @@ int cmp_cell_asc(const void *a, const void *b) {
 i32 bt_request(BTree *self,Request *req,usize req_count){
     DEBUG_S
     DEBUG_START
-    //printf("bt_request\n");
     hashset vectors = {0};
     usize __write_ops__ = 0;
-    usize increase = 0;
-    usize decrease = 0;
+
+
 
     for(usize j = 0; j < req_count; j++){
         if(req[j].method == RQ_WRITE){
@@ -210,8 +234,8 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     
     
     if(self->length+__write_ops__ >= self->ml*ELEMENTS_PER_VECTOR){
-        u64 growth_increase = GROWTH_OVERHEAD + ( (__write_ops__/ELEMENTS_PER_VECTOR) +1);
-        if(extend(self, growth_increase) < 0){
+        u64 growth_increase = (GROWTH_OVERHEAD + ( self->length+__write_ops__)-self->ml*ELEMENTS_PER_VECTOR)/ELEMENTS_PER_VECTOR;
+        if(extend(self, growth_increase+1) < 0){
             return handle_err(-1);
         };
         ////printf("DEBUG: EXTEND\n");
@@ -225,25 +249,33 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     __builtin_prefetch(req,0,2);
 
     usize proc_wri = 0;
-    for (usize i = self->ml; i-- > 0;){
-        ////printf("DEBUG: ml i %lu\n",i);
+    
+    for (usize i = 0; i < self->ml; i++){
         meta me = self->m[i];
-        ////printf("DEBUG: me-> %lu, %lu, %lu\n",me.len,me.min,me.max);
+        printf(DG"\tmeta[%lu];\tlen(%lu)\tmax(%lu)\tmin(%lu)\n",i,me.len, me.max, me.min);
+    
+        if (me.len > 0) {
+            for(usize j = 0; j < req_count; j++) {
+            Request r = req[j];
+                if(r.key >= me.min && r.key <= me.max){
+                    hashset_push(&vectors, i*VECTOR_SIZE);
+                    break;
+                }
+            }
+        }
+    
         if (me.len < ELEMENTS_PER_VECTOR && proc_wri < __write_ops__) {
             hashset_push(&vectors, i*VECTOR_SIZE);
             proc_wri += ELEMENTS_PER_VECTOR - me.len;
-            ////printf("DEBUG: proc_wri->%lu\n",proc_wri);
-            continue;
-        }
-        for(usize j = 0; j < req_count; j++) {
-            Request r = req[j];
-            if(r.key >= me.min && r.key <= me.max){
-                hashset_push(&vectors, i*VECTOR_SIZE);
-                break;
-            }
         }
     }
     
+    if(vectors.length == 0){
+        printf(DG": \"vectors\" ended up being zero.\n");
+        hashset_destroy(&vectors);
+        return 0;
+    };
+
     DEBUG_PRINT // 2
     disk_fetch *instance = malloc(sizeof(disk_fetch)*vectors.length);
     if(!instance){
@@ -255,6 +287,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     {
         struct io_uring ring;
         if(io_uring_queue_init(length, &ring, 0) < 0){
+            free(instance);
             return handle_err(-1);
         };
         usize dflen = 0;
@@ -284,7 +317,6 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     u64* to_proc = malloc(req_count*sizeof(u64));
     u64 to_procl = req_count;
 
-    #define DELETE_PROC to_proc[j] = to_proc[--to_procl];
 
     if(!to_proc){
         free(instance);
@@ -295,64 +327,97 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     for(usize i = 0; i<req_count;i++){
         to_proc[i] = i;
     }
-    DEBUG_PRINT // 4
+    DEBUG_PRINT; // 4
+
     {
+        vector vec = {0};
+        if (vec_wc(&vec,sizeof(u64),req_count) < 0){
+            free(to_proc);
+            free(instance);
+            return handle_err(-1);
+        }
+        printf(DG"container count: %lu\n", length);
         for(usize f = 0; (f < length && to_procl>0); f++){
             disk_fetch *container = &instance[f];
             u8 changed = 0; 
             ////printf("DEBUG: + container.length -> %lu\n",container->length);
-            u8 recheck = 0;
-            for(usize i = 0; i<container->length;){
+            size_t jk = 0;
+            for(usize i = 0; i<ELEMENTS_PER_VECTOR;i++){
                 Cell *c = &container->vector[i];
-                for(usize j=0;j<to_procl;j++){
-                    u64 v = to_proc[j];
-                    Request rq = req[v];
-                    if(rq.key == c->key){
-                        if(rq.method == RQ_READ){
-                            req[v].value = c->value;
-                            DELETE_PROC
-                            ;continue;
-                        }
-                        if(rq.method == RQ_DELETE){
-                            c->key = container->vector[container->length-1].key;
-                            c->value = container->vector[container->length-1].value;
-                            container->length--;
-                            changed = 255;
-                            decrease++;
-                            recheck = 255;
-                            DELETE_PROC  
-                            ;break;
-                        }
+                for(size_t j = jk; j < to_procl; j++){
+                    Request *rq = &req[to_proc[j]];
+                    if (rq->method == RQ_WRITE && c->key == UINT64_MAX){
+                        c->key = rq->key;
+                        c->value = rq->value;
+                        self->length ++;
+                        container->length ++;
+                        changed = 255;
+                        if (vec_push(&vec,(unsigned char*)(&j)) < 0){ 
+                            free(to_proc);
+                            free(instance);
+                            vec_destroy(&vec);
+                            return handle_err(-1);
+                        };
+                        jk++;
+                        break;
                     }
                     
-                }
-                if (recheck == 255){recheck = 0;}else{i++;};
-            }
-            if (container->length < ELEMENTS_PER_VECTOR){
-                for(usize j = 0; j < to_procl && container->length < ELEMENTS_PER_VECTOR; j++){
-                    u64 v = to_proc[j];
-                    Request rq = req[v];
-                    if(rq.method == RQ_WRITE){
-                        container->vector[container->length] = (Cell){rq.key,rq.value};
-                        container->length++;
-                        increase++;
-                        changed=255;
-                        DELETE_PROC 
-                        ;continue;
+                    if(rq->method == RQ_READ && c->key == rq->key){
+                        req[to_proc[j]].value = c->value;
+                        if (vec_push(&vec,(unsigned char*)(&j)) < 0){ 
+                            free(to_proc);
+                            free(instance);
+                            vec_destroy(&vec);
+                            return handle_err(-1);
+                        };
+                        jk++;
+                        break;
                     }
-                }
+                    // <debug>
+                    if(req->method == RQ_READ){
+                        printf(DG"cell match(%i) key(%lu) value(%lu)\n",rq->key==c->key,rq->key,rq->value);
+                    }
+                    // <debug\>
+                    if(rq->method == RQ_DELETE && c->key == rq->key){
+                        container->length--;
+                        self->length--;
+                        c->key = UINT64_MAX;
+                        c->value = UINT64_MAX;
+                        changed = 255;
+                        if (vec_push(&vec,(unsigned char*)(&j)) < 0){ 
+                            free(to_proc);
+                            free(instance);
+                            vec_destroy(&vec);
+                            return handle_err(-1);
+                        };
+                        jk++;
+                        break;
+                    }
+                } 
+                
             }
+            to_procl -= vec.len > to_procl ? to_procl: vec.len;
+            while(vec.len > 0){
+                u64 idx = (u64)(vec.buffer)[vec.len-1];
+                to_proc[idx] = UINT64_MAX;
+                vec_remove(&vec, vec.len-1);
+            }
+            qsort(to_proc, req_count, sizeof(u64), cmp_u64_asc); 
+            
+            
             if(changed==255){
                 vec_push(&mutation, &f);
                 self->m[container->pointer/VECTOR_SIZE].len = container->length;
             } 
             ////printf("DEBUG: - container.length -> %lu\n",container->length);
         }
+        vec_destroy(&vec);
     }
+    printf(DG": %lu\n",to_procl);
     free(to_proc);
     DEBUG_PRINT
     struct io_uring ring;
-    if(io_uring_queue_init(mutation.len+1, &ring, 0) < 0){
+    if(io_uring_queue_init(mutation.len+2, &ring, 0) < 0){
         sfree(mutation.buffer);
         sfree(instance);
         return handle_err(-1);
@@ -366,8 +431,8 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             memset((k->vector)+k->length, 255, (ELEMENTS_PER_VECTOR-k->length)*sizeof(Cell));
         }
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ring);
-        self->m[k->pointer/VECTOR_SIZE].max = k->vector[k->length-1].key;
-        self->m[k->pointer/VECTOR_SIZE].min = k->vector[0].key;
+        self->m[k->pointer/VECTOR_SIZE].max = k->length > 0 ? k->vector[k->length-1].key : 0;
+        self->m[k->pointer/VECTOR_SIZE].min = k->length > 0 ? k->vector[0].key : UINT64_MAX;
         io_uring_prep_write(sqe, self->file, k->vector, VECTOR_SIZE, k->pointer);
     }
     DEBUG_PRINT
@@ -386,16 +451,16 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     
     struct io_uring_sqe *meta_sqe = io_uring_get_sqe(&ring);
     io_uring_prep_write(meta_sqe, self->file, memory, sizeof(u32)+mlc, VECTOR_SIZE*self->ml);
-    if(io_uring_submit_and_wait(&ring,mutation.len+1)<0){
+
+    struct io_uring_sqe *fsync_sqe = io_uring_get_sqe(&ring);
+    io_uring_prep_fsync(fsync_sqe, self->file, 0);
+    fsync_sqe->flags |= IOSQE_IO_DRAIN;
+    if(io_uring_submit_and_wait(&ring,mutation.len+2)<0){
         sfree(mutation.buffer);
         sfree(instance);
         return handle_err(-1);
     }
     DEBUG_PRINT
-    fsync(self->file); // metadata is important for initializing
-    self->length += increase;
-    self->length -= decrease;
-    //printf("%lu %lu %lu\n",self->length,increase,decrease);
     sfree(mutation.buffer);
     sfree(instance);
     return 0;

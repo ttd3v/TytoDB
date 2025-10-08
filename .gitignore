@@ -3,3 +3,4 @@
 /.idea
 /CMakeLists.txt
 /vgcore*
+/test_res*

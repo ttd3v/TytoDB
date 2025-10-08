@@ -639,7 +639,7 @@ impl Database {
                     SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
-                        file: sa.file.clone(),
+
                         conditions: QueryConditions::from_primitive_conditions(
                             structure.conditions,
                             &col_prop,
@@ -702,7 +702,7 @@ impl Database {
                     SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
-                        file: sa.file.clone(),
+
                         conditions: QueryConditions::from_primitive_conditions(
                             structure.conditions,
                             &col_prop,
@@ -743,7 +743,7 @@ impl Database {
                     SearchArguments {
                         element_size: sa.element_size,
                         header_offset: sa.headers_offset as usize,
-                        file: sa.file.clone(),
+
                         conditions: QueryConditions::from_primitive_conditions(
                             if let Some(a) = structure.conditions {
                                 a

@@ -37,12 +37,12 @@ int batch_write(size_t buffer_size, size_t buffer_length, WriteElement* entries,
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
         if (!sqe) goto clean;
         io_uring_prep_write(sqe, fd, el.pointer, buffer_size, el.offset);
-        sqe->flags |= IOSQE_IO_HARDLINK;
     }
    
     struct io_uring_sqe* sqe = io_uring_get_sqe(&ring);
     if (!sqe) goto clean;
     io_uring_prep_fsync(sqe, fd, IORING_FSYNC_DATASYNC);
+    sqe->flags |= IOSQE_IO_DRAIN;
     io_uring_submit(&ring);
     
     

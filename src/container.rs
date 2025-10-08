@@ -7,7 +7,7 @@ use crate::{
 };
 use bitvec::prelude::*;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::{self, File, OpenOptions},
     hash::{DefaultHasher, Hash, Hasher},
     io::{Error, ErrorKind, Read, Write},
@@ -18,14 +18,10 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-pub const MAX_GRAVEYARD_LENGTH_IN_MEMORY: usize = 1250;
-
-type MvccType = Arc<
-    Mutex<(
-        Vec<(AbsoluteOffset, (MvccState, Vec<AlbaTypes>))>,
-        HashMap<String, (bool, String)>,
-    )>,
->;
+type MvccType = (
+    Vec<(AbsoluteOffset, (MvccState, Vec<AlbaTypes>))>,
+    HashMap<String, (bool, String)>,
+);
 
 #[derive(Debug)]
 pub struct MvccRecord(Arc<Mutex<File>>);
@@ -75,17 +71,17 @@ impl MvccRecord {
 }
 
 pub struct Container {
-    pub file: Arc<Mutex<std::fs::File>>,
+    pub file: File,
     pub element_size: usize,
     pub headers: Vec<(String, AlbaTypes)>,
     pub mvcc: MvccType,
     pub headers_offset: u64,
-    pub graveyard: Arc<Mutex<HashSet<u64>>>,
-    pub index_map: Arc<Mutex<BTree>>,
-    pub mvcc_record: Arc<Mutex<MvccRecord>>,
-    pub ds_cache: Arc<Mutex<BurningMap>>,
+    pub index_map: BTree,
+    pub mvcc_record: MvccRecord,
+    pub ds_cache: BurningMap,
 }
 #[derive(Debug, Copy, Clone)]
+#[allow(dead_code)]
 pub enum MvccState {
     Delete,
     Insert,
@@ -220,59 +216,49 @@ impl Container {
             }
             headers.push((name.to_owned(), value.to_owned()));
         }
-        let regen_hm =
-            !fs::exists(format!("{}index.hashmap", path))? && fs::exists(path.to_string())?;
 
+        let _ = fs::create_dir_all(path);
         println!(
             "{}\n{}",
-            format!("{}index.hashmap", path),
+            format!("{}index.btree", path),
             format!("{}data", path)
         );
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(format!("{}data", path))
-            .unwrap();
+            .open(format!("{}data", path))?;
         let mut hash_header = HashMap::new();
         for i in headers.iter() {
             hash_header.insert(i.0.clone(), i.1.clone());
         }
+        hash_header.shrink_to_fit();
         let container = Arc::new(Mutex::new(Container {
             element_size,
-            mvcc: Arc::new(Mutex::new((Vec::new(), HashMap::new()))),
+            mvcc: (Vec::new(), HashMap::new()),
             headers_offset,
             headers,
-            graveyard: Arc::new(Mutex::new(HashSet::new())),
-            mvcc_record: Arc::new(Mutex::new(MvccRecord::new(format!("{}.mr", path))?)),
-            index_map: Arc::new(Mutex::new(BTree::new(format!(
-                "{}btree",
-                path.to_string()
-            ))?)),
-            file: Arc::new(Mutex::new(file)),
-            ds_cache: Arc::new(Mutex::new({
+            mvcc_record: MvccRecord::new(format!("{}.mr", path))?,
+            index_map: BTree::new(format!("{}index.btree", path.to_string()))?,
+
+            file,
+            ds_cache: {
                 let mut b = BurningMap::new();
                 b.capacity(ds_cache_size);
                 b
-            })),
+            },
         }));
-        let mut c = container.lock().unwrap();
-        c.load_mvcc()?;
-        if regen_hm {
-            c.build_btree()?
-        };
-        drop(c);
         Ok(container)
     }
 }
 impl Container {
     pub fn build_btree(&mut self) -> Result<(), Error> {
-        let file = self.file.lock().unwrap();
         let element_size = self.element_size;
         let headers_offset = self.headers_offset;
-        let mut b = self.index_map.lock().unwrap();
         let empty = vec![255u8; element_size];
 
-        let total_rows = (file.metadata()?.len() as usize - headers_offset as usize) / element_size;
+        let total_rows =
+            (self.file.metadata()?.len() as usize - headers_offset as usize) / element_size;
         let rows_per_it = ((4096 * 5) / element_size).max(1);
         let chunk_size = (rows_per_it * element_size).min(total_rows * element_size);
         let count_its = (total_rows / rows_per_it).max(1);
@@ -280,7 +266,7 @@ impl Container {
         for i in 0..count_its {
             let mut buffer = vec![0u8; chunk_size];
             let file_offset = headers_offset + (i * chunk_size) as u64;
-            file.read_exact_at(&mut buffer, file_offset).unwrap();
+            self.file.read_exact_at(&mut buffer, file_offset).unwrap();
 
             for (j, row_bin) in buffer.chunks_exact(element_size).enumerate() {
                 let offset_in_file = headers_offset as usize + i * chunk_size + j * element_size;
@@ -295,7 +281,7 @@ impl Container {
                 });
             }
         }
-        b.request(&mut v)?;
+        self.index_map.request(&mut v)?;
         Ok(())
     }
     pub fn column_names(&self) -> Vec<String> {
@@ -372,23 +358,18 @@ const VACCUM_SIZE: u64 = 4194304;
 const MAX_VACUUM_LENGTH: usize = 625000;
 impl Container {
     pub fn get_next_addr(&self) -> Result<u64, Error> {
-        let mv = self.mvcc.lock().unwrap();
-        let m = mv.0.iter().max_by(|a, b| a.0.cmp(&b.0));
-        let size = self.file.lock().unwrap().metadata()?.size();
+        let m = self.mvcc.0.iter().max_by(|a, b| a.0.cmp(&b.0));
+        let size = self.file.metadata()?.size();
         if let Some(m) = m {
             return Ok(m.0 + self.element_size as u64);
         }
         Ok(size)
     }
     pub fn vacuum(&mut self) -> Result<(), Error> {
-        self.graveyard.lock().unwrap().clear();
-        let mut mvcc = self.mvcc.lock().unwrap();
-        mvcc.0.clear();
-        mvcc.1.clear();
-
-        let fi = self.file.lock().unwrap();
+        self.mvcc.0.clear();
+        self.mvcc.1.clear();
         let element_size = self.element_size as u64;
-        let length = (fi.metadata()?.size() - self.headers_offset) / element_size;
+        let length = (self.file.metadata()?.size() - self.headers_offset) / element_size;
 
         if length == 0 {
             return Ok(());
@@ -405,7 +386,7 @@ impl Container {
             let offset: u64 = self.headers_offset + (readen * element_size);
             readen += etr;
             let mut buffer = vec![0u8; (element_size * etr) as usize];
-            fi.read_exact_at(&mut buffer, offset)?;
+            self.file.read_exact_at(&mut buffer, offset)?;
             for j in buffer.chunks_exact(self.element_size) {
                 map.push(j != empty)
             }
@@ -439,16 +420,16 @@ impl Container {
                 }
             }
         }
-        let mut indexing = self.index_map.lock().unwrap();
         let mut dead_v = Vec::new();
         for (dead, alive) in pairs {
             let mut buffer = vec![0u8; self.element_size];
             let alive_offset = (alive * element_size) + self.headers_offset;
-            fi.read_exact_at(&mut buffer, alive_offset)?;
+            self.file.read_exact_at(&mut buffer, alive_offset)?;
             let row_pk = self.deserialize_row(&buffer)?[0].clone();
             let dead_offset = (dead * element_size) + self.headers_offset;
-            fi.write_all_at(&buffer, dead_offset)?;
-            fi.write_all_at(&vec![255u8; self.element_size], alive_offset)?;
+            self.file.write_all_at(&buffer, dead_offset)?;
+            self.file
+                .write_all_at(&vec![255u8; self.element_size], alive_offset)?;
             dead_v.push(Request {
                 method: RequestMethods::Write,
                 key: get_index(row_pk),
@@ -457,9 +438,9 @@ impl Container {
             map.swap(dead as usize, alive as usize);
         }
         std::thread::scope(|_| {
-            let _ = fi.sync_all();
+            let _ = self.file.sync_all();
         });
-        indexing.request(&mut dead_v)?;
+        self.index_map.request(&mut dead_v)?;
 
         let mut rows_to_remove = 0u64;
         let mut index = map.len() - 1;
@@ -476,21 +457,20 @@ impl Container {
         }
 
         if rows_to_remove > 0 {
-            let new_len = fi
+            let new_len = self
+                .file
                 .metadata()?
                 .size()
                 .saturating_sub(rows_to_remove * element_size)
                 .max(self.headers_offset);
-            fi.set_len(new_len)?;
-            fi.sync_all()?;
+            self.file.set_len(new_len)?;
+            self.file.sync_all()?;
         }
-        indexing.normalize()?;
+        self.index_map.normalize()?;
         Ok(())
     }
     pub fn load_mvcc(&mut self) -> Result<(), Error> {
-        let mut mvcc_record = self.mvcc_record.lock().unwrap();
-        let b = mvcc_record.yield_()?;
-        let mut mvcc = self.mvcc.lock().unwrap();
+        let b = self.mvcc_record.yield_()?;
         for i in b.chunks_exact(1 + self.element_size) {
             let s = match i[0] {
                 0 => MvccState::Insert,
@@ -503,7 +483,7 @@ impl Container {
                 load[..].copy_from_slice(&i[self.element_size..]);
                 u64::from_le_bytes(load)
             };
-            mvcc.0.push((key, (s, row)));
+            self.mvcc.0.push((key, (s, row)));
         }
         Ok(())
     }
@@ -521,96 +501,104 @@ impl Container {
         });
         b.extend_from_slice(&self.serialize_row(&data)?);
         b.extend_from_slice(&key.to_le_bytes());
-        let mut l = self.mvcc_record.lock().unwrap();
-        l.put(b)?;
+        self.mvcc_record.put(b)?;
         Ok(())
     }
     pub fn push_row(&mut self, data: Vec<AlbaTypes>) -> Result<(), Error> {
-        let mut indexing = self.index_map.lock().unwrap();
         let i = get_index(data[0].clone());
         let mut re = vec![Request {
             method: RequestMethods::Read,
             key: i,
             value: u64::MAX,
         }];
-        indexing.request(&mut re)?;
-        if re[0].value == u64::MAX {
+        self.index_map.request(&mut re).unwrap();
+        if re[0].value != u64::MAX {
             return Err(Error::new(
                 ErrorKind::AddrInUse,
                 "This primary key is in use, they must be unique.",
             ));
         }
-        drop(indexing);
         let ind = self.get_next_addr()?;
-        let mut mvcc_guard = self.mvcc.lock().unwrap();
         //println!("PUSH_ROW - OFFSET : {}",ind);
         let d = data.clone();
-        mvcc_guard.0.push((ind, (MvccState::Insert, data)));
-        mvcc_guard.0.sort_by_key(|f| f.0);
-        drop(mvcc_guard);
+        self.mvcc.0.push((ind, (MvccState::Insert, data)));
+        self.mvcc.0.sort_by_key(|f| f.0);
         let _ = self.record_mvcc(ind, d, MvccState::Insert);
         Ok(())
     }
     pub fn rollback(&mut self) -> Result<(), Error> {
-        let mut mvcc_guard = self.mvcc.lock().unwrap();
-        mvcc_guard.0.clear();
-        mvcc_guard.1.clear();
-        let mut mvcc_rec = self.mvcc_record.lock().unwrap();
-        let _ = mvcc_rec.clear();
-        drop(mvcc_guard);
+        self.mvcc.0.clear();
+        self.mvcc.1.clear();
+        self.mvcc_record.clear()?;
         Ok(())
     }
     pub fn commit(&mut self) -> Result<(), Error> {
-        let mut mvcc = self.mvcc.lock().unwrap();
-        let mut dataset_batch = Vec::new();
-        let mut index_batch = Vec::new();
-        let file = self.file.lock().unwrap().as_raw_fd();
+        let mut dataset_batch = Vec::with_capacity(self.mvcc.0.len());
+        let mut index_batch = Vec::with_capacity(self.mvcc.0.len());
+        let file = self.file.as_raw_fd();
         let empty = Arc::new(vec![255u8; self.element_size]);
-        let mut ds = self.ds_cache.lock().unwrap();
-        let mut gy = self.graveyard.lock().unwrap();
-        for i in mvcc.0.iter() {
+        for i in self.mvcc.0.iter() {
             let mut value = i.1.1.clone();
-            if let MvccState::Delete = i.1.0 {
-                dataset_batch.push(WriteElement {
-                    buffer: empty.clone(),
-                    offset: i.0.into(),
-                });
-                let idx = get_index(value[0].clone());
-                index_batch.push(Request {
-                    method: RequestMethods::Delete,
-                    key: idx,
-                    value: i.0,
-                });
-                ds.deplete(i.0);
-                gy.insert(i.0);
-                continue;
-            }
-            if let MvccState::Insert = i.1.0 {
-                into_schema(&mut value, &self.columns())?;
-                let ink = self.serialize_row(&value)?;
-                dataset_batch.push(WriteElement {
-                    buffer: ink.clone().into(),
-                    offset: i.0.into(),
-                });
-                gy.remove(&i.0);
-                let idx = get_index(value[0].clone());
-                index_batch.push(Request {
-                    method: RequestMethods::Write,
-                    key: idx,
-                    value: i.0,
-                });
-                ds.add(i.0, ink);
+            match i.1.0 {
+                MvccState::Delete => {
+                    dataset_batch.push(WriteElement {
+                        buffer: empty.clone(),
+                        offset: i.0.into(),
+                    });
+                    let idx = get_index(value[0].clone());
+                    index_batch.push(Request {
+                        method: RequestMethods::Delete,
+                        key: idx,
+                        value: i.0,
+                    });
+                }
+                MvccState::Insert => {
+                    into_schema(&mut value, &self.columns())?;
+                    let ink = self.serialize_row(&value)?;
+                    dataset_batch.push(WriteElement {
+                        buffer: ink.clone().into(),
+                        offset: i.0.into(),
+                    });
+                    let idx = get_index(value[0].clone());
+                    index_batch.push(Request {
+                        method: RequestMethods::Write,
+                        key: idx,
+                        value: i.0,
+                    });
+                }
+                MvccState::Edit => {
+                    into_schema(&mut value, &self.columns())?;
+                    let ink = self.serialize_row(&value)?;
+                    dataset_batch.push(WriteElement {
+                        buffer: ink.into(),
+                        offset: i.0.into(),
+                    });
+                }
             }
         }
-        let _ = batch_write_data(
-            self.element_size,
-            dataset_batch.len(),
-            dataset_batch.as_slice(),
-            file,
-        )?;
-        self.index_map.lock().unwrap().request(&mut index_batch)?;
-        mvcc.0.clear();
-        mvcc.0.shrink_to_fit();
+        if !dataset_batch.is_empty() {
+            batch_write_data(
+                self.element_size,
+                dataset_batch.len(),
+                dataset_batch.as_slice(),
+                file,
+            )?;
+        }
+
+        if !index_batch.is_empty() {
+            println!("[RUST DEBUG] Sending {} index requests", index_batch.len());
+            for req in index_batch.iter() {
+                println!(
+                    "  Request: method={:?}, key={}, value={}",
+                    req.method, req.key, req.value
+                );
+            }
+
+            self.index_map.request(&mut index_batch)?;
+        }
+
+        self.mvcc.0.clear();
+        self.mvcc.0.shrink_to_fit();
         Ok(())
     }
     pub fn columns(&self) -> Vec<AlbaTypes> {

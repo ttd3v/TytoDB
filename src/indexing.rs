@@ -8,6 +8,7 @@ use std::{
 };
 
 #[repr(C)]
+#[derive(Debug)]
 pub struct BTree {
     a: i32,
     b: *mut Meta,
@@ -16,13 +17,15 @@ pub struct BTree {
     path: *mut c_char,
 }
 
-#[repr(i32)]
+#[derive(Debug)]
+#[repr(u64)]
 pub enum RequestMethods {
     Read = 1,
     Write = 2,
     Delete = 0,
 }
 #[repr(C)]
+#[derive(Debug)]
 pub struct Request {
     pub method: RequestMethods,
     pub key: u64,
@@ -61,6 +64,8 @@ impl Drop for BTree {
 unsafe impl Send for BTree {}
 unsafe impl Sync for BTree {}
 
+const DEBUG: &str = "\x1b[38;5;208m[DEBUG]\x1b[0m";
+
 impl BTree {
     pub fn new(path: String) -> Result<Self, Error> {
         let mut s = BTree {
@@ -70,23 +75,32 @@ impl BTree {
             d: 0,
             path: null_mut(),
         };
-        let path: *mut c_char = CString::from_str(&path.replace("\0", ""))
-            .unwrap()
-            .into_raw();
-        let res = unsafe { init(&mut s, path) };
+        let c_path = CString::from_str(&path.replace("\0", "")).unwrap();
+        let path_ptr = c_path.into_raw();
+
+        let res = unsafe { init(&mut s, path_ptr) };
         if res == DBTreeError::Success {
             return Ok(s);
         } else {
+            unsafe {
+                let _ = CString::from_raw(path_ptr);
+            }
             return Err(res.tio());
         }
     }
     pub fn request(&mut self, entries: &mut Vec<Request>) -> Result<(), Error> {
         let count = entries.len();
         let r = entries.as_mut_ptr();
+        println!("{}: {:?}", DEBUG, entries);
+        println!("{}: {:?}", DEBUG, self);
+
         let b = unsafe { bt_request(self, r, count) };
+        println!("{}: {:?}", DEBUG, b);
+
         return if b == DBTreeError::Success {
             Ok(())
         } else {
+            eprintln!("{}: {:?}", DEBUG, b.tio());
             Err(b.tio())
         };
     }

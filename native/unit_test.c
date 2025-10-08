@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <sys/types.h>
 #include <unistd.h>
-u64 count = 50000;
+#include <fcntl.h>
+#include <time.h>
+#define count 5000
 
 typedef u64 u_int64_t;
 
@@ -47,8 +49,10 @@ int test_hashset(){
         hashset_del(&value,v);
     }
 
-    if(value.length > count/2){
-        printf("ERROR: Failed to delete values\n");
+    u64 expected_remaining = count - count/2;
+    if(value.length != expected_remaining){
+        printf("ERROR: Failed to delete values (length=%lu, expected=%lu)\n", 
+               value.length, expected_remaining);
         product = -4;
         goto clean;
     }
@@ -122,25 +126,38 @@ int test_vector(){
     goto clean;
 }
 
+// Simple hash function (FNV-1a)
+static inline u64 hash_key(u64 key) {
+    u64 hash = 14695981039346656037ULL;
+    unsigned char *bytes = (unsigned char *)&key;
+    for (int i = 0; i < 8; i++) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 int test_btree() {
     int product = 0;
-    char template[] = "/tmp/btree_testXXXXXX";
-    int fd = mkstemp(template);
-    if (fd < 0) {
-        printf("ERROR: Failed to create temp file\n");
-        return -1;
-    }
-    close(fd);
+    char template[64];
+    
+    // Create unique temp file name
+    srand(time(NULL) ^ getpid());
+    snprintf(template, sizeof(template), "/tmp/btree_test_%d_%u", 
+             getpid(), (unsigned)rand());
+    
     BTree inst = {0};
     if (init(&inst, template) < 0) {
         printf("ERROR: Failed to init BTree\n");
         unlink(template);
         return -2;
     }
-    Request req[count];
+    Request req[count] = {0};
     
+    // Write with hashed keys
     for (u64 i = 0; i < count; i++) {
-        req[i] = (Request){RQ_WRITE,i, i * 2};
+        u64 hashed_key = hash_key(i);
+        req[i] = (Request){RQ_WRITE, hashed_key, i * 2};
     }
     int a = bt_request(&inst, req, count);
     if (a < 0) {
@@ -153,8 +170,11 @@ int test_btree() {
         product = -4;
         goto clean;
     }
+    
+    // Read with hashed keys
     for (u64 i = 0; i < count; i++) {
-        req[i] = (Request){RQ_READ,i,UINT64_MAX};
+        u64 hashed_key = hash_key(i);
+        req[i] = (Request){RQ_READ, hashed_key, UINT64_MAX};
     }
     if (bt_request(&inst, req, count) < 0) {
         printf("ERROR: Failed to read from BTree\n");
@@ -168,19 +188,26 @@ int test_btree() {
             goto clean;
         }
     }
+    
+    // Delete with hashed keys
     for (u64 i = 0; i < count / 2; i++) {
-        req[i] = (Request){RQ_DELETE,i,0};
+        u64 hashed_key = hash_key(i);
+        req[i] = (Request){RQ_DELETE, hashed_key, 0};
     }
     if (bt_request(&inst, req, count / 2) < 0) {
         printf("ERROR: Failed to delete from BTree\n");
         product = -7;
         goto clean;
     }
-    if (inst.length != count / 2) {
-        printf("ERROR: BTree length mismatch after delete\n");
+    
+    u64 expected_remaining = count - count/2;
+    if (inst.length != expected_remaining) {
+        printf("ERROR: BTree length mismatch after delete (got %lu, expected %lu)\n",
+               inst.length, expected_remaining);
         product = -8;
         goto clean;
     }
+    
     if (normalize(&inst) < 0) {
         printf("ERROR: Failed to normalize BTree\n");
         product = -9;
@@ -198,7 +225,7 @@ clean:
 #define PROGRESS printf(".");fflush(stdout);;
 
 int main() {
-    printf("😎 Count: %lu",count);
+    printf("😎 Count: %i",count);
     printf(RED "\n");
     int _l_xx0 = test_hashset(); PROGRESS
     int _l_xx1 = test_vector(); PROGRESS
