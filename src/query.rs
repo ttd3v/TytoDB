@@ -54,7 +54,7 @@ pub fn search(
 
         let mut g = Vec::with_capacity(req.len());
         for i in req {
-            println!("--- {:?}", i);
+            //println!("--- {:?}", i);
             if i.value != u64::MAX {
                 g.push(i.value);
             }
@@ -64,7 +64,7 @@ pub fn search(
             if !lck.ds_cache.get(offset, &mut buff) {
                 lck.file.read_exact_at(&mut buff, offset)?;
             }
-            println!("{}", offset);
+            //println!("{}", offset);
 
             if buff == empty {
                 continue;

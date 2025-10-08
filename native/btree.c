@@ -146,15 +146,15 @@ i32 extend(BTree *self, u64 growth_count){
 
 #define DG "\x1b[34m[DEBUG]\x1b[0m"
 i32 create(BTree *self){
-    printf(DG" create() called, path: %s\n", self->path);
+    //printf(DG" create() called, path: %s\n", self->path);
     int f = open(self->path, O_RDWR | O_CREAT,0644);
-    printf(DG" create: open() returned: %d, errno: %d\n", f, errno);
+    //printf(DG" create: open() returned: %d, errno: %d\n", f, errno);
     if (f < 0){
         return handle_err(f);
     }
     u32 len = 0;
     i32 code = handle_err(pwrite(f, &len, sizeof(len), 0));
-    printf(DG" create: pwrite returned: %d\n", code);
+    //printf(DG" create: pwrite returned: %d\n", code);
     if(code < 0){
         close(f); 
         return code;
@@ -165,7 +165,7 @@ i32 create(BTree *self){
     self->m = NULL;
     
     i32 r = extend(self, GROWTH_OVERHEAD);
-    printf(DG" create: extend returned: %d\n", r); 
+    //printf(DG" create: extend returned: %d\n", r); 
     if (r < 0){
         close(f);
         self->file = -1; 
@@ -177,7 +177,7 @@ i32 create(BTree *self){
 
 i32 init(BTree *self,char* path){ 
     self->path = path;
-    printf(DG" init() called with path: %s\n", path);
+    //printf(DG" init() called with path: %s\n", path);
 
     i32 f = open(path, O_RDWR);
 
@@ -252,7 +252,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     
     for (usize i = 0; i < self->ml; i++){
         meta me = self->m[i];
-        printf(DG"\tmeta[%lu];\tlen(%lu)\tmax(%lu)\tmin(%lu)\n",i,me.len, me.max, me.min);
+        //printf(DG"\tmeta[%lu];\tlen(%lu)\tmax(%lu)\tmin(%lu)\n",i,me.len, me.max, me.min);
     
         if (me.len > 0) {
             for(usize j = 0; j < req_count; j++) {
@@ -271,7 +271,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
     }
     
     if(vectors.length == 0){
-        printf(DG": \"vectors\" ended up being zero.\n");
+        //printf(DG": \"vectors\" ended up being zero.\n");
         hashset_destroy(&vectors);
         return 0;
     };
@@ -336,7 +336,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
             free(instance);
             return handle_err(-1);
         }
-        printf(DG"container count: %lu\n", length);
+        //printf(DG"container count: %lu\n", length);
         for(usize f = 0; (f < length && to_procl>0); f++){
             disk_fetch *container = &instance[f];
             u8 changed = 0; 
@@ -375,7 +375,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
                     }
                     // <debug>
                     if(req->method == RQ_READ){
-                        printf(DG"cell match(%i) key(%lu) value(%lu)\n",rq->key==c->key,rq->key,rq->value);
+                        //printf(DG"cell match(%i) key(%lu) value(%lu)\n",rq->key==c->key,rq->key,rq->value);
                     }
                     // <debug\>
                     if(rq->method == RQ_DELETE && c->key == rq->key){
@@ -413,7 +413,7 @@ i32 bt_request(BTree *self,Request *req,usize req_count){
         }
         vec_destroy(&vec);
     }
-    printf(DG": %lu\n",to_procl);
+    //printf(DG": %lu\n",to_procl);
     free(to_proc);
     DEBUG_PRINT
     struct io_uring ring;

@@ -8,67 +8,19 @@ use crate::{
 use bitvec::prelude::*;
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     hash::{DefaultHasher, Hash, Hasher},
-    io::{Error, ErrorKind, Read, Write},
+    io::{Error, ErrorKind},
     os::{
         fd::AsRawFd,
         unix::fs::{FileExt, MetadataExt},
     },
     sync::{Arc, Mutex},
-    thread,
 };
 type MvccType = (
     Vec<(AbsoluteOffset, (MvccState, Vec<AlbaTypes>))>,
     HashMap<String, (bool, String)>,
 );
-
-#[derive(Debug)]
-pub struct MvccRecord(Arc<Mutex<File>>);
-impl MvccRecord {
-    fn new(name: String) -> Result<Self, Error> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .create(!fs::exists(&name)?)
-            .open(name)?;
-        Ok(MvccRecord(Arc::new(Mutex::new(file))))
-    }
-    fn put(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
-        let reference = self.0.clone();
-        let _ = thread::spawn(move || {
-            let mut bibi = reference.lock().unwrap();
-            let e0 = bibi.write_all(&bytes);
-            let e1 = bibi.sync_all();
-            if let Err(e) = e0 {
-                eprintln!("ERROR{:?}", e)
-            };
-            if let Err(e) = e1 {
-                eprintln!("ERROR {:?}", e)
-            };
-        });
-        Ok(())
-    }
-    fn yield_(&mut self) -> Result<Vec<u8>, Error> {
-        let mut buffer = Vec::new();
-        self.0.lock().unwrap().read_to_end(&mut buffer)?;
-        Ok(buffer)
-    }
-    fn clear(&mut self) -> Result<(), Error> {
-        self.0.lock().unwrap().set_len(0)?;
-        self.sync()?;
-        Ok(())
-    }
-    fn sync(&mut self) -> Result<(), Error> {
-        let reference = self.0.clone();
-        thread::spawn(move || {
-            let n = reference.lock().unwrap();
-            let _ = n.sync_all();
-        });
-        Ok(())
-    }
-}
 
 pub struct Container {
     pub file: File,
@@ -77,7 +29,6 @@ pub struct Container {
     pub mvcc: MvccType,
     pub headers_offset: u64,
     pub index_map: BTree,
-    pub mvcc_record: MvccRecord,
     pub ds_cache: BurningMap,
 }
 #[derive(Debug, Copy, Clone)]
@@ -218,11 +169,6 @@ impl Container {
         }
 
         let _ = fs::create_dir_all(path);
-        println!(
-            "{}\n{}",
-            format!("{}index.btree", path),
-            format!("{}data", path)
-        );
 
         let file = std::fs::OpenOptions::new()
             .read(true)
@@ -238,7 +184,6 @@ impl Container {
             mvcc: (Vec::new(), HashMap::new()),
             headers_offset,
             headers,
-            mvcc_record: MvccRecord::new(format!("{}.mr", path))?,
             index_map: BTree::new(format!("{}index.btree", path.to_string()))?,
 
             file,
@@ -252,7 +197,7 @@ impl Container {
     }
 }
 impl Container {
-    pub fn build_btree(&mut self) -> Result<(), Error> {
+    /*pub fn build_btree(&mut self) -> Result<(), Error> {
         let element_size = self.element_size;
         let headers_offset = self.headers_offset;
         let empty = vec![255u8; element_size];
@@ -283,7 +228,7 @@ impl Container {
         }
         self.index_map.request(&mut v)?;
         Ok(())
-    }
+    }*/
     pub fn column_names(&self) -> Vec<String> {
         self.headers.iter().map(|v| v.0.to_string()).collect()
     }
@@ -437,9 +382,6 @@ impl Container {
             });
             map.swap(dead as usize, alive as usize);
         }
-        std::thread::scope(|_| {
-            let _ = self.file.sync_all();
-        });
         self.index_map.request(&mut dead_v)?;
 
         let mut rows_to_remove = 0u64;
@@ -469,41 +411,6 @@ impl Container {
         self.index_map.normalize()?;
         Ok(())
     }
-    pub fn load_mvcc(&mut self) -> Result<(), Error> {
-        let b = self.mvcc_record.yield_()?;
-        for i in b.chunks_exact(1 + self.element_size) {
-            let s = match i[0] {
-                0 => MvccState::Insert,
-                1 => MvccState::Edit,
-                _ => MvccState::Delete,
-            };
-            let row = self.deserialize_row(&i[1..self.element_size])?;
-            let key = {
-                let mut load = [0u8; 8];
-                load[..].copy_from_slice(&i[self.element_size..]);
-                u64::from_le_bytes(load)
-            };
-            self.mvcc.0.push((key, (s, row)));
-        }
-        Ok(())
-    }
-    pub fn record_mvcc(
-        &mut self,
-        key: u64,
-        data: Vec<AlbaTypes>,
-        state: MvccState,
-    ) -> Result<(), Error> {
-        let mut b = Vec::new();
-        b.push(match state {
-            MvccState::Delete => 2,
-            MvccState::Insert => 0,
-            MvccState::Edit => 1,
-        });
-        b.extend_from_slice(&self.serialize_row(&data)?);
-        b.extend_from_slice(&key.to_le_bytes());
-        self.mvcc_record.put(b)?;
-        Ok(())
-    }
     pub fn push_row(&mut self, data: Vec<AlbaTypes>) -> Result<(), Error> {
         let i = get_index(data[0].clone());
         let mut re = vec![Request {
@@ -520,16 +427,13 @@ impl Container {
         }
         let ind = self.get_next_addr()?;
         //println!("PUSH_ROW - OFFSET : {}",ind);
-        let d = data.clone();
         self.mvcc.0.push((ind, (MvccState::Insert, data)));
         self.mvcc.0.sort_by_key(|f| f.0);
-        let _ = self.record_mvcc(ind, d, MvccState::Insert);
         Ok(())
     }
     pub fn rollback(&mut self) -> Result<(), Error> {
         self.mvcc.0.clear();
         self.mvcc.1.clear();
-        self.mvcc_record.clear()?;
         Ok(())
     }
     pub fn commit(&mut self) -> Result<(), Error> {
@@ -586,14 +490,6 @@ impl Container {
         }
 
         if !index_batch.is_empty() {
-            println!("[RUST DEBUG] Sending {} index requests", index_batch.len());
-            for req in index_batch.iter() {
-                println!(
-                    "  Request: method={:?}, key={}, value={}",
-                    req.method, req.key, req.value
-                );
-            }
-
             self.index_map.request(&mut index_batch)?;
         }
 

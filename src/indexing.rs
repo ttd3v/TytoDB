@@ -91,11 +91,11 @@ impl BTree {
     pub fn request(&mut self, entries: &mut Vec<Request>) -> Result<(), Error> {
         let count = entries.len();
         let r = entries.as_mut_ptr();
-        println!("{}: {:?}", DEBUG, entries);
-        println!("{}: {:?}", DEBUG, self);
+        //println!("{}: {:?}", DEBUG, entries);
+        //println!("{}: {:?}", DEBUG, self);
 
         let b = unsafe { bt_request(self, r, count) };
-        println!("{}: {:?}", DEBUG, b);
+        //println!("{}: {:?}", DEBUG, b);
 
         return if b == DBTreeError::Success {
             Ok(())
