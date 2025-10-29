@@ -1,30 +1,35 @@
 # TytoDB
-A columnar database, focused on being both fast and ACID-compliant.
+A primitive columnar database
 
-## Getting started
-To get started, you must download the database using the command below
-```bash
-curl -fsSL https://tytodb.pages.dev/installer.sh | bash
-```
-To use it, you must write commands, queries, or transactions by using connection handlers like the [TytoDB-Rust-Client](<https://github.com/FeatheredSystems/TytoDB-Rust-Client>). To configure the database or manage the program files manually, the files are usually in `~/TytoDB`, since it uses `$HOME/TytoDB` to store its files.
+It is a database mean't to work uppon primitives, the features columnar databases usually have to be implemented by the developer using the tool. The software may be faster than other options because it trades away convenhience for control, and performance. 
 
-### Compatibility
-The database is written in Rust and C, which means that it is portable across processors and systems. However, the program relies on `io_uring`, which means that the kernel must be version 5.1 or newer. If you are on an ARM device or want to compile the program yourself, the C part of the code must have its dependencies available during compilation. I suggest using static links during compilations since it makes the binary more portable across machines.  
+I only suggest you using this project in production, if the installed project is a production-ready-release, you acknowledge that there will be more to maintain, and are okay with the details you might have to handle.
 
-## Features
-- ACID: The database is ACID compliant, ensuring that transaction data is on disk after every commit.
-- Hashmap Indexing: Indexed using an in-disk hashmap, which means that queries with equality involving the primary key will be excellent. However, it tends to be slower on writes if the device is in an HDD, which is not great at scattered operations, regardless of the code optimisations.
-- API-based: The database doesn't have a query language; to communicate with the system, you must use its API.
+I am mentining "details" in a way that remember how low-level is treated, but essentially, you just have to be very schema aware, fathom, and plan the types you're picking since the rows are always fixed sized.
 
+The system may offer benefits, but sincerelly, I think that you shouldn't use it without clear intent, using battle-tested options like Postgres, SQlite, and many other options might be more advisable than this new implementation. The one that maybe just me — The guy who wrote, and a stinky nerd (I'm not one, I promisse), might fully acknowledge.
+
+# Compatibility
+It relies heavily on IO Uring, that said, only linux systems with kernel version 5.1+ can run the program. Although not mandatory, I suggest running it on a x86_64 machine since I wrote the software with this ISA in mind. Which means it might be slightly more efficient in it.
+
+# Security
+The security is user-dependent, it uses FalcoTCP as the networking layer, which means you also rely on it's quirks (pre-shared keys, must manage them well, or you're exposed). Besides networking, the database does not implement disk-encryption, you must handle it yourself. There are some softwares that does it for you.
+
+For vulnerabilities reach me at this email: tytodb@proton.me — Please, state at the email subject/title/header that the mail content cover such a topic.
+
+# Documentation
+It exists, but I ain't linking it here because I am highly unsatisfied with the past versions as it doesn't match the current state of the project. If you want to take a glance at it, look at git history.
+
+The old website is unlinked to this page, but when the next release happens, a new and polished documentation will be published. And linked here, of course.
+
+# Interactions
 ## Contributions
-The project is not accepting contributors for the codebase itself due to curatorial reasons. If you want to help the project improve, provide feedback, perform tests, and benchmarks of your own.
+If you are interested in contributing to the project, or helping it, raise an issue pointing a problem, coherent discussion, a good pull-request, or email me at this address: (tytodb@proton.me).
+## Suggestions
+Send me at this email (tytodb@proton.me), create a discussion, or coherently reach me wherever you prefer.
 
-## Documentation
-The documentation can be found in the following URL [https://tytodb.pages.dev/docs](<https://tytodb.pages.dev/docs>)
+### Personal notes
+This project is meant to be a high-performance database, with good reliability, and exceling at throughput. Yet, claiming those things are compliated, if my code breaks due to a dumb error or what is considered through the claim bounds isn't what I mean, then the claim is shattered. Due to that, expect that the database will be fast, maybe faster than other engines, but I cannot guarantee that. Specially while the project is in development and in early versions. Do not use the project thinking it works, I have no tests yet that can guarantee it is as reliable as SQLite, Postgres, et cetra. They are battle-tested.
+If you use the software in this early stage, thank you, and if possible, strech it, and try to scatter it. That is how robustness grows, I guess.
 
-## Contact
-If you find a bug, security vulnerability, have feedback, or a suggestion,
-You can reach me by sending an email to the address below:
-
-Email: `tytodatabase@gmail.com`
-In case you prefer not to reach out by email and are not trying to submit a security vulnerability report, feel free to create an issue.
+Thanks for reading.
