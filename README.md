@@ -1,3 +1,5 @@
+Archived: I won't use it anymore.
+
 # TytoDB
 A primitive columnar database
 
